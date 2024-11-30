@@ -1,6 +1,6 @@
 .dist
 .doc
-.tests
+# .tests
 .tools
 MANIFEST.MF
 SIGNATURE.RSA

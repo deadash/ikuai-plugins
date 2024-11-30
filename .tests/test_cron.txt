@@ -1,0 +1,2 @@
+# 每5分钟执行一次测试
+*/5 * * * * root /usr/sbin/test_log
