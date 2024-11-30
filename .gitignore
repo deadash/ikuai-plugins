@@ -1,0 +1,6 @@
+.dist
+.doc
+.tests
+.tools
+MANIFEST.MF
+SIGNATURE.RSA
