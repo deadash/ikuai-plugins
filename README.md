@@ -1,3 +1,7 @@
+# sdk
+
+如果需要自己编译程序，参考 [ikuai-sdk](https://github.com/deadash/ikuai-sdk)
+
 # 支持以下功能
 
 1. 支持ssh直接打开, 便于映射文件和修改
