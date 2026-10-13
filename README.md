@@ -200,7 +200,11 @@ usr/ikuai/function/<func_name>   后端接口(#!/bin/bash /etc/ikcommon)
 1. 去掉"使用插件功能需要绑定爱快云平台！"拦截
    (`yunbindstatus = ("" != code ? 2 : 1)` → `yunbindstatus=2`)；
 2. 插件页面目录 `/plugins/docker/` → `/plugins/app/`，不再和 Docker 功能混在一起；
-3. 点开插件后的小标题 `Docker` → `插件`。
+3. 点开插件后的小标题 `Docker` → `插件`；
+4. 顶部"爱快e云APP 掌上办，更方便"云绑定二维码弹框不再弹出
+   (`.tipCloudBind=!0` → `.tipCloudBind=!1`)；
+5. 插件卡片显示元数据里的 `title`(中文名) 而不是文件名
+   (`_s(e.name)` → `_s(e.title||e.name)`，`title` 写在 `www/plugins/<名>/<名>.json` 里)。
    分包是 gzip 静态资源，做法是"解开 → sed → 重新压缩 → 复核后写回"，改完需 **Ctrl+F5 强刷**。
 
 接口约定: `POST /Action/call` `{func_name, action, param}`, 动作 `show` 的动作函数

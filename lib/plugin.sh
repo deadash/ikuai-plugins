@@ -141,7 +141,20 @@ plugin_link() {
 #   <plugin>/function/<func_name>           -> /usr/ikuai/function/<func_name> (后端接口)
 # 用软链而不是拷贝: 卸载时能精确清理, 且根分区重启还原后重建代价更低。
 plugin_web_link() {
-    local dir="$1" item rel target
+    local dir="$1" item rel target base
+    # 未同意《使用条款》时不链接插件的 Web 资源与后端接口(插件管理页只应有"同意入口"),
+    # 并把"同意之前"可能残留的链接撤掉(比如先同意、后又撤销)。
+    if ! plugin_eula_accepted; then
+        for base in "$(P /usr/ikuai/function)" "$(P /usr/ikuai/www/plugins)"; do
+            test -d "$base" || continue
+            find "$base" -maxdepth 4 -type l -print0 2>/dev/null | \
+            while IFS= read -r -d '' item; do
+                case "$(readlink "$item" 2>/dev/null)" in "$dir"/*) rm -f "$item" ;; esac
+            done
+        done
+        plugin_log "未同意使用条款, 暂不链接插件 Web 资源/接口: $(basename "$dir")"
+        return 0
+    fi
     if test -d "$dir/www/plugins"; then
         ( cd "$dir/www" && find plugins -type f -print0 2>/dev/null | \
           while IFS= read -r -d '' item; do
@@ -378,13 +391,10 @@ plugin_web_sync() {
     test -d "$src" || return 0
 
     mkdir -p "$dst" 2>/dev/null
-    # 清理本框架上一次铺的普通文件(同意/未同意之间切换会残留卡片)。
-    # 注意: 只删普通文件, 不能删插件(plugin_web_link)建的软链 —— 它们是别的进程/步骤放的,
-    # 被这里清掉会导致"插件装了但页面上没有卡片/页面"。
-    find "$dst" -mindepth 2 -maxdepth 2 -type f 2>/dev/null | while IFS= read -r f; do rm -f "$f"; done
-    find "$dst/app" -maxdepth 1 -type f 2>/dev/null | while IFS= read -r f; do rm -f "$f"; done
-    # 删掉空掉的卡片目录(里面还有插件软链的目录不会被删)
-    find "$dst" -mindepth 1 -maxdepth 1 -type d -empty 2>/dev/null | while IFS= read -r d; do rmdir "$d" 2>/dev/null; done
+    # 整棵树由本函数负责: 先清空再按"是否已同意条款"重新铺。
+    # 依赖 scripts/03 里的调用顺序 —— 必须先 sync(本函数) 再 plugin_boot(plugin_web_link),
+    # 否则会把插件刚建好的卡片/页面软链一起清掉。
+    rm -rf "$dst"/* 2>/dev/null
 
     if plugin_eula_accepted; then
         for f in "$src"/*/*.json; do
@@ -422,6 +432,8 @@ plugin_web_sync() {
 #      绑定码), 为空即未绑定 -> 1 = 只显示"前往绑定"。本框架插件不读云平台, 直接置 2。
 #   2) 插件页面目录 /plugins/docker/ 改名 /plugins/app/ (避免与 Docker 功能混淆)
 #   3) 点开插件后小标题写死的 "Docker" 文案改成 "插件"
+#   4) 顶部"爱快e云APP 掌上办"云绑定二维码弹框不再弹出(tipCloudBind=!0 -> !1)
+#   5) 插件卡片显示 title 而不是 name(卡片的 name 必须是文件名, 显示不友好)
 # 前端分包是 gzip 静态资源, 做法: 解开 -> sed 改写 -> 重新压缩 -> 复核后写回。
 plugin_web_patch() {
     local dir f tmp patched gz n=0 want_ub want_dir want_title
@@ -441,28 +453,32 @@ plugin_web_patch() {
             rm -f "$tmp" "$patched" "$gz"; continue
         fi
 
-        want_ub=0; want_dir=0; want_title=0; want_bind=0
+        want_ub=0; want_dir=0; want_title=0; want_bind=0; want_label=0
         grep -q 'yunbindstatus=""!=i.code?2:1' "$tmp" 2>/dev/null && want_ub=1
         grep -q 'plugins/docker/' "$tmp" 2>/dev/null && want_dir=1
         grep -q 't\._v("Docker")' "$tmp" 2>/dev/null && want_title=1
         grep -q 'tipCloudBind=!0' "$tmp" 2>/dev/null && want_bind=1
-        if [ "$want_ub" = 0 ] && [ "$want_dir" = 0 ] && [ "$want_title" = 0 ] && [ "$want_bind" = 0 ]; then
+        grep -q '_s(e\.name)' "$tmp" 2>/dev/null && want_label=1
+        if [ "$want_ub" = 0 ] && [ "$want_dir" = 0 ] && [ "$want_title" = 0 ] && \
+           [ "$want_bind" = 0 ] && [ "$want_label" = 0 ]; then
             rm -f "$tmp" "$patched" "$gz"; continue
         fi
 
         sed -e 's|yunbindstatus=""!=i.code?2:1|yunbindstatus=2|g' \
             -e 's|plugins/docker/|plugins/app/|g' \
             -e 's|t\._v("Docker")|t._v("插件")|g' \
-            -e 's|\.tipCloudBind=!0|.tipCloudBind=!1|g' "$tmp" > "$patched"
+            -e 's|\.tipCloudBind=!0|.tipCloudBind=!1|g' \
+            -e 's@_s(e\.name)@_s(e.title||e.name)@g' "$tmp" > "$patched"
 
         if gzip -9 -c < "$patched" > "$gz" 2>/dev/null && \
            { [ "$want_ub" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'yunbindstatus=2'; } && \
            { [ "$want_dir" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'plugins/app/'; } && \
            { [ "$want_title" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 't._v("插件")'; } && \
-           { [ "$want_bind" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'tipCloudBind=!1'; }; then
+           { [ "$want_bind" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'tipCloudBind=!1'; } && \
+           { [ "$want_label" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'e.title||e.name'; }; then
             cat "$gz" > "$f"
             n=$((n + 1))
-            plugin_log "  已打补丁: $(basename "$f") (云平台拦截=$want_ub 目录改名=$want_dir 标题=$want_title 云弹框=$want_bind)"
+            plugin_log "  已打补丁: $(basename "$f") (云拦截=$want_ub 目录=$want_dir 标题=$want_title 云弹框=$want_bind 卡片名=$want_label)"
         else
             plugin_log "  补丁未生效(保留原文件): $(basename "$f")"
         fi

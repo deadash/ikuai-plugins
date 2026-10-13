@@ -386,9 +386,11 @@ showData: function(){
 本框架的插件完全跑在本地(不读云平台)，所以开机时把这段改掉，直接进入插件列表分支:
 
 ```
-yunbindstatus=""!=i.code?2:1   ->   yunbindstatus=2      # 1) 解除云平台绑定拦截
-plugins/docker/                ->   plugins/app/          # 2) 页面目录不再叫 docker
-t._v("Docker")                 ->   t._v("插件")           # 3) 点开插件后的小标题
+yunbindstatus=""!=i.code?2:1   ->   yunbindstatus=2            # 1) 解除云平台绑定拦截
+plugins/docker/                ->   plugins/app/                # 2) 页面目录不再叫 docker
+t._v("Docker")                 ->   t._v("插件")                 # 3) 点开插件后的小标题
+.tipCloudBind=!0               ->   .tipCloudBind=!1            # 4) 顶部"爱快e云APP"二维码弹框不再弹出
+_s(e.name)                     ->   _s(e.title||e.name)         # 5) 卡片显示 title(中文名)而不是文件名
 ```
 
 实现: `lib/plugin.sh:plugin_web_patch()`，由 `scripts/03_enable_plugins.sh` 每个开机调用
@@ -451,6 +453,11 @@ $ curl -s -H 'Accept-Encoding: gzip' http://127.0.0.1:18080/static/js/152.*.js.g
   "查看并同意《使用条款》"(占位卡片 `terms`，页面 `www/plugins/app/terms.html`)。
   点击弹出条款弹框，点"同意并启用"后: 后端 `ikguard eula op=accept` 写入
   `/etc/mnt/plugins/.eula`，立刻重跑 `scripts/03` 把卡片换成正式插件，页面自动刷新。
+* **未同意时整机都不可见**: 不只是不显示卡片 —— `plugin_web_link()` 会跳过并撤销插件的
+  卡片/页面/图标与后端接口链接(`/usr/ikuai/www/plugins/...`、`/usr/ikuai/function/...`)，
+  只保留"同意入口"占位卡片；同意后 `eula op=accept` 会重跑 `scripts/03` 立即恢复。
+  注意 `scripts/03` 里的顺序是 **先 `plugin_web_sync`(清空并重铺) 再 `plugin_boot`(建插件链接)**，
+  否则会把插件刚建好的软链一起清掉。
 * **同意后**: 记录持久保存在 `/etc/mnt/plugins/.eula`，不再询问；
   后端 `plugin` 动作也会校验该文件(未同意直接拒绝，避免绕过前端)。
 * 审计日志里会留痕: `eula.accept` / `eula.reject` 事件。
