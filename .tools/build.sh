@@ -80,3 +80,10 @@ rm -f "$TEMP_GZ" "$JSON_FILE" "$OUTPUT"
 
 echo "构建完成！"
 echo "最终文件: $FINAL_OUTPUT"
+
+# 关键收尾: 本地复刻设备端 plugins.sh:boot() 的三步校验。
+# 不通过 = 设备上整包不会挂载(框架/Web 插件/SSH shell 修改全都不生效), 直接让构建失败。
+if ! bash "$SCRIPT_DIR/verify_package.sh" "$FINAL_OUTPUT"; then
+    echo "!! 该包在设备上不会挂载, 已构建失败(详见上面列出的问题文件)" >&2
+    exit 1
+fi
