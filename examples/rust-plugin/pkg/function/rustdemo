@@ -1,0 +1,67 @@
+#!/bin/bash /etc/ikcommon
+#
+# rustdemo 插件后端接口(前端页面 /plugins/app/rustdemo.html)
+#
+# 动作:
+#   show    TYPE=data   返回数据库统计 + 配置 + 最近采样(JSON)
+#   seting  key=<配置项> value=<值>   写数据库里的配置表(interval/retention/note)
+#   clear   -            清空采样数据
+#   sample  -            立刻采集一条
+#
+# 说明: 真正的存储/采集/裁剪都在 Rust 二进制里完成(redb 嵌入式数据库),
+#       这里只做参数校验与 JSON 转发, 数值/字符串不需要转义(二进制直接吐 JSON)。
+
+ROOT="/etc/mnt/plugins/rustdemo"
+BIN="$ROOT/bin/rustdemo"
+DB="$ROOT/data/rustdemo.redb"
+
+rd() { "$BIN" --db "$DB" "$@"; }
+
+__show_data() {
+    # 键名与变量名必须一致(json_append 的 json 类型是直接展开变量), 前端读 Data.<键>
+    local stats config samples error
+    if [ ! -x "$BIN" ]; then
+        error='插件二进制缺失, 请重新安装插件'
+        json_append __json_result__ error:str
+        return 0
+    fi
+    stats="$(rd stats 2>/dev/null)";   [ -n "$stats" ]   || stats='{}'
+    config="$(rd config 2>/dev/null)"; [ -n "$config" ]  || config='{}'
+    samples="$(rd tail 20 2>/dev/null)"; [ -n "$samples" ] || samples='[]'
+    json_append __json_result__ stats:json
+    json_append __json_result__ config:json
+    json_append __json_result__ samples:json
+}
+
+show()
+{
+    Show __json_result__
+}
+
+seting()
+{
+    local out
+    case "$key" in
+        interval|retention|note) ;;
+        *) echo "不支持的配置项: $key"; return 1 ;;
+    esac
+    # 参数里不允许出现空格, 前端把空格编码成 '+', 这里还原
+    value="$(printf '%s' "$value" | tr '+' ' ')"
+    out="$(rd set "$key" "$value" 2>&1)"
+    case "$out" in
+        *'"ok":true'*) echo "$key 已保存"; return 0 ;;
+        *) echo "${out:-保存失败}"; return 1 ;;
+    esac
+}
+
+clear()
+{
+    rd clear >/dev/null 2>&1 && echo "采样数据已清空"
+    return 0
+}
+
+sample()
+{
+    rd sample >/dev/null 2>&1 && echo "已采集一条记录"
+    return 0
+}

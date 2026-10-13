@@ -1,0 +1,3 @@
+plugin=rustdemo
+version=1.0.0
+comment=Rust 示例插件: 采集系统指标写入 redb 嵌入式数据库, 带 Web 配置页与持久化

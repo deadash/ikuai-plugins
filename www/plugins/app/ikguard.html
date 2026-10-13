@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>安全防护控制台 ikguard</title>
+<style>
+  :root { --bd:#e4e7ed; --fg:#303133; --mut:#909399; --pri:#409eff; --ok:#67c23a; --warn:#e6a23c; --err:#f56c6c; --bg:#f5f7fa; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:14px; font:13px/1.6 "Microsoft YaHei",Helvetica,Arial,sans-serif; color:var(--fg); background:#fff; }
+  h3 { margin:0 0 10px; font-size:15px; }
+  h4 { margin:16px 0 6px; font-size:13px; color:#606266; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; }
+  .card { flex:1 1 150px; min-width:140px; border:1px solid var(--bd); border-radius:6px; padding:10px 12px; background:var(--bg); }
+  .card .k { color:var(--mut); font-size:12px; }
+  .card .v { font-size:16px; font-weight:700; margin-top:2px; word-break:break-all; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); }
+  .tabs { display:flex; gap:6px; margin:16px 0 10px; border-bottom:1px solid var(--bd); }
+  .tabs a { padding:6px 14px; cursor:pointer; border:1px solid transparent; border-bottom:none; border-radius:5px 5px 0 0; color:var(--fg); text-decoration:none; }
+  .tabs a.on { border-color:var(--bd); background:var(--bg); color:var(--pri); font-weight:700; }
+  .pane { display:none; } .pane.on { display:block; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { border-bottom:1px solid var(--bd); padding:6px 8px; text-align:left; font-size:12px; }
+  th { background:var(--bg); color:var(--mut); font-weight:400; }
+  pre { margin:0; padding:10px; background:#1e1e1e; color:#d4d4d4; border-radius:5px; max-height:320px; overflow:auto; font:12px/1.5 Consolas,Monaco,monospace; white-space:pre-wrap; word-break:break-all; }
+  .sw { display:flex; align-items:center; justify-content:space-between; border:1px solid var(--bd); border-radius:5px; padding:8px 12px; margin-bottom:8px; }
+  .sw small { color:var(--mut); display:block; font-weight:400; }
+  button { cursor:pointer; border:1px solid var(--bd); background:#fff; border-radius:4px; padding:5px 12px; font-size:12px; }
+  button:hover { border-color:var(--pri); color:var(--pri); }
+  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
+  button.grey { background:#c8c9cc; border-color:#c8c9cc; color:#fff; font-weight:700; padding:9px 22px; font-size:13px; }
+  button.grey:hover { background:#b1b3b8; border-color:#b1b3b8; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .msg { min-height:18px; font-size:12px; color:var(--mut); }
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; background:var(--bd); color:#fff; }
+  .tip { color:var(--mut); font-size:12px; line-height:1.8; }
+  .tool { border:1px solid var(--bd); border-radius:6px; padding:10px 12px; margin-bottom:10px; }
+  .tool b { font-size:13px; }
+  .tool .tip { margin:4px 0 8px; }
+  .gate { position:fixed; inset:0; background:#f5f7fa; display:flex; align-items:center; justify-content:center; z-index:5; }
+  .gate .in { width:min(520px,92vw); background:#fff; border:1px solid var(--bd); border-radius:10px; padding:26px; text-align:center; }
+  .gate img { width:56px; height:56px; }
+  .gate h2 { font-size:17px; margin:12px 0 6px; }
+  .gate p { color:var(--mut); font-size:12px; line-height:1.9; text-align:left; background:#fafafa; border-radius:6px; padding:12px 14px; }
+  .mask { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:9; }
+  .mask.on { display:flex; }
+  .dlg { width:min(720px,94vw); height:min(620px,88vh); background:#fff; border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
+  .dlg h3 { margin:0; padding:14px 20px; font-size:15px; border-bottom:1px solid var(--bd); background:#fafafa; }
+  .dlg .txt { flex:1; overflow:auto; padding:16px 20px; white-space:pre-wrap; font-size:12.5px; line-height:1.85; color:#4b4f57; }
+  .dlg .ft { padding:12px 20px; border-top:1px solid var(--bd); display:flex; gap:10px; align-items:center; justify-content:flex-end; }
+  .dlg .ft span { margin-right:auto; color:var(--mut); font-size:12px; }
+  input[type=file] { font-size:12px; }
+</style>
+</head>
+<body>
+
+<!-- 未同意使用条款时的拦截层 -->
+<div class="gate" id="gate" style="display:none">
+  <div class="in">
+    <img src="/plugins/app/terms.png" alt="terms">
+    <h2>启用插件功能</h2>
+    <p>本框架与插件由第三方提供，并非爱快官方产品，安装后可能影响设备稳定性与官方支持资格。<br>
+       <b>首次启用前需要阅读并同意《使用条款与免责声明》</b>；同意记录只保存在本设备
+       (<code>/etc/mnt/plugins/.eula</code>)，此后不再重复询问。</p>
+    <button class="grey" id="gate-btn">查看并同意《使用条款》</button>
+    <div class="msg" id="gate-msg"></div>
+  </div>
+</div>
+
+<div id="app">
+<div class="bar">
+  <h3 style="margin:0">安全防护控制台</h3>
+  <span class="tag">ikguard</span>
+  <span style="flex:1"></span>
+  <span class="msg" id="msg"></span>
+  <button onclick="load();loadLogs();">刷新</button>
+</div>
+
+<div class="row" id="cards"></div>
+
+<div class="tabs">
+  <a class="on" data-p="p-status">开关配置</a>
+  <a data-p="p-plugin">插件管理</a>
+  <a data-p="p-log">审计日志</a>
+  <a data-p="p-tool">工具</a>
+</div>
+
+<div class="pane on" id="p-status">
+  <p class="tip">开关保存在 <code>/etc/mnt/boot_args</code>，修改后立即生效并在下次开机继续生效。</p>
+  <div id="switches"></div>
+  <button class="pri" onclick="act('apply')">重新应用后门阻断 + 审计</button>
+</div>
+
+<div class="pane" id="p-plugin">
+  <div class="tip">插件包(<code>zip</code>)会上传到设备并解压安装到 <code>/etc/mnt/plugins/&lt;名称&gt;</code>；
+    根分区每次重启还原，框架开机会自动重新铺开已安装插件。</div>
+  <div style="margin:10px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+    <input type="file" id="zipfile" accept=".zip">
+    <button class="pri" onclick="uploadZip()">上传并安装</button>
+    <button onclick="act('plugin',{op:'scan'})">扫描 /etc/mnt/plugins/*.zip</button>
+    <button onclick="act('plugin',{op:'list'})">列出插件(命令行)</button>
+  </div>
+  <table><thead><tr><th>名称</th><th>版本</th><th>安装时间</th><th>文件数</th><th>操作</th></tr></thead>
+  <tbody id="plugin-rows"><tr><td colspan="5" style="color:#909399">暂无已安装插件</td></tr></tbody></table>
+  <p class="tip">待安装 zip：<span id="pending">无</span>（也可以直接放到设备的 <code>/etc/mnt/plugins/</code> 后重启）</p>
+</div>
+
+<div class="pane" id="p-log">
+  <div style="margin-bottom:8px">
+    <button onclick="loadLogs()">刷新日志</button>
+    <button onclick="act('logclear')">清空审计日志</button>
+  </div>
+  <h4>体检报告 /etc/log/ikguard/report.txt</h4><pre id="log-report">-</pre>
+  <h4>审计事件 audit-*.log</h4><pre id="log-audit">-</pre>
+  <h4>DNS 查询 dns-*.log</h4><pre id="log-dns">-</pre>
+  <h4>进程快照 proc-*.log</h4><pre id="log-proc">-</pre>
+  <h4>出向连接 conn-*.log</h4><pre id="log-conn">-</pre>
+  <h4>开机日志 boot.log</h4><pre id="log-boot">-</pre>
+</div>
+
+<div class="pane" id="p-tool">
+  <div class="tool">
+    <b>云端连通性自检</b>
+    <div class="tip">解析爱快云端域名并尝试建立 TCP 443 连接，用来确认后门封锁是否真的生效。
+      自检需要设备能上外网(WAN 已拨号)；预期结果是"能解析出 IP，但连接失败"。
+      整轮自检大约 20 秒，结果同时写入审计日志(<code>probe.*</code>)。</div>
+    <button class="pri" onclick="runProbe()">开始自检</button>
+  </div>
+  <div class="tool">
+    <b>DNS 查询记录</b>
+    <div class="tip">用 tcpdump 抓取 53 端口的 DNS 请求(自动跳过桥成员网卡，避免重复记录)，落到
+      <code>/etc/log/ikguard/dns-YYYYMMDD.log</code>，用于核对是否有云端域名被解析。
+      审计日志里的 <code>dns.cloud</code> 事件就是对它的汇总。</div>
+    <div class="tip">当前状态：<b id="dns-state">-</b></div>
+    <button onclick="dnsAct('start')">启动 DNS 记录</button>
+    <button onclick="dnsAct('stop')">停止 DNS 记录</button>
+  </div>
+  <h4>最近一次自检结果</h4>
+  <pre id="probe-out">-</pre>
+</div>
+</div>
+
+<div class="mask" id="mask">
+  <div class="dlg">
+    <h3>使用条款与免责声明</h3>
+    <div class="txt" id="eula-txt">正在加载条款…</div>
+    <div class="ft">
+      <span>请完整阅读后点击"同意并启用"</span>
+      <button onclick="closeEula()">取消</button>
+      <button class="pri" id="eula-agree" onclick="acceptEula()" disabled>同意并启用</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var FLAGS = [
+  ['backdoor','后门阻断','阻断/删除爱快云端后门与更新通道(不影响路由/DHCP/NAT)'],
+  ['backdoor_hosts','后门 DNS 屏蔽','把云端域名写入 /etc/hosts 指向 0.0.0.0(可选加固)'],
+  ['audit','审计取证','记录进程启动/DNS 请求/网络连接/封锁命中'],
+  ['sshd','SSH 登录','把控制台账号的 shell 换成 bash, 便于 SSH 维护'],
+  ['plugins','插件系统','开机自动铺开 /etc/mnt/plugins 下的插件'],
+  ['cron','定时任务','铺开 /etc/mnt/cron.d 下的 crontab'],
+  ['shell','程序安装','链接 /etc/mnt/shells 下的程序与配置']
+];
+
+function api(action, param) {
+  return fetch('/Action/call', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ func_name:'ikguard', action:action, param:param||{} })
+  }).then(function(r){ return r.json(); }).then(function(j){
+    if (j.Result !== 30000) { throw new Error(j.ErrMsg || ('错误码 '+j.Result)); }
+    return j.Data || {};
+  });
+}
+function tip(t, cls) {
+  var m = document.getElementById('msg');
+  m.textContent = t || ''; m.className = cls || 'msg';
+  if (t) { setTimeout(function(){ if (m.textContent===t) m.textContent=''; }, 6000); }
+}
+function card(k, v, cls) {
+  return '<div class="card"><div class="k">'+k+'</div><div class="v '+(cls||'')+'">'+v+'</div></div>';
+}
+
+/* ---------------- 使用条款(首次启用) ---------------- */
+var EULA_OK = false;
+function openEula() {
+  document.getElementById('mask').classList.add('on');
+  api('show', {TYPE:'eula'}).then(function(d){
+    var e = (d && d.eula) || {};
+    document.getElementById('eula-txt').textContent = e.text || '（条款内容缺失）';
+    document.getElementById('eula-agree').disabled = false;
+  }).catch(function(err){
+    document.getElementById('eula-txt').textContent = '条款加载失败：' + err.message;
+  });
+}
+function closeEula() { document.getElementById('mask').classList.remove('on'); }
+function acceptEula() {
+  var b = document.getElementById('eula-agree');
+  b.disabled = true; b.textContent = '正在保存…';
+  api('eula', {op:'accept'}).then(function(){
+    closeEula();
+    document.getElementById('gate').style.display = 'none';
+    EULA_OK = true;
+    tip('已同意《使用条款》，插件功能已启用', 'msg ok');
+    load(); loadLogs();
+  }).catch(function(err){
+    b.disabled = false; b.textContent = '同意并启用';
+    document.getElementById('gate-msg').textContent = '保存失败：' + err.message;
+  });
+}
+document.getElementById('gate-btn').onclick = openEula;
+
+/* ---------------- 状态/开关/插件/日志/工具 ---------------- */
+function load() {
+  return api('show', {TYPE:'data,flags,plugins,eula'}).then(function(d){
+    var e = (d && d.eula) || {};
+    if (String(e.accepted) !== '1') {
+      EULA_OK = false;
+      document.getElementById('gate').style.display = 'flex';
+      document.getElementById('app').style.visibility = 'hidden';
+      return;
+    }
+    EULA_OK = true;
+    document.getElementById('gate').style.display = 'none';
+    document.getElementById('app').style.visibility = 'visible';
+
+    var s = d.status || {}, f = d.flags || {};
+    var alive = (s.backdoor_alive||'').trim();
+    var html = '';
+    html += card('框架版本', s.version || '-');
+    html += card('签名校验', s.plugins_ok==='1' ? '通过' : '未通过', s.plugins_ok==='1'?'ok':'err');
+    html += card('后门进程', alive ? alive : '无', alive ? 'err':'ok');
+    html += card('ipset 封锁', (s.ipset||0)+' 条', (s.ipset>0)?'ok':'warn');
+    html += card('封锁规则', (s.rules||0)+' 条', (s.rules>0)?'ok':'warn');
+    html += card('封锁命中', (s.blocked_hits||0)+' 包', (s.blocked_hits>0)?'warn':'ok');
+    html += card('DNS 记录', s.dns_running==1?'运行中':'未运行', s.dns_running==1?'ok':'warn');
+    html += card('日志分区', (s.log_usage||'-'));
+    document.getElementById('cards').innerHTML = html;
+    var ds = document.getElementById('dns-state');
+    if (ds) {
+      ds.textContent = (s.dns_running == 1)
+        ? '运行中（正在写 ' + (s.log_dir||'/etc/log/ikguard') + '/dns-*.log）'
+        : '未运行（点击"启动 DNS 记录"开始抓取）';
+      ds.className = (s.dns_running == 1) ? 'ok' : 'warn';
+    }
+
+    var sw = '';
+    FLAGS.forEach(function(it){
+      var on = (String(f[it[0]]) === '1');
+      sw += '<div class="sw"><div><b>'+it[1]+'</b> <code>'+it[0]+'</code><small>'+it[2]+'</small></div>';
+      sw += '<button class="'+(on?'pri':'')+'" onclick="setFlag(\''+it[0]+'\','+(on?'0':'1')+')">'+(on?'已开启':'已关闭')+'</button></div>';
+    });
+    document.getElementById('switches').innerHTML = sw;
+
+    var list = Array.isArray(d.plugins) ? d.plugins : [];
+    var rows = '';
+    list.forEach(function(p){
+      rows += '<tr><td>'+p.name+'</td><td>'+(p.version||'-')+'</td><td>'+(p.state||'-')+'</td><td>'+p.files+'</td>'
+           +  '<td><button onclick="act(\'plugin\',{op:\'remove\',name:\''+p.name+'\'})">卸载</button></td></tr>';
+    });
+    document.getElementById('plugin-rows').innerHTML = rows || '<tr><td colspan="5" style="color:#909399">暂无已安装插件</td></tr>';
+    var pend = Array.isArray(d.pending) ? d.pending : [];
+    document.getElementById('pending').textContent = pend.map(function(z){return z.name;}).join(' , ') || '无';
+    document.title = '安全防护控制台 ikguard';
+  }).catch(function(e){
+    document.getElementById('gate').style.display = 'flex';
+    document.getElementById('app').style.visibility = 'hidden';
+    document.getElementById('gate-msg').textContent = '加载失败：' + e.message;
+  });
+}
+
+function loadLogs() {
+  if (!EULA_OK) return Promise.resolve();
+  return api('show', {TYPE:'logs'}).then(function(d){
+    var l = d.logs || {};
+    ['report','audit','dns','proc','conn','boot'].forEach(function(k){
+      var el = document.getElementById('log-'+k);
+      if (el) { el.textContent = l[k] || '(空)'; }
+    });
+  }).catch(function(e){ tip('日志加载失败: '+e.message, 'msg err'); });
+}
+
+function loadProbe() {
+  if (!EULA_OK) return;
+  api('show', {TYPE:'probe'}).then(function(d){
+    var p = (d && d.probe) || {};
+    document.getElementById('probe-out').textContent = (p.running == 1 ? '[自检进行中…]\n' : '') + (p.text || '(还没有执行过自检)');
+  }).catch(function(){});
+}
+
+function setFlag(key, value) {
+  api('seting', {key:key, value:String(value)}).then(function(){
+    tip(key+' = '+value+' 已生效', 'msg ok'); load();
+  }).catch(function(e){ tip('设置失败: '+e.message, 'msg err'); });
+}
+
+function dnsAct(op) {
+  tip('正在' + (op === 'start' ? '启动' : '停止') + ' DNS 记录…');
+  api('dns', {op:op}).then(function(){
+    tip('DNS 记录已' + (op === 'start' ? '启动' : '停止'), 'msg ok');
+    return load();
+  }).catch(function(e){ tip('操作失败: '+e.message, 'msg err'); });
+}
+
+function runProbe() {
+  api('probe').then(function(){
+    tip('自检已开始，约 20 秒后自动刷新结果', 'msg ok');
+    loadProbe();
+    setTimeout(loadProbe, 8000);
+    setTimeout(loadProbe, 22000);
+  }).catch(function(e){ tip('自检启动失败: '+e.message, 'msg err'); });
+}
+
+/* 上传并安装: 先 POST /Action/upload 落盘到 /tmp/iktmp/import/, 再调 ikguard plugin op=install */
+function doUpload(f) {
+  if (!/\.zip$/i.test(f.name)) { tip('只支持 .zip 插件包', 'msg err'); return Promise.reject(new Error('非 zip 包')); }
+  tip('正在上传 ' + f.name + ' …');
+  var fd = new FormData();
+  // iKuai 上传接口 (/Action/upload) 存盘时取的是 multipart 的"字段名"而不是 filename
+  // (getUploadHead(...).name), 所以字段名必须写成原始文件名, 否则会存成 "file"
+  fd.append(f.name, f, f.name);
+  return fetch('/Action/upload', { method:'POST', body: fd }).then(function(r){ return r.json(); }).then(function(j){
+    if (j.Result !== 10000) { throw new Error(j.ErrMsg || ('上传失败 '+j.Result)); }
+    return api('plugin', {op:'install', name:f.name});
+  }).then(function(){
+    tip('安装完成：' + f.name, 'msg ok');
+    load();
+  }).catch(function(e){ tip('安装失败: ' + e.message, 'msg err'); throw e; });
+}
+
+function uploadZip() {
+  var input = document.getElementById('zipfile');
+  if (!input.files || !input.files.length) { tip('请先选择 zip 插件包', 'msg err'); return; }
+  doUpload(input.files[0]).then(function(){ input.value = ''; }).catch(function(){});
+}
+
+function act(action, param) {
+  api(action, param).then(function(){
+    tip('操作成功', 'msg ok');
+    load(); loadLogs();
+    if (action === 'probe') { setTimeout(loadProbe, 8000); }
+  }).catch(function(e){ tip('操作失败: ' + e.message, 'msg err'); });
+}
+
+document.querySelectorAll('.tabs a').forEach(function(a){
+  a.onclick = function(){
+    document.querySelectorAll('.tabs a').forEach(function(x){ x.classList.remove('on'); });
+    document.querySelectorAll('.pane').forEach(function(x){ x.classList.remove('on'); });
+    a.classList.add('on');
+    document.getElementById(a.dataset.p).classList.add('on');
+    if (a.dataset.p === 'p-log') loadLogs();
+    if (a.dataset.p === 'p-tool') loadProbe();
+  };
+});
+
+load();
+loadProbe();
+setInterval(function(){ if (!document.hidden && EULA_OK) load(); }, 15000);
+</script>
+</body>
+</html>

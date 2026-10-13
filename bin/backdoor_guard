@@ -3,7 +3,9 @@
 # backdoor_guard - 后门/更新通道守卫
 # 由 cron 每分钟调用: 防止系统重建防火墙后封锁失效、或后门进程被重新拉起
 
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 通过 /usr/sbin/<name> 软链调用时 $0 是软链路径, 必须解析出真实路径
+SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 . "$SELF_DIR/../lib/common.sh"
 . "$SELF_DIR/../lib/backdoor.sh"
 

@@ -1,16 +1,17 @@
 #!/bin/bash /etc/ikcommon
 #
 # ikguard - 安全防护控制台后端接口
-# 页面: 系统设置 -> 插件管理 -> ikguard (/plugins/docker/ikguard.html)
+# 页面: 系统设置 -> 插件管理 -> ikguard (前端 /plugins/app/ikguard.html)
 #
 # 动作:
-#   show    TYPE=data,flags,plugins,logs,...  读取状态/开关/插件/日志
-#   seting  key=<配置项> value=<0|1>          修改 /etc/mnt/boot_args 开关并立即生效
-#   apply   -                                 重新应用后门阻断 + 审计
-#   plugin  op=scan|remove|verify name=<名>    插件包管理
-#   dns     op=start|stop                      DNS 查询记录开关
-#   probe   -                                 云端连通性自检
-#   logclear -                                清空审计日志
+#   show    TYPE=data,flags,plugins,eula,logs,probe  读取状态/开关/插件/条款/日志/自检结果
+#   seting  key=<配置项> value=<0|1>                 修改 /etc/mnt/boot_args 开关并立即生效
+#   eula    op=accept|reject                         记录《使用条款》是否已同意(插件功能前置条件)
+#   apply   -                                        重新应用后门阻断 + 审计
+#   plugin  op=scan|install|remove|list [name=...]    插件管理(install 用于安装刚上传的 zip)
+#   dns     op=start|stop                            DNS 查询记录开关
+#   probe   -                                        云端连通性自检(后台执行, 结果写文件)
+#   logclear -                                       清空审计日志
 #
 # 说明: 本文件通过 /usr/ikuai/function/ikguard 软链被 func_api.sh 分发,
 #       stdout 必须是合法 JSON(show) 或错误信息(失败时), 日志写文件不要污染 stdout。
@@ -19,8 +20,13 @@ BOOT_DIR="/etc/mnt/.boot"
 BOOT_ARGS="/etc/mnt/boot_args"
 IK_LOG_DIR="/etc/log/ikguard"
 IK_PLUGIN_DIR="/etc/mnt/plugins"
+IK_IMPORT_DIR="/tmp/iktmp/import"
+IK_EULA_FILE="$IK_PLUGIN_DIR/.eula"
+IK_EULA_TEXT="$BOOT_DIR/www/eula.txt"
+IK_EULA_VER="v1.0"
 IK_IKPLUGIN="$BOOT_DIR/bin/ikplugin"
 IK_IKAUDIT="$BOOT_DIR/bin/ikaudit"
+IK_PROBE_OUT="$IK_LOG_DIR/last-probe.txt"
 
 # ---------------------------------------------------------------- 工具
 
@@ -30,7 +36,6 @@ ikg_esc() {
     awk 'BEGIN{ORS=""} {printf "%s%s", (NR>1?"\\n":""), $0}'
 }
 
-# 日志/文本 -> JSON 字符串(含引号)
 ikg_text() {
     printf '"%s"' "$(printf '%s' "$1" | ikg_esc)"
 }
@@ -51,9 +56,8 @@ ikg_tail_file() {
 }
 
 ikg_day_file() {
-    local kind="$1"
-    local f="$IK_LOG_DIR/$kind-$(date +%Y%m%d).log"
-    test -f "$f" || f="$(ls -1t "$IK_LOG_DIR/$kind"-*.log 2>/dev/null | head -n1)"
+    local f="$IK_LOG_DIR/$1-$(date +%Y%m%d).log"
+    test -f "$f" || f="$(ls -1t "$IK_LOG_DIR/$1"-*.log 2>/dev/null | head -n1)"
     printf '%s' "$f"
 }
 
@@ -68,7 +72,17 @@ ikg_backdoor_alive() {
 
 # 封锁规则命中包数
 ikg_blocked_hits() {
-    iptables -nvx -L OUTPUT 2>/dev/null | awk '/ikuai_blk|multiport/{s+=$1} END{print s+0}'
+    { iptables -nvx -L OUTPUT 2>/dev/null; iptables -nvx -L FORWARD 2>/dev/null; } | \
+        awk '/ikuai_blk|multiport/{s+=$1} END{print s+0}'
+}
+
+# 审计事件(与 lib/audit.sh 相同格式, 便于同一份日志里检索)
+ikg_audit() {
+    local level="$1" event="$2"
+    shift 2
+    mkdir -p "$IK_LOG_DIR" 2>/dev/null
+    printf '%s %-5s %-18s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$event" "$*" \
+        >> "$IK_LOG_DIR/audit-$(date +%Y%m%d).log" 2>/dev/null
 }
 
 # 运行框架脚本(按开关)
@@ -76,6 +90,17 @@ ikg_run_script() {
     local s="$BOOT_DIR/scripts/$1"
     test -x "$s" || { bash "$s" >/dev/null 2>&1; return $?; }
     "$s" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------- 使用条款
+
+ikg_eula_accepted() {
+    test -f "$IK_EULA_FILE" || return 1
+    grep -q "^accepted=1" "$IK_EULA_FILE" 2>/dev/null
+}
+
+ikg_eula_text() {
+    test -f "$IK_EULA_TEXT" && cat "$IK_EULA_TEXT" 2>/dev/null
 }
 
 # ---------------------------------------------------------------- show
@@ -94,6 +119,7 @@ __show_data() {
     status+="$(ikg_num rules "$(iptables -S 2>/dev/null | grep -c ikuai_blk)"),"
     status+="$(ikg_num dns_running "$(pidof tcpdump >/dev/null 2>&1 && echo 1 || echo 0)"),"
     status+="$(ikg_num blocked_hits "$(ikg_blocked_hits)"),"
+    status+="$(ikg_num eula "$(ikg_eula_accepted && echo 1 || echo 0)"),"
     status+="$(ikg_kv log_dir "$IK_LOG_DIR"),"
     status+="$(ikg_kv log_usage "$usage")"
     status+="}"
@@ -116,22 +142,24 @@ __show_flags() {
 }
 
 __show_plugins() {
-    local data="[" d name first=1 z
+    # 注意: 变量名必须与 json_append 的键名一致(json 类型是直接 `"键":${变量}` 展开),
+    # 否则会变成 "plugins":{} —— 前端 (d.plugins||[]).forEach 就会报错
+    local plugins="[" d name first=1 z
     for d in "$IK_PLUGIN_DIR"/*/ ; do
         [ -f "$d/Release" ] || continue
         name="$(basename "$d")"
         case "$name" in .*) continue ;; esac
-        [ "$first" = 1 ] || data+=","
+        [ "$first" = 1 ] || plugins+=","
         first=0
-        data+="{"
-        data+="$(ikg_kv name "$name"),"
-        data+="$(ikg_kv version "$(sed -n 's/^version=//p' "$d/Release" 2>/dev/null | head -n1)"),"
-        data+="$(ikg_kv plugin "$(sed -n 's/^plugin=//p' "$d/Release" 2>/dev/null | head -n1)"),"
-        data+="$(ikg_kv state "$(cat "$IK_PLUGIN_DIR/.state/$name" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')"),"
-        data+="$(ikg_num files "$(find "$d" -type f 2>/dev/null | wc -l)")"
-        data+="}"
+        plugins+="{"
+        plugins+="$(ikg_kv name "$name"),"
+        plugins+="$(ikg_kv version "$(sed -n 's/^version=//p' "$d/Release" 2>/dev/null | head -n1)"),"
+        plugins+="$(ikg_kv plugin "$(sed -n 's/^plugin=//p' "$d/Release" 2>/dev/null | head -n1)"),"
+        plugins+="$(ikg_kv state "$(cat "$IK_PLUGIN_DIR/.state/$name" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')"),"
+        plugins+="$(ikg_num files "$(find "$d" -type f 2>/dev/null | wc -l)")"
+        plugins+="}"
     done
-    data+="]"
+    plugins+="]"
 
     # 待安装的 zip 包
     local pending="[" first2=1
@@ -145,6 +173,34 @@ __show_plugins() {
 
     json_append __json_result__ plugins:json
     json_append __json_result__ pending:json
+}
+
+__show_eula() {
+    local accepted=0 when=""
+    if ikg_eula_accepted; then
+        accepted=1
+        when="$(sed -n 's/^time=//p' "$IK_EULA_FILE" 2>/dev/null | head -n1)"
+    fi
+    local eula="{"
+    eula+="$(ikg_num accepted "$accepted"),"
+    eula+="$(ikg_kv version "$IK_EULA_VER"),"
+    eula+="$(ikg_kv time "$when"),"
+    eula+="$(ikg_kv file "$IK_EULA_FILE"),"
+    eula+="$(ikg_kv text "$(ikg_eula_text)")"
+    eula+="}"
+    json_append __json_result__ eula:json
+}
+
+__show_probe() {
+    local running=0 text
+    pgrep -f "ikaudit probe" >/dev/null 2>&1 && running=1
+    text="$(ikg_tail_file "$IK_PROBE_OUT" 60)"
+    local probe="{"
+    probe+="$(ikg_num running "$running"),"
+    probe+="$(ikg_kv file "$IK_PROBE_OUT"),"
+    probe+="$(ikg_kv text "$text")"
+    probe+="}"
+    json_append __json_result__ probe:json
 }
 
 __show_logs() {
@@ -188,11 +244,9 @@ seting()
     local k
     case "$key" in
         ssh|sshd)        k="sshd" ;;
-        remote)          k="remote" ;;
         backdoor)        k="backdoor" ;;
         backdoor_hosts)  k="backdoor_hosts" ;;
         plugins)         k="plugins" ;;
-        plugins_verify)  k="plugins_verify" ;;
         cron)            k="cron" ;;
         shell)           k="shell" ;;
         audit)           k="audit" ;;
@@ -211,9 +265,41 @@ seting()
         echo "$k=$value" >> "$BOOT_ARGS"
     fi
     Syslog "[ikguard] 开关变更: $k=$value"
+    ikg_audit INFO "flag.change" "开关变更 $k=$value"
 
     __apply_for "$k"
     echo "$k=$value 已保存并生效"
+    return 0
+}
+
+# ---------------------------------------------------------------- 使用条款
+
+eula()
+{
+    local op="${op:-accept}"
+    mkdir -p "$IK_PLUGIN_DIR" 2>/dev/null
+    case "$op" in
+        accept)
+            {
+                echo "accepted=1"
+                echo "version=$IK_EULA_VER"
+                echo "time=$(date '+%Y-%m-%d %H:%M:%S')"
+                echo "from=${SRC_IP:-web}"
+            } > "$IK_EULA_FILE"
+            Syslog "[ikguard] 已同意《使用条款与免责声明》$IK_EULA_VER"
+            ikg_audit INFO "eula.accept" "用户同意使用条款 $IK_EULA_VER"
+            # 同意后立刻把插件卡片换成正式插件
+            ikg_run_script 03_enable_plugins.sh
+            echo "使用条款已同意，插件功能已启用"
+            ;;
+        reject)
+            rm -f "$IK_EULA_FILE" 2>/dev/null
+            ikg_audit INFO "eula.reject" "用户拒绝使用条款"
+            ikg_run_script 03_enable_plugins.sh
+            echo "已记录为不同意，插件功能保持关闭"
+            ;;
+        *)  echo "不支持的 op: $op" ; return 1 ;;
+    esac
     return 0
 }
 
@@ -229,36 +315,87 @@ apply()
 
 plugin()
 {
-    local op="${op:-scan}" name="$name"
+    local op="${op:-scan}" name="$name" src base arch
+    ikg_eula_accepted || { echo "需要先同意《使用条款》才能使用插件功能"; return 1; }
     test -x "$IK_IKPLUGIN" || { echo "插件系统不可用(缺少 $IK_IKPLUGIN)"; return 1; }
+    arch="$IK_PLUGIN_DIR/.installed"
+
     case "$op" in
-        scan)    "$IK_IKPLUGIN" scan && echo "已扫描并安装 /etc/mnt/plugins/*.zip" ;;
-        list)    "$IK_IKPLUGIN" list ;;
-        remove)  test -n "$name" || { echo "缺少 name"; return 1; }
-                 "$IK_IKPLUGIN" remove "$name" && echo "已卸载: $name" ;;
-        verify)  test -n "$name" || { echo "缺少 name"; return 1; }
-                 "$IK_IKPLUGIN" verify "$name" ;;
-        *)       echo "不支持的 op: $op" ; return 1 ;;
+        scan)
+            "$IK_IKPLUGIN" scan || return 1
+            ikg_audit INFO "plugin.scan" "扫描并安装 /etc/mnt/plugins/*.zip"
+            echo "已扫描并安装 /etc/mnt/plugins/*.zip"
+            ;;
+        list)
+            "$IK_IKPLUGIN" list
+            ;;
+        install)
+            [ -n "$name" ] || { echo "缺少 name"; return 1; }
+            base="$(basename "$name")"
+            case "$base" in
+                *.zip|*.ZIP) ;;
+                *) echo "只支持 .zip 插件包"; return 1 ;;
+            esac
+            src="$IK_IMPORT_DIR/$base"
+            [ -f "$src" ] || { echo "未找到上传的插件包: $base(请先通过上传接口上传)"; return 1; }
+            mkdir -p "$arch" 2>/dev/null
+            cp -f "$src" "$arch/$base" 2>/dev/null
+            if ! "$IK_IKPLUGIN" install "$src"; then
+                echo "插件安装失败: $base"
+                return 1
+            fi
+            rm -f "$src" 2>/dev/null
+            ikg_audit INFO "plugin.install" "上传安装插件包: $base"
+            echo "插件已安装: $base"
+            ;;
+        remove)
+            [ -n "$name" ] || { echo "缺少 name"; return 1; }
+            "$IK_IKPLUGIN" remove "$name" || return 1
+            ikg_audit INFO "plugin.remove" "卸载插件: $name"
+            echo "已卸载: $name"
+            ;;
+        verify)
+            [ -n "$name" ] || { echo "缺少 name"; return 1; }
+            "$IK_IKPLUGIN" verify "$name"
+            ;;
+        *)  echo "不支持的 op: $op" ; return 1 ;;
     esac
-    # 插件变更后同步 Web 资源
+
+    # 插件变更后同步 Web 资源与卡片
     ikg_run_script 03_enable_plugins.sh
     return 0
 }
 
 dns()
 {
-    local op="${op:-start}"
+    local op="${op:-start}" running
     case "$op" in
-        start) "$IK_IKAUDIT" dns-start && echo "DNS 记录已启动" ;;
-        stop)  "$IK_IKAUDIT" dns-stop && echo "DNS 记录已停止" ;;
-        *)     echo "不支持的 op: $op"; return 1 ;;
+        start)
+            "$IK_IKAUDIT" dns-start >/dev/null 2>&1 || { echo "启动失败: tcpdump 不可用或没有可用网卡"; return 1; }
+            echo "DNS 记录已启动"
+            ;;
+        stop)
+            "$IK_IKAUDIT" dns-stop >/dev/null 2>&1 || { echo "停止失败"; return 1; }
+            echo "DNS 记录已停止"
+            ;;
+        *)  echo "不支持的 op: $op"; return 1 ;;
     esac
+    running="$(pidof tcpdump >/dev/null 2>&1 && echo 1 || echo 0)"
+    ikg_audit INFO "dns.$op" "DNS 记录 $op (当前运行中=$running)"
     return 0
 }
 
+# 自检放到后台跑(整轮约 20 秒, 结果写 last-probe.txt 由页面轮询)
 probe()
 {
-    "$IK_IKAUDIT" probe
+    mkdir -p "$IK_LOG_DIR" 2>/dev/null
+    if pgrep -f "ikaudit probe" >/dev/null 2>&1; then
+        echo "自检正在进行中，请稍候刷新"
+        return 0
+    fi
+    # 忽略 SIGHUP: 请求结束后父进程退出不能把自检带下去
+    ( trap '' HUP; "$IK_IKAUDIT" probe > "$IK_PROBE_OUT" 2>&1 ) &
+    echo "云端连通性自检已开始，约 20 秒后查看结果"
     return 0
 }
 

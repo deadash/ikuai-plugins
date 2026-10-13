@@ -26,14 +26,16 @@
 各配置名称如下
 
 1. ssh, sshd
-2. 远程, remote (默认关闭)
-3. 后门禁用, backdoor (默认开启)
-4. 后门DNS屏蔽, backdoor_hosts (默认关闭, 写 /etc/hosts 屏蔽云端域名)
-5. 插件, plugins (默认开启)
-6. 插件强校验, plugins_verify (默认关闭, 打开后插件必须带有效签名)
-7. cron, cron, cron_test
-8. 程序安装, shell
-9. 审计取证, audit (默认开启, 日志写 /etc/log/ikguard)
+2. 后门禁用, backdoor (默认开启)
+3. 后门DNS屏蔽, backdoor_hosts (默认关闭, 写 /etc/hosts 屏蔽云端域名)
+4. 插件, plugins (默认开启, 首次使用需在插件管理页同意《使用条款》)
+5. cron, cron, cron_test
+6. 程序安装, shell
+7. 审计取证, audit (默认开启, 日志写 /etc/log/ikguard)
+
+> 两个曾经存在的开关已经去掉:
+> `remote`(历史遗留的空开关, iKuai 云的"远程控制/远程维护"已由 backdoor 层覆盖)、
+> `plugins_verify`(插件强校验, 现在插件包不再要求签名)。升级时会自动从 boot_args 里清掉。
 
 ## 配置 cron
 
@@ -122,8 +124,28 @@ ikplugin pack <目录> <zip>     打包(自动生成清单并签名)
 ikplugin keygen [目录]         生成签名密钥对
 ```
 
-**签名**: `ikplugin keygen` 生成 `plugin.key`/`plugin.pub`，把 `plugin.pub` 放到
-`/etc/mnt/.boot/plugin.pub` 后，`plugins_verify=1` 可强制校验插件签名。
+**签名(可选)**: 插件包**不强制要求签名**，普通 zip(含 `Release` + `install.sh`)即可安装。
+如果插件包自带 `MANIFEST.MF`，会逐文件校验 SHA-256；再带 `SIGNATURE.RSA` 且存在
+`/etc/mnt/.boot/plugin.pub` 时才会额外校验签名。打包签名用 `ikplugin keygen` + `ikplugin pack`。
+
+> 注意区分: **框架本体 `/etc/mnt/.boot` 是必须签名的**(固件开机会校验，不通过整个框架不运行)，
+> 只有第三方插件包不要求签名。
+
+**插件包还能带 Web 页面与后端接口**(会自动软链到根分区，卸载自动清理):
+
+```
+www/plugins/<名称>/<名称>.json   插件卡片     -> /usr/ikuai/www/plugins/<名称>/
+www/plugins/app/<名称>.html|png  页面与图标   -> /usr/ikuai/www/plugins/app/
+function/<func_name>             后端接口     -> /usr/ikuai/function/
+bin/*                            命令行      -> /usr/sbin/
+```
+
+完整可运行示例见 [examples/rust-plugin](examples/rust-plugin/)(Rust + 嵌入式数据库 + Web 配置页)。
+
+**安装方式**:
+1. 网页: 系统设置 → 插件管理 → ikguard → 插件管理 → 选择 zip → 上传并安装
+2. 命令行: 把 zip 放到 `/etc/mnt/plugins/` 后执行 `ikplugin scan`(或直接重启)
+3. 命令行: `ikplugin install /path/xxx.zip`
 
 ## 审计取证 (audit)
 
@@ -154,19 +176,32 @@ ikaudit dns-start   # 启动 DNS 记录
 
 iKuai 的「系统设置 → 插件管理」是数据驱动的: 官方 `plugins.sh` 的 `show()` 会遍历
 `/usr/ikuai/www/plugins/*/*.json` 生成卡片，卡片点击后以 iframe 打开
-`/plugins/docker/<name>.html`。本框架在 `www/` 下提供资源，开机由
-`scripts/03_enable_plugins.sh` 同步到根分区:
+`/plugins/<目录>/<name>.html`(原目录名是 `docker`，本框架改成了 `app`)。本框架在 `www/` 下
+提供资源，开机由 `scripts/03_enable_plugins.sh` 同步到根分区:
 
 ```
-www/plugins/<name>/<name>.json      元数据(name 决定卡片与 iframe 文件名)
-www/plugins/docker/<name>.html      插件页面(自包含, 直接 fetch /Action/call)
-www/plugins/docker/<name>.png       卡片图标
-usr/ikuai/function/<func_name>      后端接口(#!/bin/bash /etc/ikcommon)
+www/plugins/<name>/<name>.json   元数据(name 决定卡片与 iframe 文件名)
+www/plugins/app/<name>.html      插件页面(自包含, 直接 fetch /Action/call)
+www/plugins/app/<name>.png       卡片图标
+www/eula.txt                     《使用条款与免责声明》正文(后端接口读取)
+usr/ikuai/function/<func_name>   后端接口(#!/bin/bash /etc/ikcommon)
 ```
 
 内置插件 `ikguard`: 概览(签名/后门进程/封锁规则/命中数/DNS 状态/日志占用)、
-开关配置(写 `/etc/mnt/boot_args` 并立即生效)、插件管理(扫描安装/卸载 zip)、
-审计日志(实时查看)、工具(云端连通性自检、DNS 记录开关、清空日志)。
+开关配置(写 `/etc/mnt/boot_args` 并立即生效)、插件管理(**上传 zip 安装**/扫描/卸载)、
+审计日志(实时查看)、工具(云端连通性自检、DNS 记录开关，均带用途说明)。
+
+**首次启用需要同意《使用条款》**: 未同意时插件功能不启用 —— 插件管理页只显示一个灰色按钮
+"查看并同意《使用条款》"，点开弹框阅读后同意才出现插件；同意记录写在
+`/etc/mnt/plugins/.eula`(持久，只在本机保存)，后端 `ikguard` 的 `plugin` 动作也会拒绝未同意的调用。
+条款正文在 `www/eula.txt`(版本 v1.0)。
+
+**前端补丁**(`lib/plugin.sh:plugin_web_patch()`，每次开机重打):
+1. 去掉"使用插件功能需要绑定爱快云平台！"拦截
+   (`yunbindstatus = ("" != code ? 2 : 1)` → `yunbindstatus=2`)；
+2. 插件页面目录 `/plugins/docker/` → `/plugins/app/`，不再和 Docker 功能混在一起；
+3. 点开插件后的小标题 `Docker` → `插件`。
+   分包是 gzip 静态资源，做法是"解开 → sed → 重新压缩 → 复核后写回"，改完需 **Ctrl+F5 强刷**。
 
 接口约定: `POST /Action/call` `{func_name, action, param}`, 动作 `show` 的动作函数
 输出被包成 `{"Result":30000,"Data":{...}}`; 参数值不允许含空格/引号。

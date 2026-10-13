@@ -7,7 +7,8 @@
 #   2) 重新铺开所有已安装插件(根分区每次重启还原, 必须每开机重建)
 #   3) 暴露命令行 /usr/sbin/ikplugin
 #
-# 开关: /etc/mnt/boot_args 中 plugins=1；插件签名强校验: plugins_verify=1
+# 开关: /etc/mnt/boot_args 中 plugins=1
+# 使用条款: /etc/mnt/plugins/.eula 未同意时只铺"同意条款"占位卡片, 不显示真实插件
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SELF_DIR/../lib/common.sh"
@@ -30,6 +31,9 @@ plugin_boot
 #   -> /usr/ikuai/function/<func_name>
 plugin_web_sync
 plugin_function_link
+
+# 去掉「插件管理」页"需要绑定爱快云平台"的前端拦截(本框架插件不依赖云平台)
+plugin_web_patch
 
 # 暴露 ikplugin 命令
 plugin_link_cli

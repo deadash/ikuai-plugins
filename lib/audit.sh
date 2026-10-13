@@ -217,36 +217,48 @@ au_blocked_scan() {
 
 # ---------------------------------------------------------------- DNS 审计
 
-# 设备上的数据网卡(排除 lo/imq/tunl/gre/erspan 等虚拟口)
+# 设备上的数据网卡(排除 lo/imq/tunl/gre/隧道 等虚拟口与 sysfs 伪节点)
 au_ifaces() {
     local i
     for i in $(ls /sys/class/net 2>/dev/null); do
         case "$i" in
-            lo|imq*|tunl*|gre*|gretap*|erspan*|ifb*|sit*|docker*|veth*) continue ;;
+            lo|imq*|tunl*|gre*|gretap*|erspan*|ifb*|sit*|ip6*|ip_vti*|ip6_vti*|bonding_masters|docker*|veth*)
+                continue ;;
         esac
+        # 桥/绑定成员不单独抓: 否则同一报文会在 br(lan1/wan1) 和物理口(eth0/eth1) 里各记一次
+        [ -e "/sys/class/net/$i/master" ] && continue
         printf '%s\n' "$i"
     done
     return 0
 }
 
+# 找出所有"本框架启动的"DNS 抓包进程(按命令行匹配, 不依赖 pid 文件)
+au_dns_pids() {
+    local dir pid cmd
+    for dir in /proc/[0-9]*; do
+        pid="${dir#/proc/}"
+        cmd="$( { tr '\0' ' ' < "$dir/cmdline"; } 2>/dev/null )"
+        case "$cmd" in *tcpdump*"port 53"*) printf '%s\n' "$pid" ;; esac
+    done
+    return 0
+}
+
 au_dns_running() {
-    local pid
-    # 只要有一张网卡的抓包进程还在, 就认为是运行中
-    if [ -f "$AU_STATE/dns.pids" ]; then
-        while read -r pid _; do
-            [ -n "$pid" ] || continue
-            kill -0 "$pid" 2>/dev/null && return 0
-        done < "$AU_STATE/dns.pids"
-    fi
-    pidof tcpdump >/dev/null 2>&1 && return 0
+    [ -n "$(au_dns_pids)" ] && return 0
     return 1
 }
 
 # 启动 DNS 抓包(每张网卡一个 tcpdump, 追加到当天 dns 日志)
+# 说明: 重复点击要幂等 —— 先杀掉旧的再按当前网卡列表重建, 否则会出现同一网卡
+#       多个 tcpdump 且 pid 文件被覆盖, 导致"停止"停不干净(旧 bug)。
 au_dns_start() {
-    local i pid
+    local i pid n=0
     au_init
     command -v tcpdump >/dev/null 2>&1 || { au_event WARN "dns.nodump" "tcpdump 不可用, 无法记录 DNS 查询"; return 1; }
+
+    # 先清理旧实例(含开机时启动的), 避免重复抓同一张网卡
+    au_dns_stop quiet
+
     : > "$AU_STATE/dns.pids"
     for i in $(au_ifaces); do
         # 忽略 SIGHUP, 避免父进程(SSH/脚本)退出时抓包跟着退出; 设备无 nohup/setsid
@@ -254,20 +266,36 @@ au_dns_start() {
             >> "$(au_file dns)" 2>/dev/null &
         pid=$!
         printf '%s %s\n' "$pid" "$i" >> "$AU_STATE/dns.pids"
+        n=$((n + 1))
     done
-    au_event INFO "dns.start" "已启动 DNS 记录(接口: $(au_ifaces | tr '\n' ' '))"
+    if [ "$n" = 0 ]; then
+        au_event WARN "dns.start" "没有可用网卡, DNS 记录未启动"
+        return 1
+    fi
+    au_event INFO "dns.start" "已启动 DNS 记录($n 张网卡: $(au_ifaces | tr '\n' ' '))"
     return 0
 }
 
+# 停止 DNS 抓包: 既按 pid 文件, 也按命令行兜底(防止 pid 文件过期/丢失)
 au_dns_stop() {
-    local pid
-    [ -f "$AU_STATE/dns.pids" ] || return 0
-    while read -r pid _; do
-        [ -n "$pid" ] || continue
-        kill "$pid" 2>/dev/null
-    done < "$AU_STATE/dns.pids"
-    rm -f "$AU_STATE/dns.pids"
-    au_event INFO "dns.stop" "已停止 DNS 记录"
+    local quiet="$1" pid n=0
+    # 1) pid 文件
+    if [ -f "$AU_STATE/dns.pids" ]; then
+        while read -r pid _; do
+            [ -n "$pid" ] || continue
+            kill "$pid" 2>/dev/null && n=$((n + 1))
+        done < "$AU_STATE/dns.pids"
+        rm -f "$AU_STATE/dns.pids"
+    fi
+    # 2) 命令行兜底
+    for pid in $(au_dns_pids); do
+        kill "$pid" 2>/dev/null && n=$((n + 1))
+    done
+    sleep 1
+    for pid in $(au_dns_pids); do
+        kill -9 "$pid" 2>/dev/null
+    done
+    [ "$quiet" = "quiet" ] || au_event INFO "dns.stop" "已停止 DNS 记录($n 个抓包进程)"
     return 0
 }
 
@@ -302,25 +330,40 @@ au_tcp_probe() {
 }
 
 au_probe() {
-    local d ip ok blocked=0 resolved=0
+    local d ip blocked=0 resolved=0 reachable=0
+    au_init
+    printf '=== 云端连通性自检 %s ===\n' "$(au_stamp)"
+    printf '说明: 解析成功但 TCP 连接失败 = 封锁生效; 若能连通则说明封锁失效。\n\n'
     au_event INFO "probe.begin" "开始云端连通性自检"
+
     for d in 302.ikuai8.com pkgmanager.ikuai8.com download.ikuai8.com; do
         ip="$(dns_lookup_ip "$d")"
         if [ -z "$ip" ]; then
+            printf '  %-24s 未解析到地址(设备无外网 / DNS 不可达)\n' "$d"
             au_event INFO "probe.dns" "域名=$d 未解析到地址(环境无外网/DNS 不可达)"
             continue
         fi
         resolved=$((resolved + 1))
-        au_event INFO "probe.dns" "域名=$d 解析到 $ip"
         if au_tcp_probe "$ip" 443; then
+            reachable=$((reachable + 1))
+            printf '  %-24s -> %-16s TCP 443 可连通 [异常! 封锁可能失效]\n' "$d" "$ip"
             au_event WARN "probe.tcp" "!!! 可连通云端 $ip:443 (封锁可能失效)"
-            ok=1
         else
             blocked=$((blocked + 1))
+            printf '  %-24s -> %-16s TCP 443 连接失败 [正常, 已被阻断]\n' "$d" "$ip"
             au_event INFO "probe.tcp" "连接云端 $ip:443 失败(封锁生效/无外网)"
         fi
     done
-    printf 'resolved=%s blocked=%s' "$resolved" "$blocked"
+
+    printf '\n汇总: 解析成功 %s 个, 连接被阻断 %s 个, 可连通 %s 个\n' "$resolved" "$blocked" "$reachable"
+    if [ "$reachable" -gt 0 ]; then
+        printf '结论: 异常, 存在可连通的云端地址, 请检查 ipset/iptables 封锁规则\n'
+    elif [ "$resolved" -gt 0 ]; then
+        printf '结论: 正常, 云端域名可解析但连接全部被阻断\n'
+    else
+        printf '结论: 无法判断(设备当前没有可用外网, 请先把 WAN 配置好)\n'
+    fi
+    printf 'resolved=%s blocked=%s reachable=%s\n' "$resolved" "$blocked" "$reachable"
     return 0
 }
 

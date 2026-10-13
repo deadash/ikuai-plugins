@@ -122,6 +122,13 @@ repo/
 3. 私钥必须与固件内置公钥配对(公钥硬编码在 `/usr/ikuai/script/plugins.sh` 里)，
    否则设备侧 `openssl dgst -verify` 不通过。
 
+> **签名范围要说清楚**:
+> * **框架本体(`/etc/mnt/.boot`)必须签名** —— 固件 `plugins.sh` 会用内置公钥校验
+>   `MANIFEST.MF` + `SIGNATURE.RSA`，再逐文件比对 SHA-256；任何一项不通过，整个框架
+>   都不会运行。所以改动框架里任何一个被清单列出的文件后都必须重新 `sign.sh + build.sh`。
+> * **第三方插件包不需要签名** —— 插件 zip 直接上传即可安装(参见 6.5.1)。可选地支持
+>   `MANIFEST.MF`(校验摘要) 与 `SIGNATURE.RSA`+`plugin.pub`(额外验签)，但不强制。
+
 ### 2.3 一键打包
 
 ```bash
@@ -219,7 +226,9 @@ ssh sshd@127.0.0.1 -p 10022 "
 | iptables | OUTPUT/FORWARD 有 `--match-set ikuai_blk dst -j DROP`，OUTPUT 有云端端口 DROP |
 | 审计日志 | `/etc/log/ikguard/audit-<date>.log` 有 `boot.audit`、`block.hit`、`dns.cloud` 等事件 |
 | Web 接口 | `POST /Action/call {"func_name":"ikguard","action":"show","param":{"TYPE":"data"}}` 返回 `Result:30000` |
-| Web 页面 | 系统设置 → 插件管理 → ikguard 卡片可点开控制台 |
+| Web 页面 | 系统设置 → 插件管理(`#/system-setting/plugin-management`)：**无"需要绑定爱快云平台"提示**，点开插件后标题显示"插件"而不是"Docker" |
+| 前端补丁 | 分包里 `plugins/docker/` 已变成 `plugins/app/`、`yunbindstatus=2` |
+| 使用条款 | 首次进入只有灰色按钮，同意后出现插件卡片；`/etc/mnt/plugins/.eula` 有 `accepted=1` |
 
 ---
 
@@ -314,17 +323,20 @@ iKuai 的"系统设置 → 插件管理"页面(`func_name=plugins`)是**数据�
 /usr/ikuai/function/plugins          <- 后端入口(实为 ../script/plugins.sh 的软链)
   boot()   开机: 校验 .boot 签名并执行 install.sh
   show()   TYPE=data -> __show_data(): 遍历 /usr/ikuai/www/plugins/*/*.json 聚合为 data:json
-前端 chunk 146 (app.js 路由 system-setting/plugin-management)
+前端分包(路由 system-setting/plugin-management)
   dockerList = Data.data
-  卡片图标  = /plugins/docker/<json 里的 name>.png
-  卡片页面  = /plugins/docker/<json 里的 name>.html   (iframe 加载)
+  卡片图标  = /plugins/<目录>/<json 里的 name>.png
+  卡片页面  = /plugins/<目录>/<json 里的 name>.html   (iframe 加载)
 ```
+
+`<目录>` 官方写死为 `docker`(容易被误认为 Docker 功能)，本框架用 `plugin_web_patch()` 改成 `app`。
 
 所以新增一个"网页插件"只需要三样东西：
 
 ```
 www/plugins/<name>/<name>.json     插件元数据(name 必须等于文件名, 决定卡片与 iframe 地址)
-www/plugins/docker/<name>.html     插件页面(自包含 HTML, 直接 fetch /Action/call)
+www/plugins/app/<name>.html        插件页面(自包含 HTML, 直接 fetch /Action/call)
+www/plugins/app/<name>.png         卡片图标
 usr/ikuai/function/<func_name>     后端接口(shebang 为 #!/bin/bash /etc/ikcommon)
 ```
 
@@ -332,9 +344,12 @@ usr/ikuai/function/<func_name>     后端接口(shebang 为 #!/bin/bash /etc/ikc
 
 ```
 /etc/mnt/.boot/www/plugins/<name>/<name>.json -> /usr/ikuai/www/plugins/<name>/<name>.json
-/etc/mnt/.boot/www/plugins/docker/*           -> /usr/ikuai/www/plugins/docker/
+/etc/mnt/.boot/www/plugins/app/*              -> /usr/ikuai/www/plugins/app/
 /etc/mnt/.boot/usr/ikuai/function/<func_name> -> /usr/ikuai/function/<func_name>
 ```
+
+> 同步前会清空 `/usr/ikuai/www/plugins/*`，并且**未同意《使用条款》时只铺占位卡片 `terms`**
+> (见 6.4)，同意后再换成正式插件卡片。
 
 ### 6.1 后端接口写法
 
@@ -350,28 +365,209 @@ seting(){ ...; }        # 注意: 动作名不能以下划线开头, 且必须�
 * 请求参数值**不能包含空格/引号等字符**（lua 侧 `__rest_check_illegality_char` 会拒绝）
 * 失败时向 stdout 打印错误信息并 `return 1`，前端会收到 `Result=30002`
 
-### 6.2 内置插件 `ikguard`
+### 6.2 去掉"使用插件功能需要绑定爱快云平台"拦截
+
+iKuai 的「插件管理」页(`system-setting/plugin-management`)在未绑定爱快云平台时只显示一句
+`common.Plugin_management.tip` = "使用插件功能需要绑定爱快云平台！"，**插件列表被整块隐藏**。
+判定逻辑在前端分包里:
+
+```js
+// /usr/ikuai/www/static/js/152.<hash>.js.gz   (未压缩后约 6.9K)
+showData: function(){
+    this.$http.post(apiUrl,{func_name:"register",action:"show",param:{TYPE:"data,gwid"}})
+        .then(function(e){
+            var i = e.data.Data.data[0];
+            this.yunbindstatus = "" != i.code ? 2 : 1;   // code 为空 = 未绑定 -> 1(显示提示)
+            this.yunbindstatus && this.dockerShow();     // 2 才去拉插件列表
+        });
+}
+```
+
+本框架的插件完全跑在本地(不读云平台)，所以开机时把这段改掉，直接进入插件列表分支:
+
+```
+yunbindstatus=""!=i.code?2:1   ->   yunbindstatus=2      # 1) 解除云平台绑定拦截
+plugins/docker/                ->   plugins/app/          # 2) 页面目录不再叫 docker
+t._v("Docker")                 ->   t._v("插件")           # 3) 点开插件后的小标题
+```
+
+实现: `lib/plugin.sh:plugin_web_patch()`，由 `scripts/03_enable_plugins.sh` 每个开机调用
+(根分区每次重启还原，必须每开机打)。因为前端分包是 **gzip 静态资源**，做法是
+"zcat 解开 → sed 改写 → gzip 重新压缩 → 写回"，落盘前逐项复核(改写目标必须消失、
+新写法必须出现)，找不到目标文件/改写失败时保持原样(不会打坏页面)。
+
+```
+$ bash /etc/mnt/.boot/scripts/03_enable_plugins.sh
+[plugin]   已打补丁: 152.27c9514f5737f839b145.js.gz (云平台拦截=1 目录改名=1 标题=1)
+[plugin] Web 前端补丁完成(修改 1 个分包)
+```
+
+验证:
+
+```
+$ cd /usr/ikuai/www/static/js && zcat 152.*.js.gz | grep -o 'yunbindstatus=[^,;)]*\|plugins/[a-z]*/\|t._v("插件")'
+yunbindstatus=2
+plugins/app/
+t._v("插件")
+$ curl -s -H 'Accept-Encoding: gzip' http://127.0.0.1:18080/static/js/152.*.js.gz | zcat | grep -c 'plugins/docker/'
+0
+```
+
+实测(Chromium 打开 Web → 系统设置 → 插件管理): 绑定提示消失、插件卡片 `ikguard` 正常显示、
+点开卡片 iframe 内的控制台可读状态、可切页签、可改开关(改完 `/etc/mnt/boot_args` 立即变化)。
+
+> 注意: 分包文件名不变，浏览器可能仍用旧缓存 → 改完请 **Ctrl+F5 强刷**一次。
+> 前端文案本身仍在 i18n 里(`common.Plugin_management.tip`)，只是不再显示。
+> 同一份代码里的「云防火墙」页(`49.<hash>.js.gz`, 判定变量 `isBindCloud`)是另一个云功能，
+> 本框架不动它。
+
+### 6.3 内置插件 `ikguard`
 
 * 页面: 系统设置 → 插件管理 → `ikguard` 卡片
-  (等价直达: `http://<宿主IP>:8081/plugins/docker/ikguard.html`)
-* 后端: `func_name=ikguard`，动作 `show/seting/apply/plugin/dns/probe/logclear`
+  (等价直达: `http://<宿主IP>:8081/plugins/app/ikguard.html`)
+* 后端: `func_name=ikguard`，动作
+  `show`(TYPE=`data/flags/plugins/pending/eula/logs/probe`) / `seting` / `eula` /
+  `apply` / `plugin` / `dns` / `probe` / `logclear`
 * 页面功能:
-  * **概览**: 框架版本、签名校验、后门进程、ipset 条目、封锁规则/命中数、DNS 采集状态、日志分区占用
-  * **开关配置**: `backdoor` `backdoor_hosts` `audit` `sshd` `plugins` `plugins_verify` `cron` `shell` `remote`
+  * **概览**: 框架版本、签名校验、后门进程、ipset 条目、封锁规则/命中数、DNS 采集状态、日志占用
+  * **开关配置**: `backdoor` `backdoor_hosts` `audit` `sshd` `plugins` `cron` `shell`
     修改即写入 `/etc/mnt/boot_args` 并立刻重跑对应脚本
-  * **插件管理**: 列出/卸载已安装插件，扫描并安装 `/etc/mnt/plugins/*.zip`
+  * **插件管理**: **上传 zip 安装**、扫描 `/etc/mnt/plugins/*.zip`、列出/卸载插件
   * **审计日志**: 实时查看 report/audit/dns/proc/conn/boot 日志
-  * **工具**: 云端连通性自检、DNS 记录开关、清空审计日志
+  * **工具**: 云端连通性自检(带结果回读)、DNS 记录开关 —— 每一项都有用途说明
 
-### 6.3 通过 Web 接口直接调用(不打开浏览器也能验证)
+前端图标与页面都在 `www/plugins/app/`(`ikguard.{html,png}`、`terms.{html,png}`)，
+图标是 64×64 的圆角盾牌(盾牌=安全防护，文档图标=使用条款)。
+
+### 6.4 首次启用需要同意《使用条款》
+
+插件功能属于对官方固件的第三方改造，首次启用前需要用户明确同意条款:
+
+* 条款正文: `www/eula.txt`(部署后 `/etc/mnt/.boot/www/eula.txt`)，版本 `v1.0`，
+  内容包含: 许可与用途、禁止行为(不得用于破解商业/未授权功能、不得改 Logo 与标识、
+  与官方商业功能冲突时不得复用官方实现、不得违法使用)、风险与免责(AS IS、责任限制、
+  第三方索赔自负、保留修改与停止维护的权利)、其他(同意记录仅存本地等)。
+* **未同意时**: 插件管理页不显示任何插件，只有一个灰色按钮
+  "查看并同意《使用条款》"(占位卡片 `terms`，页面 `www/plugins/app/terms.html`)。
+  点击弹出条款弹框，点"同意并启用"后: 后端 `ikguard eula op=accept` 写入
+  `/etc/mnt/plugins/.eula`，立刻重跑 `scripts/03` 把卡片换成正式插件，页面自动刷新。
+* **同意后**: 记录持久保存在 `/etc/mnt/plugins/.eula`，不再询问；
+  后端 `plugin` 动作也会校验该文件(未同意直接拒绝，避免绕过前端)。
+* 审计日志里会留痕: `eula.accept` / `eula.reject` 事件。
+
+```
+$ cat /etc/mnt/plugins/.eula
+accepted=1
+version=v1.0
+time=2026-10-13 21:40:12
+```
+
+### 6.5 通过 Web 接口直接调用(不打开浏览器也能验证)
+
+> `passwd` 要传 **md5(密码)**，登录成功后 cookie 里带 `sess_key`。
+> 插件管理页的路由是 `#/system-setting/plugin-management`(注意不是 `linkTo` 里那个名字)。
 
 ```bash
+PW=$(printf '%s' '你的密码' | md5sum | cut -d' ' -f1)
 curl -s -c /tmp/ck -X POST http://127.0.0.1:18080/Action/login \
      -H 'Content-Type: application/json' \
-     -d '{"username":"admin","passwd":"<密码>","remember_password":0}' >/dev/null
+     -d "{\"username\":\"admin\",\"passwd\":\"$PW\",\"remember_password\":0}" >/dev/null
 curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
      -H 'Content-Type: application/json' \
-     -d '{"func_name":"ikguard","action":"show","param":{"TYPE":"data,flags"}}'
+     -d '{"func_name":"plugins","action":"show","param":{"TYPE":"data"}}'   # 插件卡片列表
+curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
+     -H 'Content-Type: application/json' \
+     -d '{"func_name":"ikguard","action":"show","param":{"TYPE":"data,flags,plugins,eula"}}'
+```
+
+#### 6.5.1 用 HTTP 上传安装插件包(zip)
+
+上传与安装是两步(和官方"上传固件"一样的套路): 先 POST 文件到 `/Action/upload`
+(落盘到 `/tmp/iktmp/import/<文件名>`，注意上传前会清空该目录、单文件上限 50MB)，
+再调用 `ikguard plugin op=install name=<文件名>` 解压安装。
+
+> **坑**: iKuai 的 `ActionUpload` 存盘用的是 multipart 的**字段名**(`getUploadHead(...).name`)，
+> 不是 `filename=`。所以表单字段名必须写成原始文件名，否则文件会存成 `file`
+> 导致下一步 `install name=xxx.zip` 找不到文件。
+
+```bash
+# 1) 上传(字段名 = 文件名!)
+curl -s -b /tmp/ck -F "mytool.zip=@mytool.zip" http://127.0.0.1:18080/Action/upload
+#    -> {"Result":10000,"ErrMsg":"Success"}
+
+# 2) 安装(会先归档到 /etc/mnt/plugins/.installed/ 再解压到 /etc/mnt/plugins/<名称>/)
+curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
+     -H 'Content-Type: application/json' \
+     -d '{"func_name":"ikguard","action":"plugin","param":{"op":"install","name":"mytool.zip"}}'
+```
+
+插件包格式(完整版, 见 `examples/rust-plugin/` 的可运行示例):
+
+```
+Release                    必需  plugin=<名称>  version=<版本>(名称决定安装目录与卡片名)
+install.sh                 必需  安装时执行(需幂等)
+boot.sh                    可选  仅开机执行(存在时优先于 install.sh)
+uninstall.sh               可选  卸载
+bin/*                      可选  自动软链到 /usr/sbin(去掉 .sh 后缀)
+etc/*                      可选  自动软链到 /usr/local/etc
+www/plugins/<n>/<n>.json   可选  插件卡片(名字必须与目录名一致)
+www/plugins/app/<n>.html   可选  插件页面(iframe 打开)
+www/plugins/app/<n>.png    可选  卡片图标(建议 64x64)
+function/<func_name>       可选  后端接口(shebang: #!/bin/bash /etc/ikcommon)
+MANIFEST.MF / SIGNATURE.RSA 可选  不强制签名(带清单才校验摘要)
+```
+
+`www/` 与 `function/` 由 `lib/plugin.sh:plugin_web_link()` 在**安装和每次开机**时软链到根分区，
+卸载时由 `plugin_unlink()` 精确清理 —— 插件脚本不用自己维护这些链接。
+
+打包: zip 里可以直接放这些文件, 也可以是"单层目录"(如 `zip -r mytool.zip mytool/`),
+安装时会自动下钻一层; 名字取自 `Release` 的 `plugin=`, 没有 `Release` 时用目录名。
+
+命令行等价做法(不经过 Web):
+
+```bash
+ssh sshd@<设备> "ikplugin install /tmp/iktmp/import/mytool.zip"     # 直接安装
+ssh sshd@<设备> "cp mytool.zip /etc/mnt/plugins/ && ikplugin scan"  # 或丢进目录后扫描
+```
+
+### 6.6 插件示例: Rust 版 `rustdemo`
+
+仓库里带了一个可直接编译安装的示例插件 `examples/rust-plugin/`(Rust + redb 嵌入式数据库 +
+Web 配置页)，用来演示"独立插件"的完整写法，也可以当模板：
+
+```
+examples/rust-plugin/
+├── src/main.rs         采集守护进程 + 嵌入式数据库 + Unix socket 查询接口
+├── build.sh            编译 musl 静态二进制 + 打成 dist/rustdemo.zip
+└── pkg/                Release / install.sh / boot.sh / uninstall.sh /
+                        bin/rustdemo / function/rustdemo / www/plugins/...
+```
+
+它演示的关键点(详细说明见 `examples/rust-plugin/README.md`):
+
+1. **安装/卸载/开机自启**: 三个脚本分别对应 install / uninstall / boot 动作；数据与数据库放在
+   持久分区 `/etc/mnt/plugins/rustdemo/data/`，重启不丢；开机由 `boot.sh` 重新拉起守护进程。
+2. **前端设置**: 页面 `www/plugins/app/rustdemo.html`(卡片 `www/plugins/rustdemo/rustdemo.json`)
+   提供"采集间隔/保留条数/备注"配置表单与采样数据查看，后端 `function/rustdemo` 提供
+   `show/seting/clear/sample` 动作，配置真正写进数据库的 `config` 表。
+3. **redb 独占锁的处理**: 数据库同时只能被一个进程打开，所以守护进程是唯一写入者，
+   并在 `data/rustdemo.sock` 上提供一行命令/一行 JSON 的 Unix socket 接口；
+   命令行与后端接口优先走 socket，守护不在时才直接开库 —— 两边共用同一套实现函数。
+4. **必须静态链接**: 设备是 uClibc(`/lib/ld64-uClibc.so.0`)，所以用
+   `x86_64-unknown-linux-musl` + 纯 Rust 依赖(不需要 C 交叉工具链)。
+
+实测(在设备上安装后):
+
+```
+$ ikplugin list
+NAME                     VERSION      LOCATION
+rustdemo                 1.0.0        /etc/mnt/plugins/rustdemo
+
+$ /usr/sbin/rustdemo stats
+{"samples":12,"db_size":3702784,"interval":"15","retention":"500","daemon_running":true,...}
+
+$ /usr/ikuai/function/rustdemo show TYPE=data
+{"data":{"stats":{...},"config":{...},"samples":[...]}}
 ```
 
 ---
@@ -381,14 +577,19 @@ curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
 | 键 | 默认 | 作用 |
 | --- | --- | --- |
 | `sshd` | 1 | 控制台账号 shell 换成 bash，可 SSH 登录 |
-| `remote` | 0 | iKuai 云端远程维护通道 |
 | `backdoor` | 1 | 后门/更新通道阻断(进程+文件+网络三层) |
 | `backdoor_hosts` | 0 | 额外把云端域名写入 `/etc/hosts` 指向 0.0.0.0 |
-| `plugins` | 1 | 插件系统(含 Web 插件资源同步) |
-| `plugins_verify` | 0 | 插件包强制签名校验 |
+| `plugins` | 1 | 插件系统(含 Web 插件资源同步；首次使用需同意《使用条款》) |
 | `cron` | 1 | 铺开 `/etc/mnt/cron.d` |
 | `shell` | 1 | 链接 `/etc/mnt/shells` 下的程序/配置 |
 | `audit` | 1 | 审计取证(进程/DNS/网络/封锁命中) |
+
+**已废弃并会自动清理的两个键**(升级时 install.sh 会 `sed -i` 删除):
+
+| 键 | 原意 | 现状 |
+| --- | --- | --- |
+| `remote` | iKuai 云"远程控制/远程维护"开关 | 历史遗留的空开关：**没有任何脚本读取它**。真正的云端远程控制已由后门阻断层覆盖 —— `ik_rc_client`/`cre`/`pmd` 被换成空壳、`monitor_process.sh` 不再守护、云端域名/IP/端口被 DROP。所以"默认关闭"= 该通道本来就不可用 |
+| `plugins_verify` | 插件包强制签名校验 | 已去掉：插件包不再要求签名(带 `MANIFEST.MF` 只校验摘要，带签名+公钥才额外验签) |
 
 命令行修改(等价于 Web 页面开关)：
 

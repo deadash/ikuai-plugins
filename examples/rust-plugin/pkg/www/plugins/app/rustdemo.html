@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Rust 示例插件 rustdemo</title>
+<style>
+  :root { --bd:#e4e7ed; --fg:#303133; --mut:#909399; --pri:#409eff; --ok:#67c23a; --warn:#e6a23c; --err:#f56c6c; --bg:#f5f7fa; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:14px; font:13px/1.6 "Microsoft YaHei",Helvetica,Arial,sans-serif; color:var(--fg); background:#fff; }
+  h3 { margin:0 0 10px; font-size:15px; }
+  h4 { margin:16px 0 6px; font-size:13px; color:#606266; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; }
+  .card { flex:1 1 150px; min-width:140px; border:1px solid var(--bd); border-radius:6px; padding:10px 12px; background:var(--bg); }
+  .card .k { color:var(--mut); font-size:12px; }
+  .card .v { font-size:16px; font-weight:700; margin-top:2px; word-break:break-all; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); }
+  table { width:100%; border-collapse:collapse; }
+  th,td { border-bottom:1px solid var(--bd); padding:6px 8px; text-align:left; font-size:12px; }
+  th { background:var(--bg); color:var(--mut); font-weight:400; }
+  pre { margin:0; padding:10px; background:#1e1e1e; color:#d4d4d4; border-radius:5px; max-height:200px; overflow:auto; font:12px/1.5 Consolas,Monaco,monospace; white-space:pre-wrap; }
+  .form { border:1px solid var(--bd); border-radius:6px; padding:12px; background:var(--bg); }
+  .form label { display:inline-block; width:120px; color:#606266; font-size:12px; }
+  .form input { border:1px solid var(--bd); border-radius:4px; padding:5px 8px; font-size:12px; width:200px; }
+  button { cursor:pointer; border:1px solid var(--bd); background:#fff; border-radius:4px; padding:5px 12px; font-size:12px; }
+  button:hover { border-color:var(--pri); color:var(--pri); }
+  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .msg { min-height:18px; font-size:12px; color:var(--mut); }
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; background:var(--bd); color:#fff; }
+  .tip { color:var(--mut); font-size:12px; line-height:1.8; }
+  code { background:#f2f3f5; padding:0 4px; border-radius:3px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h3 style="margin:0">Rust 示例插件</h3>
+  <span class="tag">rustdemo</span>
+  <span style="flex:1"></span>
+  <span class="msg" id="msg"></span>
+  <button onclick="load()">刷新</button>
+</div>
+
+<div class="row" id="cards"></div>
+
+<h4>采集配置（保存在插件自己的数据库里，重启不丢）</h4>
+<div class="form">
+  <div style="margin-bottom:8px"><label>采集间隔(秒)</label><input id="f-interval" type="number" min="2" max="86400"></div>
+  <div style="margin-bottom:8px"><label>保留条数</label><input id="f-retention" type="number" min="10" max="100000"></div>
+  <div style="margin-bottom:8px"><label>备注</label><input id="f-note" type="text" placeholder="例如: 机房A 出口路由"></div>
+  <button class="pri" onclick="save()">保存配置</button>
+  <button onclick="act('sample')">立即采样</button>
+  <button onclick="act('clear')">清空采样数据</button>
+</div>
+
+<h4>最近采集记录（最多 20 条）</h4>
+<table>
+  <thead><tr><th>时间</th><th>uptime(s)</th><th>load1</th><th>可用内存(MB)</th><th>连接跟踪数</th></tr></thead>
+  <tbody id="rows"><tr><td colspan="5" style="color:#909399">暂无数据</td></tr></tbody>
+</table>
+
+<h4>数据库文件</h4>
+<pre id="dbinfo">-</pre>
+
+<p class="tip">这个插件演示了插件系统的完整能力：<b>安装/卸载/开机自启</b>（install.sh / boot.sh / uninstall.sh）、
+  <b>前端设置页</b>（www/ 目录 + function/ 后端接口）、<b>持久化与数据库</b>（redb 嵌入式数据库，存放于
+  <code>/etc/mnt/plugins/rustdemo/data/rustdemo.redb</code>，重启不丢）。源代码见
+  <code>examples/rust-plugin/</code>。</p>
+
+<script>
+function api(action, param) {
+  return fetch('/Action/call', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ func_name:'rustdemo', action:action, param:param||{} })
+  }).then(function(r){ return r.json(); }).then(function(j){
+    if (j.Result !== 30000) { throw new Error(j.ErrMsg || ('错误码 '+j.Result)); }
+    return j.Data || {};
+  });
+}
+function tip(t, cls) {
+  var m = document.getElementById('msg');
+  m.textContent = t || ''; m.className = cls || 'msg';
+  if (t) { setTimeout(function(){ if (m.textContent===t) m.textContent=''; }, 6000); }
+}
+function card(k, v, cls) {
+  return '<div class="card"><div class="k">'+k+'</div><div class="v '+(cls||'')+'">'+v+'</div></div>';
+}
+function fmtSize(n) {
+  n = Number(n)||0;
+  if (n > 1048576) return (n/1048576).toFixed(2)+' MB';
+  if (n > 1024) return (n/1024).toFixed(1)+' KB';
+  return n+' B';
+}
+function fmtTime(ts) {
+  if (!ts) return '-';
+  var d = new Date(Number(ts)*1000);
+  function p(x){ return (x<10?'0':'')+x; }
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+
+function load() {
+  return api('show', {TYPE:'data'}).then(function(d){
+    // 兼容两种返回: Data.{stats,config,samples} 或 Data.data.{...}
+    if (d && d.data && !d.stats) { d = d.data; }
+    if (d && d.error) { tip(d.error, 'msg err'); }
+    var s = d.stats || {}, c = d.config || {}, samples = Array.isArray(d.samples) ? d.samples : [];
+    var html = '';
+    html += card('采样记录数', (s.samples||0)+' 条');
+    html += card('数据库大小', fmtSize(s.db_size));
+    html += card('最后采集', s.last ? fmtTime(s.last.ts) : '无');
+    html += card('守护进程', s.daemon_running ? ('运行中 #'+s.daemon_pid) : '未运行', s.daemon_running?'ok':'err');
+    html += card('采集间隔', (c.interval||'-')+' 秒');
+    html += card('保留条数', (c.retention||'-'));
+    document.getElementById('cards').innerHTML = html;
+
+    document.getElementById('f-interval').value = c.interval || '';
+    document.getElementById('f-retention').value = c.retention || '';
+    document.getElementById('f-note').value = c.note || '';
+
+    var rows = '';
+    samples.slice().reverse().forEach(function(x){
+      rows += '<tr><td>'+fmtTime(x.ts)+'</td><td>'+(x.uptime||0)+'</td><td>'+(x.load1||0)+'</td>'
+           +  '<td>'+((Number(x.mem_available_kb)||0)/1024).toFixed(1)+'</td><td>'+(x.conntrack||0)+'</td></tr>';
+    });
+    document.getElementById('rows').innerHTML = rows || '<tr><td colspan="5" style="color:#909399">暂无数据</td></tr>';
+
+    document.getElementById('dbinfo').textContent =
+      '数据库: ' + (s.db_path||'-') + '\n大小: ' + fmtSize(s.db_size) + '\n创建时间: ' + fmtTime(s.created_at) +
+      '\n守护进程 PID: ' + (s.daemon_pid||'-') + '\n日志: /etc/log/ikguard/rustdemo.log';
+  }).catch(function(e){ tip('加载失败: '+e.message, 'msg err'); });
+}
+
+function save() {
+  // 参数里不能带空格, 备注用 '+' 代替空格(后端会还原)
+  var note = (document.getElementById('f-note').value || '').replace(/\s+/g, '+');
+  var interval = String(document.getElementById('f-interval').value || '');
+  var retention = String(document.getElementById('f-retention').value || '');
+  api('seting', {key:'interval', value:interval})
+    .then(function(){ return api('seting', {key:'retention', value:retention}); })
+    .then(function(){ return api('seting', {key:'note', value:note || '+'}); })
+    .then(function(){ tip('配置已保存(存在插件数据库里)', 'msg ok'); load(); })
+    .catch(function(e){ tip('保存失败: '+e.message, 'msg err'); });
+}
+
+function act(action) {
+  api(action, {}).then(function(){
+    tip('操作成功', 'msg ok'); load();
+  }).catch(function(e){ tip('操作失败: '+e.message, 'msg err'); });
+}
+
+load();
+setInterval(function(){ if (!document.hidden) load(); }, 20000);
+</script>
+</body>
+</html>

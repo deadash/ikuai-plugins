@@ -12,9 +12,14 @@
 #   ikplugin keygen [目录]         生成签名密钥对
 #
 # 安装插件最简单的方式: 把 xxx.zip 传到 /etc/mnt/plugins/ 后执行 `ikplugin scan`，
-# 或直接重启(开机会自动安装)。
+# 或直接重启(开机会自动安装)；网页端可在"系统设置 -> 插件管理 -> ikguard"里上传 zip。
+#
+# 说明: 插件包不强制要求签名(强校验已去掉)。带 MANIFEST.MF 才会校验文件摘要,
+#       同时带 SIGNATURE.RSA 且存在 /etc/mnt/.boot/plugin.pub 时才额外校验签名。
 
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 通过 /usr/sbin/<name> 软链调用时 $0 是软链路径, 必须解析出真实路径
+SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 . "$SELF_DIR/../lib/common.sh"
 . "$SELF_DIR/../lib/plugin.sh"
 

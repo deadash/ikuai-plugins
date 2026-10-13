@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>启用插件功能</title>
+<style>
+  :root { --bd:#dcdfe6; --fg:#303133; --mut:#909399; --pri:#409eff; --ok:#67c23a; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; font:13px/1.7 "Microsoft YaHei",Helvetica,Arial,sans-serif; color:var(--fg);
+         background:#f5f7fa; display:flex; align-items:center; justify-content:center; }
+  .box { width:min(560px, 92vw); background:#fff; border:1px solid var(--bd); border-radius:10px;
+         padding:26px 28px; text-align:center; box-shadow:0 2px 12px rgba(0,0,0,.06); }
+  .box img { width:56px; height:56px; }
+  h2 { margin:12px 0 6px; font-size:17px; }
+  .note { color:var(--mut); font-size:12px; line-height:1.9; text-align:left; margin:14px 0 18px;
+          background:#fafafa; border-radius:6px; padding:12px 14px; }
+  .note b { color:#606266; }
+  button { cursor:pointer; border-radius:6px; font-size:13px; padding:9px 22px; border:1px solid var(--bd); background:#fff; }
+  button.grey { background:#c8c9cc; border-color:#c8c9cc; color:#fff; font-weight:700; }
+  button.grey:hover { background:#b1b3b8; border-color:#b1b3b8; }
+  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
+  button.pri:disabled { background:#a0cfff; border-color:#a0cfff; cursor:not-allowed; }
+  .msg { min-height:18px; font-size:12px; color:var(--mut); margin-top:10px; }
+  .mask { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:9; }
+  .mask.on { display:flex; }
+  .dlg { width:min(720px,94vw); height:min(620px,88vh); background:#fff; border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
+  .dlg h3 { margin:0; padding:14px 20px; font-size:15px; border-bottom:1px solid var(--bd); background:#fafafa; }
+  .dlg .txt { flex:1; overflow:auto; padding:16px 20px; white-space:pre-wrap; font-size:12.5px; line-height:1.85; color:#4b4f57; }
+  .dlg .ft { padding:12px 20px; border-top:1px solid var(--bd); display:flex; gap:10px; align-items:center; justify-content:flex-end; }
+  .dlg .ft span { margin-right:auto; color:var(--mut); font-size:12px; }
+</style>
+</head>
+<body>
+<div class="box">
+  <img src="/plugins/app/terms.png" alt="terms">
+  <h2>启用插件功能</h2>
+  <div class="note">
+    本框架与插件由第三方提供，并非爱快官方产品，安装后可能影响设备稳定性与官方支持资格。<br>
+    <b>首次启用前需要阅读并同意《使用条款与免责声明》</b>；同意记录只保存在本设备
+    (<code>/etc/mnt/plugins/.eula</code>)，此后不再重复询问。
+  </div>
+  <button class="grey" id="btn">查看并同意《使用条款》</button>
+  <div class="msg" id="msg"></div>
+</div>
+
+<div class="mask" id="mask">
+  <div class="dlg">
+    <h3>使用条款与免责声明</h3>
+    <div class="txt" id="txt">正在加载条款…</div>
+    <div class="ft">
+      <span id="hint">请完整阅读后点击"同意并启用"</span>
+      <button onclick="closeDlg()">取消</button>
+      <button class="pri" id="agree" onclick="agree()" disabled>同意并启用</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function api(action, param) {
+  return fetch('/Action/call', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({func_name:'ikguard', action:action, param:param||{}}) })
+    .then(function(r){ return r.json(); })
+    .then(function(j){ if (j.Result !== 30000) throw new Error(j.ErrMsg || ('错误码 ' + j.Result)); return j.Data || {}; });
+}
+function msg(t) { document.getElementById('msg').textContent = t || ''; }
+
+document.getElementById('btn').onclick = function () {
+  var txt = document.getElementById('txt');
+  document.getElementById('mask').classList.add('on');
+  api('show', {TYPE:'eula'}).then(function (d) {
+    var e = (d && d.eula) ? d.eula : {};
+    txt.textContent = e.text || '（条款内容缺失）';
+    document.getElementById('agree').disabled = false;
+  }).catch(function (err) {
+    txt.textContent = '条款加载失败：' + err.message;
+  });
+};
+function closeDlg() { document.getElementById('mask').classList.remove('on'); }
+
+function agree() {
+  var b = document.getElementById('agree');
+  b.disabled = true; b.textContent = '正在保存…';
+  api('eula', {op:'accept'}).then(function () {
+    msg('已同意，正在启用插件功能…');
+    document.getElementById('mask').classList.remove('on');
+    setTimeout(function () {
+      try { window.parent.location.reload(); } catch (e) { location.reload(); }
+    }, 800);
+  }).catch(function (err) {
+    b.disabled = false; b.textContent = '同意并启用';
+    msg('保存失败：' + err.message);
+  });
+}
+</script>
+</body>
+</html>

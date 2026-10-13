@@ -53,14 +53,18 @@ ensure_key() {
 }
 
 ensure_key sshd 1
-ensure_key remote 0
 ensure_key backdoor 1
 ensure_key backdoor_hosts 0
 ensure_key plugins 1
-ensure_key plugins_verify 0
 ensure_key cron 1
 ensure_key shell 1
 ensure_key audit 1
+
+# 清理已废弃开关:
+#   remote         历史遗留的空开关(没有任何脚本读取; iKuai 云平台的"远程控制/远程维护"
+#                  已由后门阻断层覆盖: ik_rc_client 空壳 + monitor_process 不再守护 + 网络封锁)
+#   plugins_verify 插件强校验(插件包不再要求签名)
+sed -i '/^remote=/d;/^plugins_verify=/d' "$BOOT_ARGS" 2>/dev/null
 
 echo "已部署到 $BOOT_PATH"
 echo "开关文件: $BOOT_ARGS"

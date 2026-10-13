@@ -10,3 +10,8 @@ SIGNATURE.RSA
 .tests/.mock
 .tests/.build
 .tests/.shim.log
+
+# Rust 示例插件的构建产物(build.sh 会生成)
+examples/rust-plugin/target
+examples/rust-plugin/dist
+examples/rust-plugin/pkg/bin

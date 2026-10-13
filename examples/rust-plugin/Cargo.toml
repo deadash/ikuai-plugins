@@ -1,0 +1,21 @@
+[package]
+name = "rustdemo"
+version = "1.0.0"
+edition = "2021"
+description = "iKuai 插件框架 Rust 示例插件: 采集系统指标并写入嵌入式数据库(redb), 带 Web 配置页"
+
+# 目标: 静态 musl 二进制, 设备(uClibc/musl 环境)可直接运行
+#   rustup target add x86_64-unknown-linux-musl
+#   cargo build --release --target x86_64-unknown-linux-musl
+#
+# 只依赖纯 Rust crate(redb 嵌入式数据库 + serde_json), 交叉编译不需要 C 工具链。
+[dependencies]
+redb = "2"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

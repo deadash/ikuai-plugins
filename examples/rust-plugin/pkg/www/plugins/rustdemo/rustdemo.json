@@ -1,0 +1,1 @@
+{"name":"rustdemo","manufacturer":"iKuai","version":"1.0.0","title":"Rust 示例插件","author":"deadash","description":"Rust 编写的示例插件: 采集系统指标写入 redb 嵌入式数据库, 提供 Web 配置与数据查看"}

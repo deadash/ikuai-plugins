@@ -28,7 +28,15 @@ PLUGIN_STATE="/etc/mnt/plugins/.state"
 PLUGIN_ARCHIVE="/etc/mnt/plugins/.installed"
 PLUGIN_PUBKEY="/etc/mnt/.boot/plugin.pub"
 PLUGIN_KEY="/etc/mnt/plugins/plugin.key"
-PLUGIN_VERIFY="$(get_flag plugins_verify 0)"
+# 插件强校验(plugins_verify)已废弃: 插件包不再强制要求签名, 见 plugin_verify()
+# 《使用条款》同意记录: 没有它不显示/不启用插件功能(前端只给一个灰色按钮)
+PLUGIN_EULA="/etc/mnt/plugins/.eula"
+PLUGIN_CARD_STUB="terms"
+
+plugin_eula_accepted() {
+    test -f "$(P "$PLUGIN_EULA")" || return 1
+    grep -q "^accepted=1" "$(P "$PLUGIN_EULA")" 2>/dev/null
+}
 
 plugin_log() { log "[plugin] $*"; }
 
@@ -87,26 +95,18 @@ plugin_check_signature() {
         -signature "$dir/SIGNATURE.RSA" "$dir/MANIFEST.MF" >/dev/null 2>&1
 }
 
-# 插件包校验: 有清单则校验摘要; 有签名+公钥则校验签名; plugins_verify=1 时强制要求签名
+# 插件包校验: 不强制要求签名(强校验已废弃)
+#   带 MANIFEST.MF  -> 校验其中每个文件的 SHA-256(防传输损坏/被改动)
+#   同时带 SIGNATURE.RSA 且配置了 plugin.pub -> 额外校验签名
+#   只有 install.sh 的普通 zip 也能直接安装
 plugin_verify() {
     local dir="$1" key
     key="$(P "$PLUGIN_PUBKEY")"
 
-    if test -f "$dir/MANIFEST.MF"; then
-        plugin_check_manifest "$dir" || return 1
-        if test -f "$dir/SIGNATURE.RSA"; then
-            if test -f "$key"; then
-                plugin_check_signature "$dir" "$key" || { plugin_log "签名校验失败"; return 1; }
-            else
-                plugin_log "无公钥, 仅校验摘要"
-            fi
-        elif test "$PLUGIN_VERIFY" = "1"; then
-            plugin_log "缺少 SIGNATURE.RSA 且 plugins_verify=1"
-            return 1
-        fi
-    elif test "$PLUGIN_VERIFY" = "1"; then
-        plugin_log "缺少 MANIFEST.MF 且 plugins_verify=1"
-        return 1
+    test -f "$dir/MANIFEST.MF" || return 0
+    plugin_check_manifest "$dir" || return 1
+    if test -f "$dir/SIGNATURE.RSA" && test -f "$key"; then
+        plugin_check_signature "$dir" "$key" || { plugin_log "签名校验失败"; return 1; }
     fi
     return 0
 }
@@ -135,16 +135,49 @@ plugin_link() {
     fi
 }
 
-# 删除指向某插件目录的所有软链接
+# 插件自带的 Web 资源与后端接口(可选), 链接到根分区:
+#   <plugin>/www/plugins/<name>/<name>.json -> /usr/ikuai/www/plugins/<name>/  (插件卡片)
+#   <plugin>/www/plugins/app/*              -> /usr/ikuai/www/plugins/app/     (页面/图标)
+#   <plugin>/function/<func_name>           -> /usr/ikuai/function/<func_name> (后端接口)
+# 用软链而不是拷贝: 卸载时能精确清理, 且根分区重启还原后重建代价更低。
+plugin_web_link() {
+    local dir="$1" item rel target
+    if test -d "$dir/www/plugins"; then
+        ( cd "$dir/www" && find plugins -type f -print0 2>/dev/null | \
+          while IFS= read -r -d '' item; do
+              rel="${item#plugins/}"
+              target="$(P /usr/ikuai/www/plugins)/$rel"
+              mkdir -p "$(dirname "$target")" 2>/dev/null
+              ln -sf "$dir/www/$item" "$target" 2>/dev/null
+          done )
+    fi
+    if test -d "$dir/function"; then
+        mkdir -p "$(P /usr/ikuai/function)" 2>/dev/null
+        ( cd "$dir/function" && find . -type f -print0 2>/dev/null | \
+          while IFS= read -r -d '' item; do
+              rel="${item#./}"
+              chmod +x "$dir/function/$rel" 2>/dev/null
+              ln -sf "$dir/function/$rel" "$(P /usr/ikuai/function)/$rel" 2>/dev/null
+          done )
+    fi
+    return 0
+}
+
+# 删除指向某插件目录的所有软链接(含 Web 卡片/页面与后端接口)
 plugin_unlink() {
     local dir="$1" base item
-    for base in "$(P /usr/sbin)" "$(P /usr/local/etc)"; do
+    for base in "$(P /usr/sbin)" "$(P /usr/local/etc)" \
+                "$(P /usr/ikuai/function)" "$(P /usr/ikuai/www/plugins)"; do
         test -d "$base" || continue
         find "$base" -maxdepth 4 -type l -print0 2>/dev/null | \
         while IFS= read -r -d '' item; do
             case "$(readlink "$item" 2>/dev/null)" in "$dir"/*) rm -f "$item" ;; esac
         done
     done
+    # 顺手删掉因此变空的插件卡片目录
+    find "$(P /usr/ikuai/www/plugins)" -mindepth 1 -maxdepth 1 -type d -empty 2>/dev/null | \
+    while IFS= read -r item; do rmdir "$item" 2>/dev/null; done
+    return 0
 }
 
 # 执行插件脚本(带环境变量)
@@ -160,6 +193,7 @@ plugin_run() {
 
     if test -z "$script"; then
         plugin_link "$dir"
+        plugin_web_link "$dir"
         return 0
     fi
 
@@ -183,7 +217,7 @@ plugin_record() {
 
 # 安装插件: plugin_install <zip|目录>
 plugin_install() {
-    local src="$1" name dest tmp
+    local src="$1" name dest tmp bak keep_data=0
     test -e "$src" || { plugin_log "不存在: $src"; return 1; }
     plugin_ensure_dirs
 
@@ -207,20 +241,56 @@ plugin_install() {
             rm -rf "$tmp"
             return 1
         fi
+        # 兼容 "zip -r pack.zip <目录>" 打出来的包: 解压后只有一层目录、
+        # 且 Release 在该目录里时自动下钻一层(否则会被当成名字为 tmp.XXXX 的插件)
+        if [ ! -f "$tmp/Release" ]; then
+            local cnt sub tmp2
+            cnt="$(find "$tmp" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+            sub="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n1)"
+            if [ "$cnt" = "1" ] && [ -n "$sub" ] && [ -f "$sub/Release" ]; then
+                tmp2="$(mktemp -d)"
+                if mv "$sub" "$tmp2/pkg" 2>/dev/null; then
+                    plugin_log "包内是单层目录, 自动下钻: $(basename "$sub")"
+                    rm -rf "$tmp"
+                    tmp="$tmp2/pkg"
+                else
+                    rm -rf "$tmp2"
+                fi
+            fi
+        fi
         name=$(plugin_name "$tmp")
         if ! plugin_verify "$tmp"; then
             rm -rf "$tmp"
             return 1
         fi
         dest="$(P "$PLUGIN_ROOT")/$name"
+        # 升级安装: 先保留插件自己的持久数据目录 data/(数据库/状态), 否则重装即丢数据。
+        # 用同分区 rename 做暂存(bak 目录与插件目录同一个文件系统), 不经过 /tmp。
+        if [ -d "$dest/data" ]; then
+            bak="$(P "$PLUGIN_ROOT")/.backup-$name"
+            rm -rf "$bak"
+            mkdir -p "$bak"
+            if mv "$dest/data" "$bak/data" 2>/dev/null; then
+                keep_data=1
+                plugin_log "已暂存持久数据: $dest/data"
+            fi
+        fi
         rm -rf "$dest"
         mkdir -p "$(dirname "$dest")"
         mv "$tmp" "$dest"
+        if [ "$keep_data" = "1" ]; then
+            rm -rf "$dest/data"
+            if mv "$bak/data" "$dest/data" 2>/dev/null; then
+                plugin_log "已恢复持久数据: $dest/data"
+            fi
+            rm -rf "$bak"
+        fi
     fi
 
     plugin_log "安装插件: $name (版本 $(plugin_version "$dest"))"
     plugin_run "$dest" "install"
     plugin_link "$dest"
+    plugin_web_link "$dest"
     plugin_record "$name" "$dest"
     return 0
 }
@@ -261,6 +331,7 @@ plugin_boot() {
         plugin_log "启动插件: $(plugin_name "$d")"
         plugin_run "$d" "boot"
         plugin_link "$d"
+        plugin_web_link "$d"
     done
 }
 
@@ -294,31 +365,110 @@ PLUGIN_FUNCTION_SRC="$(P /etc/mnt/.boot/usr/ikuai/function)"
 PLUGIN_FUNCTION_DST="$(P /usr/ikuai/function)"
 
 # 同步 Web 插件资源到根分区(根分区每次重启还原, 必须每开机重建)
-#   <boot>/www/plugins/<name>/<name>.json  -> /usr/ikuai/www/plugins/<name>/<name>.json
-#   <boot>/www/plugins/docker/<name>.html  -> /usr/ikuai/www/plugins/docker/<name>.html
-# 说明: iKuai 前端(/usr/ikuai/function/plugins 的 __show_data)会读取
-#       /usr/ikuai/www/plugins/*/*.json 生成"系统设置->插件管理"卡片列表,
-#       卡片点击后以 iframe 打开 /plugins/docker/<name>.html
+#   <boot>/www/plugins/<name>/<name>.json  -> /usr/ikuai/www/plugins/<name>/<name>.json (卡片)
+#   <boot>/www/plugins/app/<name>.{html,png} -> /usr/ikuai/www/plugins/app/          (页面/图标)
+# 说明: iKuai 前端(/usr/ikuai/function/plugins 的 __show_data)读取
+#       /usr/ikuai/www/plugins/*/*.json 生成"系统设置->插件管理"卡片列表, 卡片点击后
+#       以 iframe 打开 /plugins/app/<name>.html (原路径是 /plugins/docker/, 见 plugin_web_patch)。
+#
+# 使用条款(PLUGIN_EULA)未同意时: 只铺"需要同意条款"的占位卡片(PLUGIN_CARD_STUB),
+# 不显示任何真实插件; 同意后由 ikguard 的 eula 动作重新调用本函数换成正式卡片。
 plugin_web_sync() {
-    local src="$PLUGIN_WWW_SRC/plugins" dst="$PLUGIN_WWW_DST" f d
+    local src="$PLUGIN_WWW_SRC/plugins" dst="$PLUGIN_WWW_DST" f d name
     test -d "$src" || return 0
+
     mkdir -p "$dst" 2>/dev/null
+    # 清理本框架上一次铺的普通文件(同意/未同意之间切换会残留卡片)。
+    # 注意: 只删普通文件, 不能删插件(plugin_web_link)建的软链 —— 它们是别的进程/步骤放的,
+    # 被这里清掉会导致"插件装了但页面上没有卡片/页面"。
+    find "$dst" -mindepth 2 -maxdepth 2 -type f 2>/dev/null | while IFS= read -r f; do rm -f "$f"; done
+    find "$dst/app" -maxdepth 1 -type f 2>/dev/null | while IFS= read -r f; do rm -f "$f"; done
+    # 删掉空掉的卡片目录(里面还有插件软链的目录不会被删)
+    find "$dst" -mindepth 1 -maxdepth 1 -type d -empty 2>/dev/null | while IFS= read -r d; do rmdir "$d" 2>/dev/null; done
 
-    find "$src" -mindepth 2 -maxdepth 2 -name '*.json' -print0 2>/dev/null | \
-    while IFS= read -r -d '' f; do
-        d="$(basename "$(dirname "$f")")"
-        mkdir -p "$dst/$d" 2>/dev/null
-        cp -f "$f" "$dst/$d/" 2>/dev/null
-    done
-
-    test -d "$src/docker" && {
-        mkdir -p "$dst/docker" 2>/dev/null
-        find "$src/docker" -maxdepth 1 -type f -print0 2>/dev/null | \
-        while IFS= read -r -d '' f; do
-            cp -f "$f" "$dst/docker/" 2>/dev/null
+    if plugin_eula_accepted; then
+        for f in "$src"/*/*.json; do
+            [ -f "$f" ] || continue
+            d="$(basename "$(dirname "$f")")"
+            [ "$d" = "$PLUGIN_CARD_STUB" ] && continue
+            mkdir -p "$dst/$d" 2>/dev/null
+            cp -f "$f" "$dst/$d/" 2>/dev/null
         done
-    }
+        plugin_log "使用条款已同意, 已铺开插件卡片"
+    else
+        f="$src/$PLUGIN_CARD_STUB/$PLUGIN_CARD_STUB.json"
+        if [ -f "$f" ]; then
+            mkdir -p "$dst/$PLUGIN_CARD_STUB" 2>/dev/null
+            cp -f "$f" "$dst/$PLUGIN_CARD_STUB/" 2>/dev/null
+        fi
+        plugin_log "使用条款未同意, 仅显示同意入口(插件功能未启用)"
+    fi
+
+    # 页面与图标(含占位卡片用的 terms.html)
+    if test -d "$src/app"; then
+        mkdir -p "$dst/app" 2>/dev/null
+        for f in "$src/app"/*; do
+            [ -f "$f" ] || continue
+            cp -f "$f" "$dst/app/" 2>/dev/null
+        done
+    fi
     plugin_log "Web 插件资源已同步: $dst"
+    return 0
+}
+
+# Web 前端补丁(每个开机执行一次, 根分区每次重启还原):
+#   1) 去掉「插件管理」页"使用插件功能需要绑定爱快云平台！"的拦截
+#      前端逻辑 yunbindstatus = ("" != code ? 2 : 1), code 来自 func_name=register(云平台
+#      绑定码), 为空即未绑定 -> 1 = 只显示"前往绑定"。本框架插件不读云平台, 直接置 2。
+#   2) 插件页面目录 /plugins/docker/ 改名 /plugins/app/ (避免与 Docker 功能混淆)
+#   3) 点开插件后小标题写死的 "Docker" 文案改成 "插件"
+# 前端分包是 gzip 静态资源, 做法: 解开 -> sed 改写 -> 重新压缩 -> 复核后写回。
+plugin_web_patch() {
+    local dir f tmp patched gz n=0 want_ub want_dir want_title
+    dir="$(P /usr/ikuai/www/static/js)"
+    if [ ! -d "$dir" ]; then
+        plugin_log "跳过 Web 前端补丁(无 $dir)"
+        return 0
+    fi
+    command -v zcat >/dev/null 2>&1 || { plugin_log "跳过 Web 前端补丁(无 zcat)"; return 0; }
+
+    for f in "$dir"/*.js.gz; do
+        [ -f "$f" ] || continue
+        zcat "$f" 2>/dev/null | grep -q -e "Plugin_management" -e "plugins/docker/" -e "tipCloudBind" 2>/dev/null || continue
+
+        tmp="$(mktemp)"; patched="$(mktemp)"; gz="$(mktemp)"
+        if ! zcat "$f" > "$tmp" 2>/dev/null; then
+            rm -f "$tmp" "$patched" "$gz"; continue
+        fi
+
+        want_ub=0; want_dir=0; want_title=0; want_bind=0
+        grep -q 'yunbindstatus=""!=i.code?2:1' "$tmp" 2>/dev/null && want_ub=1
+        grep -q 'plugins/docker/' "$tmp" 2>/dev/null && want_dir=1
+        grep -q 't\._v("Docker")' "$tmp" 2>/dev/null && want_title=1
+        grep -q 'tipCloudBind=!0' "$tmp" 2>/dev/null && want_bind=1
+        if [ "$want_ub" = 0 ] && [ "$want_dir" = 0 ] && [ "$want_title" = 0 ] && [ "$want_bind" = 0 ]; then
+            rm -f "$tmp" "$patched" "$gz"; continue
+        fi
+
+        sed -e 's|yunbindstatus=""!=i.code?2:1|yunbindstatus=2|g' \
+            -e 's|plugins/docker/|plugins/app/|g' \
+            -e 's|t\._v("Docker")|t._v("插件")|g' \
+            -e 's|\.tipCloudBind=!0|.tipCloudBind=!1|g' "$tmp" > "$patched"
+
+        if gzip -9 -c < "$patched" > "$gz" 2>/dev/null && \
+           { [ "$want_ub" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'yunbindstatus=2'; } && \
+           { [ "$want_dir" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'plugins/app/'; } && \
+           { [ "$want_title" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 't._v("插件")'; } && \
+           { [ "$want_bind" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'tipCloudBind=!1'; }; then
+            cat "$gz" > "$f"
+            n=$((n + 1))
+            plugin_log "  已打补丁: $(basename "$f") (云平台拦截=$want_ub 目录改名=$want_dir 标题=$want_title 云弹框=$want_bind)"
+        else
+            plugin_log "  补丁未生效(保留原文件): $(basename "$f")"
+        fi
+        rm -f "$tmp" "$patched" "$gz"
+    done
+    plugin_log "Web 前端补丁完成(修改 $n 个分包)"
     return 0
 }
 
