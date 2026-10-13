@@ -1,8 +1,10 @@
 # 操作手册 (打包 / 签名 / SSH 升级 / 重启验证 / 审计与 Web 插件)
 
 本文档记录本框架在 **iKuai x64 (3.7.x)** 上的完整落地流程，全部操作均可通过 SSH 命令行完成。
-实测环境: iKuai 3.7.15 x64 跑在 QEMU/KVM 上，客户机 LAN `192.168.9.1`，宿主机侧通过
-QEMU user-net 端口转发 `127.0.0.1:10022 -> 192.168.9.1:22` 访问。
+实测环境: iKuai 3.7.15 x64 跑在 QEMU/KVM 上，客户机 LAN `192.168.9.1`；WAN 用 QEMU user-net
+(`eth1`, DHCP 到 `10.0.2.15`)，LAN 已换成 tap+bridge 的真实二层网络，可通过
+`127.0.0.1:10022 -> 10.0.2.15:22`(WAN 侧转发)或直接 `ssh sshd@192.168.9.1` 访问。
+需要"真实 LAN 客户端"做实际联网/封锁验证时见 [§9](#9-让虚拟机真的连上外网--真实-lan-客户端模拟)。
 
 ---
 
@@ -10,14 +12,14 @@ QEMU user-net 端口转发 `127.0.0.1:10022 -> 192.168.9.1:22` 访问。
 
 | 项目 | 值 |
 | --- | --- |
-| SSH | `ssh sshd@127.0.0.1 -p 10022`（dropbear；宿主机 user-net 只能从 127.0.0.1 转发进客户机） |
+| SSH | `ssh sshd@127.0.0.1 -p 10022`（dropbear；WAN 侧 user-net 转发到 `10.0.2.15:22`）。切到 §9.2 的 tap LAN 后也可直接 `ssh sshd@192.168.9.1` |
 | 账号 | `sshd` / 与 Web 控制台相同的密码（首次改密后即生效；`scripts/01_enable_ssh.sh` 把该账号 shell 换成 `/bin/bash`） |
-| Web | `http://<宿主IP>:8081/` （socat 转发 0.0.0.0:8081 → 127.0.0.1:18080 → 客户机 :80） |
+| Web | `http://<宿主IP>:8081/` （socat 转发 0.0.0.0:8081 → 127.0.0.1:18080 → 客户机 :80）。tap LAN 下也可直接 `http://192.168.9.1/` |
 | 控制台 | VNC 127.0.0.1:5901；QEMU monitor `/tmp/ikuai-mon.sock` |
 | 客户机文件系统 | `/` 根分区(111M, 每次重启还原) · `/etc/mnt`(sda3, 50M, 持久) · `/etc/log`(sda5, 15.5G, 持久) |
 
-> 注意: QEMU user-net 的 `hostfwd` 只绑在 `127.0.0.1`，所以 SSH/Web 都必须从宿主机本机发起；
-> 若要通过局域网访问，需要像 `vm/run.sh` 里那样用 socat 再转发一层。
+> 注意: QEMU user-net 的 `hostfwd` 只绑在 `127.0.0.1`，所以走 user-net 时 SSH/Web 必须从宿主机本机发起；
+> 若要通过局域网访问，需要像 `vm/run.sh` 里那样用 socat 再转发一层(或直接用 §9.2 的 tap LAN)。
 
 ---
 
@@ -311,7 +313,35 @@ $ grep cloud /etc/log/ikguard/audit-$(date +%Y%m%d).log | tail -3
 2026-10-13 19:01:01 INFO  dns.cloud   解析查询命中云端域名: 302.ikuai8.com
 ```
 
-配置完 WAN 的 iKuai 正规做法是「网络设置 → 内外网设置 → wan1 → 绑定网卡 eth1 → 动态 IP(DHCP)」。
+配置完 WAN 的 iKuai 正规做法是「网络设置 → 内外网设置 → wan1 → 绑定网卡 eth1 → 动态 IP(DHCP)」，
+用官方接口一次配好并持久化的做法见 [§9](#9-让虚拟机真的连上外网--真实-lan-客户端模拟)。
+
+### 5.3 采集踩坑与修复(3 个真 bug)
+
+| 现象 | 原因 | 修法 |
+| --- | --- | --- |
+| 审计日志只有开机那一次的数据，`proc/conn/dns` 不再更新 | 任务只写进了 `/etc/crontabs/cron.d/`，而 iKuai 的 `crond` 只读 `/etc/crontabs/root`(它的 `crond_commit` 是 `cat cron.d/* > root`，时机不对就会被整体重写) | `au_install_cron()` / `bd_install_guard()` 把任务**直接追加进 `/etc/crontabs/root`** |
+| `dns.cloud` 事件每分钟把一整天的域名重刷一遍，体检计数失真 | 每次 tick 都全文 `grep` 当天 DNS 日志 | 用偏移量状态文件 `$AU_STATE/dns.scan.<日期>` **只扫新增内容**(日志被轮转/清空时自动归零重扫) |
+| 体检报告"云端域名解析"恒为 0 | 统计写成了 `grep -c "cloud\."`：事件名里点号在 **cloud 前面**(`dns.cloud          解析...` 后面是空格)，这个表达式永远匹配不到 | 改成 `grep -cE 'dns\.cloud|cloud\.(ip\|port)\|probe\.cloud'` |
+
+修复后在真实外网环境实测：
+
+```
+$ grep -nE 'ikaudit|backdoor_guard' /etc/crontabs/root
+11:* * * * * /etc/mnt/.boot/bin/backdoor_guard
+12:* * * * * /etc/mnt/.boot/bin/ikaudit watch
+13:*/10 * * * * /etc/mnt/.boot/bin/ikaudit report
+
+$ grep -E '云端域名解析|结论' /etc/log/ikguard/report.txt
+DNS:    云端域名解析  : 292 次(今日审计日志)
+结论: 正常(无后门进程, 无云端连接)
+
+$ iptables -nvx -L FORWARD | grep ikuai_blk
+       6      360  DROP  all  --  *  *  0.0.0.0/0  0.0.0.0/0  match-set ikuai_blk dst
+```
+
+> DNS 日志是多个 `tcpdump`(逐网卡)并发追加同一个文件，高并发时行可能交错；
+> **事件级的 `audit-*.log` 才是可靠证据来源**，`dns-*.log` 只当原始抓包存档看。
 
 ---
 
@@ -560,8 +590,12 @@ examples/rust-plugin/
 3. **redb 独占锁的处理**: 数据库同时只能被一个进程打开，所以守护进程是唯一写入者，
    并在 `data/rustdemo.sock` 上提供一行命令/一行 JSON 的 Unix socket 接口；
    命令行与后端接口优先走 socket，守护不在时才直接开库 —— 两边共用同一套实现函数。
-4. **必须静态链接**: 设备是 uClibc(`/lib/ld64-uClibc.so.0`)，所以用
-   `x86_64-unknown-linux-musl` + 纯 Rust 依赖(不需要 C 交叉工具链)。
+4. **链接方式二选一**: 设备是 uClibc-ng 1.0.40(`/lib/ld64-uClibc.so.0`)。
+   方式 A = `x86_64-unknown-linux-musl` 静态(仓库默认，实测 967,328 字节 / 整包 464,506 字节)；
+   方式 B = 用 [iKuai SDK](https://github.com/deadash/ikuai-sdk) 的 uClibc 交叉工具链动态链接设备自带 libc
+   (体积更小，但 Rust 没有 `x86_64-unknown-linux-uclibc` 内置目标，需要自定义 target + nightly `-Zbuild-std`)。
+   两种方式的完整步骤、SDK 下载/relocate/environment-setup、体积对比见
+   [`examples/rust-plugin/README.md`](../examples/rust-plugin/README.md)。
 
 实测(在设备上安装后):
 
@@ -615,6 +649,107 @@ sed -i 's/^backdoor=.*/backdoor=0/' /etc/mnt/boot_args     # 关闭
 * **回滚到上一版**: 升级前的 `.boot` 会被整目录覆盖，可提前 `tar czf /etc/log/ikguard/boot-$(date +%F).tgz -C /etc/mnt .boot` 备份，回滚即解回该目录并重启。
 * **需要紧急停用**: `sed -i 's/^backdoor=.*/backdoor=0/' /etc/mnt/boot_args` 后执行
   `iptables -D OUTPUT -m set --match-set ikuai_blk dst -j DROP` 等手工清理，或删除 `/etc/mnt/.boot` 目录后重启(框架即停止)。
+
+---
+
+## 9. 让虚拟机真的连上外网 + 真实 LAN 客户端模拟
+
+前面几节验证封锁时设备常常"没有外网"，只能临时 `ifconfig` 造一个地址，说服力不足。
+这一节给出**持久化**做法：用官方接口把 WAN 配起来(等价于 Web 操作)，再把 LAN 换成真实二层网络，
+让宿主机上的一台"客户端"真正经过 iKuai 转发+拨号+NAT 上网，从而模拟实际应用。
+
+### 9.1 用官方接口配置 WAN(持久, 重启自动恢复)
+
+`vm/run.sh` 给虚拟机两块网卡：`eth0`=LAN(user-net 192.168.9.0/24)、
+`eth1`=WAN(user-net 10.0.2.0/24，网关 10.0.2.2 / DNS 10.0.2.3，QEMU 自带 DHCP)。
+设备侧只需把 `eth1` 绑到 `wan1` 并选 DHCP：
+
+```bash
+# 在设备上(或 ikctl sh)执行, 等价于 Web「网络设置→内外网设置→wan1→绑定网卡→动态IP」
+/usr/ikuai/function/wan save id=1 name=wan1 bandif=52:54:00:00:01:02 bandmode=0 \
+    internet=1 default_route=1 disc_auto_switch=1 link_time=00:00-23:59 \
+    check_link_mode=3 check_link_host=www.baidu.com clientid= mac= speed=0 duplex=0 comment=
+```
+
+字段来历(前端 `saveWan()` 的真实 payload)：`internet` 0=静态 / 1=DHCP / 2=PPPoE / 3=多拨；
+`bandif`＝绑定的网卡 MAC(`bandmode=0` 时是单个 MAC，多个用逗号)；`link_time`＝`开始-结束`；
+`check_link_mode=3` 表示用 `check_link_host` 做线路检测。设备侧校验函数是 `wan.sh:__check_param_save()`。
+
+结果(重启后不变，因为写进了 iKuai 配置)：
+
+```
+wan1  UP  10.0.2.15/24        default via 10.0.2.2 dev wan1
+# curl -s -o /dev/null -w '%{http_code}\n' http://www.baidu.com      -> 200
+```
+
+> **QEMU user-net(slirp) 的坑**：slirp 只转发"设备自己地址(10.0.2.15)"的包，ICMP 还需要宿主
+> 建 raw socket(非特权跑不了)，所以**设备上 ping 外网 IP 一定 100% 丢包**，但 TCP 完全正常。
+> 判断能否出网请用 `curl` / `nc` / `/dev/tcp`，不要用 `ping`。
+
+### 9.2 LAN 换成真实二层网络(tap + bridge)
+
+只用 user-net 时宿主机只能通过 `hostfwd` 摸到 192.168.9.1，没法扮演"LAN 里的另一台机器"。
+换成 tap+bridge 后宿主机就在同一个二层网络里，还能再开一个网络命名空间当客户端：
+
+```
+tap0 ── br0(192.168.9.100/24) ── veth-h ‖ clientns(192.168.9.50/24, 默认网关 192.168.9.1)
+          │
+    虚拟机 eth0 = iKuai LAN 192.168.9.1                  eth1 = WAN(10.0.2.15)
+```
+
+```bash
+sudo bash vm/net-setup.sh      # 建 tap0/br0/veth/clientns(幂等; tap 属主自动设为调用者)
+bash vm/run.sh                 # 启动虚拟机(LAN 用 tap, WAN 仍走 user-net 并保留 hostfwd)
+```
+
+`run.sh` 在 WAN 侧仍保留 `127.0.0.1:10022→10.0.2.15:22` 与 `127.0.0.1:18080→10.0.2.15:80`，
+所以即使 LAN 改坏了 SSH/Web 也进得去；LAN 正常时可直连 `ssh sshd@192.168.9.1`、
+`http://192.168.9.1/`(ikctl 用 `IK_HOST=192.168.9.1 IK_PORT=22`)。
+
+> 踩坑：`net-setup.sh` 是用 `sudo` 跑的，tap 属主必须写 `${SUDO_USER:-$(id -un)}`；
+> 若用 `id -un`(sudo 下是 root)，非 root 的 qemu 会报
+> `could not configure /dev/net/tun (tap0): Operation not permitted`。
+
+### 9.3 客户端实测(真实流量 + 封锁对照)
+
+```bash
+sudo bash vm/client-test.sh
+```
+
+实测输出(设备 kvm 全虚拟化，宿主 1Gbps 出口)：
+
+```
+== 1) DNS 解析 ==       www.baidu.com / github.com 正常(用 iKuai DHCP 下发的 114.114.114.114)
+== 2) HTTP / HTTPS ==   baidu http=200 36.152.44.93 连接 54ms ; baidu https=200 ; github https=200
+== 3) 下载测速 ==       mirrors.aliyun.com 254968 字节, 平均 1.47 MB/s
+== 4) 页面内容 ==       百度首页 HTML 正常返回
+== 5) TCP 时延 ==       36.152.44.132 连接 25ms / github 58ms
+== 6) 云端域名 ==       302/pkgmanager/download.ikuai8.com 解析到 58.221.58.100 / 59.110.6.135, 全部连不上
+== 7) 对照 ==           36.152.44.132:443 可连通 ✓ | 58.221.58.100:443 被 DROP ✓
+```
+
+路由器侧同时留痕 —— 这就是"确认没有后门进程/连接"的证据链：
+
+```
+$ grep -c '192.168.9.50' /etc/log/ikguard/dns-<日期>.log        # 194  客户端 DNS 查询条数
+$ grep '192.168.9.50' ... | grep -ci ikuai8                     # 14   其中云端域名
+$ iptables -nvx -L FORWARD | grep ikuai_blk                     # 6 包 被 DROP
+$ grep -cE 'dns\.cloud' /etc/log/ikguard/audit-<日期>.log       # 292  dns.cloud 事件
+$ ps | grep -E 'cre|pmd|ik_rc_client'                           # (无)
+```
+
+> 客户端 resolver 用的是 iKuai DHCP 下发的公网 DNS(`dhcp_server` 的 `dns1/dns2` = 114.114.114.114 /
+> 223.5.5.5)，不是路由器自身 —— iKuai 的本地 DNS 在 54 端口，LAN 侧 53 没有监听，别按"网关即 DNS"去配。
+
+### 9.4 还原成原来的 user-net(可选)
+
+```bash
+sudo bash vm/net-teardown.sh                 # 删 clientns/br0/tap0/veth
+pkill -f "qemu-system-x86_64 -name ikuai"
+bash vm/run.sh.bak-<时间戳>                  # 旧的 user-net 版启动脚本(启动前自动备份)
+```
+
+WAN 配置(wan1 绑定 eth1)是设备侧配置，与宿主机网络无关，还原后依然有效。
 
 ---
 

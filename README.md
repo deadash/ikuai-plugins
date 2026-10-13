@@ -13,7 +13,7 @@
 7. **网页插件**: 在 Web「系统设置 → 插件管理」里出现卡片, 可查看状态并配置开关
 
 > 日志统一落在持久分区 `/etc/log/ikguard/`(根分区每次重启还原且只有 ~800K 可用)。
-> 完整操作手册(分区/打包签名/SSH 升级/重启验证/审计/Web 插件)见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
+> 完整操作手册(分区/打包签名/SSH 升级/重启验证/审计/Web 插件/真实 WAN 与 LAN 客户端模拟)见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
 
 # 配置如下
 
@@ -141,6 +141,8 @@ bin/*                            命令行      -> /usr/sbin/
 ```
 
 完整可运行示例见 [examples/rust-plugin](examples/rust-plugin/)(Rust + 嵌入式数据库 + Web 配置页)。
+编译方式有两种(见该示例的 README)：**musl 静态**(仓库默认，实测 945KB/整包 454KB)与
+**iKuai SDK 的 uClibc 交叉编译**(动态链接设备自带 libc，体积更小)。
 
 **安装方式**:
 1. 网页: 系统设置 → 插件管理 → ikguard → 插件管理 → 选择 zip → 上传并安装

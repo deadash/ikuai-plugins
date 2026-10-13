@@ -352,8 +352,16 @@ bd_install_guard() {
     mkdir -p "$cron_dir" 2>/dev/null
     chmod +x "$guard" 2>/dev/null
     printf '* * * * * %s\n' "$guard" > "$cron_dir/ikblock_guard"
-    bd_log "已安装守卫任务: $cron_dir/ikblock_guard"
-    # 立即生效(iKuai 用 crond_commit 汇总 cron.d 到 /etc/crontabs/root)
+    # iKuai 的 crond 只读 /etc/crontabs/root(cron.d 会被 crond_commit 整体重写),
+    # 必须直接追加进 root, 否则"每分钟守卫"不会跑。
+    root="$(P /etc/crontabs/root)"
+    if [ -f "$root" ]; then
+        grep -q "$guard" "$root" 2>/dev/null || printf '* * * * * %s\n' "$guard" >> "$root"
+    else
+        mkdir -p "$(dirname "$root")" 2>/dev/null
+        printf '* * * * * %s\n' "$guard" > "$root"
+    fi
+    bd_log "已安装守卫任务: $root (+$cron_dir/ikblock_guard)"
     if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then
         ( . "$(P /usr/ikuai/include/crond.sh)"; crond_commit >/dev/null 2>&1 )
     fi

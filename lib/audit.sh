@@ -299,17 +299,31 @@ au_dns_stop() {
     return 0
 }
 
-# 检查当天 DNS 日志里是否出现云端域名
+# 检查 DNS 日志里是否出现云端域名
+# 增量扫描: 用偏移量记录已扫描位置, 只扫新增内容 —— 否则 cron 每分钟重扫整天的日志,
+# 会把同一个域名的 dns.cloud 事件重复写进审计日志(体检报告里的计数也就失真了)。
 au_dns_check() {
-    local f hit n=0
+    local f hit n=0 off_file off size chunk
     f="$(au_file dns)"
     [ -f "$f" ] || { printf '0'; return 0; }
+
+    off_file="$AU_STATE/dns.scan.$(date +%Y%m%d)"
+    off=0
+    test -f "$off_file" && off="$(cat "$off_file" 2>/dev/null)"
+    case "$off" in ''|*[!0-9]*) off=0 ;; esac
+    size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    [ "$size" -lt "$off" ] && off=0          # 日志被轮转/清空则从头扫
+    [ "$size" -eq "$off" ] && { printf '0'; return 0; }
+
+    chunk="$(tail -c "+$((off + 1))" "$f" 2>/dev/null)"
     for hit in $BD_DOMAINS; do
-        if grep -qiF -- "$hit" "$f" 2>/dev/null; then
+        if printf '%s\n' "$chunk" | grep -qiF -- "$hit" 2>/dev/null; then
             n=$((n + 1))
             au_event INFO "dns.cloud" "解析查询命中云端域名: $hit"
         fi
     done
+    printf '%s' "$size" > "$off_file" 2>/dev/null
     printf '%s' "$n"
     return 0
 }
@@ -410,7 +424,10 @@ au_report() {
 $(au_conn_list)
 EOF
 
-    ncloud=$(grep -c "cloud\." "$(au_file audit)" 2>/dev/null)
+    # 统计"云端相关"审计事件: dns.cloud / cloud.ip / cloud.port / probe.cloud
+    # 注意: 事件名里 cloud 后面是空格(如 "dns.cloud          解析..."), 所以
+    #       不能用 grep 'cloud\.' —— 那个点号在 cloud 前面, 永远匹配不到(报告恒为 0)。
+    ncloud=$(grep -cE 'dns\.cloud|cloud\.(ip|port)|probe\.cloud' "$(au_file audit)" 2>/dev/null)
     case "$ncloud" in ''|*[!0-9]*) ncloud=0 ;; esac
 
     {
@@ -452,13 +469,29 @@ au_watch() {
 
 # 安装审计 cron(每分钟目录采集 + 每 10 分钟体检)
 au_install_cron() {
-    local cron_dir
+    local cron_dir root bin
     cron_dir="$(P /etc/crontabs/cron.d)"
+    root="$(P /etc/crontabs/root)"
+    bin="$(P /etc/mnt/.boot/bin/ikaudit)"
     mkdir -p "$cron_dir" 2>/dev/null
-    printf '* * * * * %s watch\n' "$(P /etc/mnt/.boot/bin/ikaudit)" > "$cron_dir/ikguard_audit"
-    printf '*/10 * * * * %s report\n' "$(P /etc/mnt/.boot/bin/ikaudit)" > "$cron_dir/ikguard_report"
-    au_event INFO "cron.install" "已安装审计任务: $cron_dir/ikguard_{audit,report}"
-    # 立即生效(iKuai 用 crond_commit 汇总 cron.d 到 /etc/crontabs/root)
+    # 保留 cron.d 文件(便于查看/别的脚本复用)
+    printf '* * * * * %s watch\n' "$bin" > "$cron_dir/ikguard_audit"
+    printf '*/10 * * * * %s report\n' "$bin" > "$cron_dir/ikguard_report"
+
+    # 关键: iKuai 的 crond 只读 /etc/crontabs/root, cron.d 只是它自己的暂存目录,
+    # 而且它的 crond_commit 会整体重写 root —— 所以必须把任务直接写进 root,
+    # 否则"每分钟采集"根本不会执行(日志里只有开机那一次的数据)。
+    if [ -f "$root" ]; then
+        grep -q "$bin watch" "$root" 2>/dev/null || printf '* * * * * %s watch\n' "$bin" >> "$root"
+        grep -q "$bin report" "$root" 2>/dev/null || printf '*/10 * * * * %s report\n' "$bin" >> "$root"
+    else
+        mkdir -p "$(dirname "$root")" 2>/dev/null
+        printf '* * * * * %s watch\n' "$bin" > "$root"
+        printf '*/10 * * * * %s report\n' "$bin" >> "$root"
+    fi
+    au_event INFO "cron.install" "已安装审计任务到 $root (每分钟 watch / 每10分钟 report)"
+
+    # 兜底: 让 iKuai 自己再提交一次(iKuai 的 crond 每分钟会检查 crontab 变化)
     if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then
         ( . "$(P /usr/ikuai/include/crond.sh)"; crond_commit >/dev/null 2>&1 )
     fi
