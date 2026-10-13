@@ -1,0 +1,9 @@
+#!/bin/sh
+# 测试替身: 返回固定的解析结果, 避免真实联网
+echo "nslookup $*" >> "$SHIM_LOG"
+echo "Server:		127.0.0.1"
+echo "Address:	127.0.0.1#54"
+echo ""
+echo "Name:	$1"
+echo "Address: 203.0.113.10"
+exit 0

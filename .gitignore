@@ -1,6 +1,12 @@
 .dist
 .doc
+# .tools.zip 里含签名私钥, 绝不能提交
+.tools.zip
+*.pem
 # .tests
 .tools
 MANIFEST.MF
 SIGNATURE.RSA
+.tests/.mock
+.tests/.build
+.tests/.shim.log

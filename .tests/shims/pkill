@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "pkill $*" >> "$SHIM_LOG"
+exit 0

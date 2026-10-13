@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "ipset $*" >> "$SHIM_LOG"
+exit 0

@@ -1,0 +1,24 @@
+#!/bin/sh
+# 测试替身 zip: 借 python 的 zipfile 实现, 仅支持 `zip -q -r <out> <src>`
+out=""
+src=""
+for a in "$@"; do
+    case "$a" in
+        -*) ;;
+        *) if [ -z "$out" ]; then out="$a"; else src="$a"; fi ;;
+    esac
+done
+PY=$(command -v python || command -v python3)
+"$PY" - "$out" "$src" <<'PYEOF'
+import os, sys, zipfile
+out, src = sys.argv[1], sys.argv[2]
+z = zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED)
+if os.path.isdir(src):
+    for root, _, files in os.walk(src):
+        for f in files:
+            p = os.path.join(root, f)
+            z.write(p, os.path.relpath(p, src))
+else:
+    z.write(src, os.path.basename(src))
+z.close()
+PYEOF

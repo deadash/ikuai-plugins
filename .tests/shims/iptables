@@ -1,0 +1,7 @@
+#!/bin/sh
+# 测试替身: 记录调用; -C(检查) 一律返回1(表示规则不存在), 触发 -I 插入
+echo "iptables $*" >> "$SHIM_LOG"
+for a in "$@"; do
+    [ "$a" = "-C" ] && exit 1
+done
+exit 0

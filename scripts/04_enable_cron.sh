@@ -1,13 +1,14 @@
 #!/bin/bash
 
-. /etc/mnt/.boot/lib/common.sh
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SELF_DIR/../lib/common.sh"
 
 # 检查功能是否开启
 is_enabled "cron" || exit 0
 
 # cron相关路径
-CRON_SOURCE="/etc/mnt/cron.d"
-CRON_TARGET="/etc/crontabs/cron.d"
+CRON_SOURCE="$(P /etc/mnt/cron.d)"
+CRON_TARGET="$(P /etc/crontabs/cron.d)"
 
 # 确保目标目录存在
 test -d "$CRON_TARGET" || mkdir -p "$CRON_TARGET"
@@ -19,7 +20,13 @@ while IFS= read -r -d '' file; do
     ln -sf "$file" "$CRON_TARGET/"
 done
 
+# 立即生效: iKuai 的 crond 从 /etc/crontabs/root 执行, cron.d/* 需要汇总进去
+if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then
+    ( . "$(P /usr/ikuai/include/crond.sh)"; crond_commit >/dev/null 2>&1 )
+    log "[cron] 已提交 /etc/crontabs/cron.d/* -> /etc/crontabs/root"
+fi
+
 # 测试日志
 is_enabled "cron_test" || exit 0
 
-sed -i 's|crond -L /dev/null|crond -L /var/log/crond.log|' /usr/ikuai/script/utils/crond.sh
+sed -i 's|crond -L /dev/null|crond -L /var/log/crond.log|' "$(P /usr/ikuai/script/utils/crond.sh)"

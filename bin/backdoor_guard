@@ -1,0 +1,13 @@
+#!/bin/bash
+#
+# backdoor_guard - 后门/更新通道守卫
+# 由 cron 每分钟调用: 防止系统重建防火墙后封锁失效、或后门进程被重新拉起
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SELF_DIR/../lib/common.sh"
+. "$SELF_DIR/../lib/backdoor.sh"
+
+is_enabled "backdoor" || exit 0
+
+bd_guard
+exit 0

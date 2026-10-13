@@ -1,0 +1,68 @@
+#!/bin/bash
+#
+# ikaudit - 审计/取证命令行
+#
+#   ikaudit init            初始化日志目录并写入启动标记
+#   ikaudit proc            进程快照对比(记录新启动的进程)
+#   ikaudit conn            出向连接快照对比(记录新连接)
+#   ikaudit blocked         读取封锁规则命中计数增量
+#   ikaudit dns-start       启动 DNS 查询记录(tcpdump, 每张网卡一个)
+#   ikaudit dns-stop        停止 DNS 记录
+#   ikaudit dns             汇总 DNS 日志中的云端域名命中
+#   ikaudit probe           云端连通性自检(解析 + TCP 连接尝试)
+#   ikaudit report          生成体检报告(异常返回码 1)
+#   ikaudit watch           cron 采集入口(proc+conn+blocked+dns)
+#   ikaudit tail [n]        查看审计日志末尾(默认 40 行)
+#   ikaudit status          查看日志文件与采集状态
+#
+# 日志目录(持久分区): /etc/log/ikguard
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SELF_DIR/../lib/common.sh"
+. "$SELF_DIR/../lib/backdoor.sh"
+. "$SELF_DIR/../lib/audit.sh"
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+cmd="$1"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+    init)
+        au_init
+        au_event INFO "audit.init" "审计启动 (日志目录 $(au_dir))"
+        ;;
+    proc)       au_proc_scan >/dev/null ;;
+    conn)       au_conn_scan >/dev/null ;;
+    blocked)    au_blocked_scan >/dev/null ;;
+    dns-start)  au_dns_start ;;
+    dns-stop)   au_dns_stop ;;
+    dns)        au_dns_check >/dev/null ;;
+    probe)      au_probe ;;
+    report)     au_report ;;
+    watch)      au_watch ;;
+    tail)
+        n="${1:-40}"
+        f="$(au_file audit)"
+        test -f "$f" || { echo "暂无审计日志: $f"; exit 0; }
+        tail -n "$n" "$f"
+        ;;
+    status)
+        echo "日志目录 : $(au_dir)"
+        echo "使用空间 : $(df -h "$(au_dir)" 2>/dev/null | tail -n1)"
+        echo "文件列表 :"
+        ls -la "$(au_dir)" 2>/dev/null | tail -n +2
+        echo "DNS 采集 : $(au_dns_running && echo 运行中 || echo 未运行)"
+        echo "封锁规则 :"
+        iptables -S 2>/dev/null | grep -E 'ikuai_blk|multiport' || echo "  (无)"
+        echo "命中包数 : $(au_blocked_hits)"
+        ;;
+    ""|-h|--help|help)
+        usage
+        ;;
+    *)
+        log "[audit] 未知命令: $cmd"
+        usage
+        exit 1
+        ;;
+esac

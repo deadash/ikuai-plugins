@@ -1,0 +1,275 @@
+#!/bin/bash /etc/ikcommon
+#
+# ikguard - 安全防护控制台后端接口
+# 页面: 系统设置 -> 插件管理 -> ikguard (/plugins/docker/ikguard.html)
+#
+# 动作:
+#   show    TYPE=data,flags,plugins,logs,...  读取状态/开关/插件/日志
+#   seting  key=<配置项> value=<0|1>          修改 /etc/mnt/boot_args 开关并立即生效
+#   apply   -                                 重新应用后门阻断 + 审计
+#   plugin  op=scan|remove|verify name=<名>    插件包管理
+#   dns     op=start|stop                      DNS 查询记录开关
+#   probe   -                                 云端连通性自检
+#   logclear -                                清空审计日志
+#
+# 说明: 本文件通过 /usr/ikuai/function/ikguard 软链被 func_api.sh 分发,
+#       stdout 必须是合法 JSON(show) 或错误信息(失败时), 日志写文件不要污染 stdout。
+
+BOOT_DIR="/etc/mnt/.boot"
+BOOT_ARGS="/etc/mnt/boot_args"
+IK_LOG_DIR="/etc/log/ikguard"
+IK_PLUGIN_DIR="/etc/mnt/plugins"
+IK_IKPLUGIN="$BOOT_DIR/bin/ikplugin"
+IK_IKAUDIT="$BOOT_DIR/bin/ikaudit"
+
+# ---------------------------------------------------------------- 工具
+
+# 转义为 JSON 字符串内容
+ikg_esc() {
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' | tr -d '\r' | \
+    awk 'BEGIN{ORS=""} {printf "%s%s", (NR>1?"\\n":""), $0}'
+}
+
+# 日志/文本 -> JSON 字符串(含引号)
+ikg_text() {
+    printf '"%s"' "$(printf '%s' "$1" | ikg_esc)"
+}
+
+ikg_kv() {
+    printf '"%s":%s' "$1" "$(ikg_text "$2")"
+}
+
+ikg_num() {
+    case "$2" in ''|*[!0-9]*) printf '"%s":0' "$1" ;; *) printf '"%s":%s' "$1" "$2" ;; esac
+}
+
+ikg_flag() { sed -n "s/^$1=//p" "$BOOT_ARGS" 2>/dev/null | head -n1; }
+
+ikg_tail_file() {
+    local f="$1" n="${2:-100}"
+    test -f "$f" && tail -n "$n" "$f" 2>/dev/null
+}
+
+ikg_day_file() {
+    local kind="$1"
+    local f="$IK_LOG_DIR/$kind-$(date +%Y%m%d).log"
+    test -f "$f" || f="$(ls -1t "$IK_LOG_DIR/$kind"-*.log 2>/dev/null | head -n1)"
+    printf '%s' "$f"
+}
+
+# 后门进程存活情况(空格分隔)
+ikg_backdoor_alive() {
+    local out="" p
+    for p in ik_rc_client cre cre_client pmd dtalkd dtalkc catcherd; do
+        pidof "$p" >/dev/null 2>&1 && out="$out $p"
+    done
+    printf '%s' "${out# }"
+}
+
+# 封锁规则命中包数
+ikg_blocked_hits() {
+    iptables -nvx -L OUTPUT 2>/dev/null | awk '/ikuai_blk|multiport/{s+=$1} END{print s+0}'
+}
+
+# 运行框架脚本(按开关)
+ikg_run_script() {
+    local s="$BOOT_DIR/scripts/$1"
+    test -x "$s" || { bash "$s" >/dev/null 2>&1; return $?; }
+    "$s" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------- show
+
+__show_data() {
+    local status ver procs usage
+    ver="$(sed -n 's/^version=//p' "$BOOT_DIR/Release" 2>/dev/null | head -n1)"
+    procs="$(ikg_backdoor_alive)"
+    usage="$(df -h "$IK_LOG_DIR" 2>/dev/null | tail -n1 | awk '{printf "%s 总 / %s 可用 / %s 已用", $2, $4, $5}')"
+
+    status="{"
+    status+="$(ikg_kv version "$ver"),"
+    status+="$(ikg_kv plugins_ok "$(cat /etc/plugins_ok 2>/dev/null)"),"
+    status+="$(ikg_kv backdoor_alive "$procs"),"
+    status+="$(ikg_num ipset "$(ipset -L ikuai_blk 2>/dev/null | grep -c '^[0-9]')"),"
+    status+="$(ikg_num rules "$(iptables -S 2>/dev/null | grep -c ikuai_blk)"),"
+    status+="$(ikg_num dns_running "$(pidof tcpdump >/dev/null 2>&1 && echo 1 || echo 0)"),"
+    status+="$(ikg_num blocked_hits "$(ikg_blocked_hits)"),"
+    status+="$(ikg_kv log_dir "$IK_LOG_DIR"),"
+    status+="$(ikg_kv log_usage "$usage")"
+    status+="}"
+
+    json_append __json_result__ status:json
+}
+
+__show_flags() {
+    local flags="{" k v first=1
+    if [ -f "$BOOT_ARGS" ]; then
+        while IFS='=' read -r k v; do
+            case "$k" in ''|\#*) continue ;; esac
+            [ "$first" = 1 ] || flags+=","
+            first=0
+            flags+="$(ikg_kv "$k" "$v")"
+        done < "$BOOT_ARGS"
+    fi
+    flags+="}"
+    json_append __json_result__ flags:json
+}
+
+__show_plugins() {
+    local data="[" d name first=1 z
+    for d in "$IK_PLUGIN_DIR"/*/ ; do
+        [ -f "$d/Release" ] || continue
+        name="$(basename "$d")"
+        case "$name" in .*) continue ;; esac
+        [ "$first" = 1 ] || data+=","
+        first=0
+        data+="{"
+        data+="$(ikg_kv name "$name"),"
+        data+="$(ikg_kv version "$(sed -n 's/^version=//p' "$d/Release" 2>/dev/null | head -n1)"),"
+        data+="$(ikg_kv plugin "$(sed -n 's/^plugin=//p' "$d/Release" 2>/dev/null | head -n1)"),"
+        data+="$(ikg_kv state "$(cat "$IK_PLUGIN_DIR/.state/$name" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')"),"
+        data+="$(ikg_num files "$(find "$d" -type f 2>/dev/null | wc -l)")"
+        data+="}"
+    done
+    data+="]"
+
+    # 待安装的 zip 包
+    local pending="[" first2=1
+    for z in "$IK_PLUGIN_DIR"/*.zip ; do
+        [ -f "$z" ] || continue
+        [ "$first2" = 1 ] || pending+=","
+        first2=0
+        pending+="{ $(ikg_kv name "$(basename "$z")") }"
+    done
+    pending+="]"
+
+    json_append __json_result__ plugins:json
+    json_append __json_result__ pending:json
+}
+
+__show_logs() {
+    local audit dns boot proc conn report
+    audit="$(ikg_tail_file "$(ikg_day_file audit)" 120)"
+    dns="$(ikg_tail_file "$(ikg_day_file dns)" 80)"
+    boot="$(ikg_tail_file "$IK_LOG_DIR/boot.log" 80)"
+    proc="$(ikg_tail_file "$(ikg_day_file proc)" 60)"
+    conn="$(ikg_tail_file "$(ikg_day_file conn)" 60)"
+    report="$(ikg_tail_file "$IK_LOG_DIR/report.txt" 40)"
+    local logs="{"
+    logs+="$(ikg_kv audit "$audit"),"
+    logs+="$(ikg_kv dns "$dns"),"
+    logs+="$(ikg_kv boot "$boot"),"
+    logs+="$(ikg_kv proc "$proc"),"
+    logs+="$(ikg_kv conn "$conn"),"
+    logs+="$(ikg_kv report "$report")"
+    logs+="}"
+    json_append __json_result__ logs:json
+}
+
+show()
+{
+    Show __json_result__
+}
+
+# ---------------------------------------------------------------- seting
+
+__apply_for() {
+    case "$1" in
+        backdoor)  ikg_run_script 02_disable_backdoor.sh ;;
+        plugins)   ikg_run_script 03_enable_plugins.sh ;;
+        cron)      ikg_run_script 04_enable_cron.sh ;;
+        shell)     ikg_run_script 05_enable_shell.sh ;;
+        audit)     ikg_run_script 06_enable_audit.sh ;;
+    esac
+}
+
+seting()
+{
+    local k
+    case "$key" in
+        ssh|sshd)        k="sshd" ;;
+        remote)          k="remote" ;;
+        backdoor)        k="backdoor" ;;
+        backdoor_hosts)  k="backdoor_hosts" ;;
+        plugins)         k="plugins" ;;
+        plugins_verify)  k="plugins_verify" ;;
+        cron)            k="cron" ;;
+        shell)           k="shell" ;;
+        audit)           k="audit" ;;
+        *)               echo "不支持的配置项: $key" ; return 1 ;;
+    esac
+
+    case "$value" in
+        0|1) ;;
+        *) echo "value 只能为 0 或 1" ; return 1 ;;
+    esac
+
+    test -f "$BOOT_ARGS" || : > "$BOOT_ARGS"
+    if grep -q "^$k=" "$BOOT_ARGS" 2>/dev/null; then
+        sed -i "s|^$k=.*|$k=$value|" "$BOOT_ARGS"
+    else
+        echo "$k=$value" >> "$BOOT_ARGS"
+    fi
+    Syslog "[ikguard] 开关变更: $k=$value"
+
+    __apply_for "$k"
+    echo "$k=$value 已保存并生效"
+    return 0
+}
+
+# ---------------------------------------------------------------- 其它动作
+
+apply()
+{
+    ikg_run_script 02_disable_backdoor.sh
+    ikg_run_script 06_enable_audit.sh
+    echo "已重新应用后门阻断与审计"
+    return 0
+}
+
+plugin()
+{
+    local op="${op:-scan}" name="$name"
+    test -x "$IK_IKPLUGIN" || { echo "插件系统不可用(缺少 $IK_IKPLUGIN)"; return 1; }
+    case "$op" in
+        scan)    "$IK_IKPLUGIN" scan && echo "已扫描并安装 /etc/mnt/plugins/*.zip" ;;
+        list)    "$IK_IKPLUGIN" list ;;
+        remove)  test -n "$name" || { echo "缺少 name"; return 1; }
+                 "$IK_IKPLUGIN" remove "$name" && echo "已卸载: $name" ;;
+        verify)  test -n "$name" || { echo "缺少 name"; return 1; }
+                 "$IK_IKPLUGIN" verify "$name" ;;
+        *)       echo "不支持的 op: $op" ; return 1 ;;
+    esac
+    # 插件变更后同步 Web 资源
+    ikg_run_script 03_enable_plugins.sh
+    return 0
+}
+
+dns()
+{
+    local op="${op:-start}"
+    case "$op" in
+        start) "$IK_IKAUDIT" dns-start && echo "DNS 记录已启动" ;;
+        stop)  "$IK_IKAUDIT" dns-stop && echo "DNS 记录已停止" ;;
+        *)     echo "不支持的 op: $op"; return 1 ;;
+    esac
+    return 0
+}
+
+probe()
+{
+    "$IK_IKAUDIT" probe
+    return 0
+}
+
+logclear()
+{
+    mkdir -p "$IK_LOG_DIR" 2>/dev/null
+    : > "$IK_LOG_DIR/audit-$(date +%Y%m%d).log" 2>/dev/null
+    : > "$IK_LOG_DIR/dns-$(date +%Y%m%d).log" 2>/dev/null
+    : > "$IK_LOG_DIR/proc-$(date +%Y%m%d).log" 2>/dev/null
+    : > "$IK_LOG_DIR/conn-$(date +%Y%m%d).log" 2>/dev/null
+    Syslog "[ikguard] 审计日志已清空"
+    echo "审计日志已清空"
+    return 0
+}

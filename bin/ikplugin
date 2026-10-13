@@ -1,0 +1,71 @@
+#!/bin/bash
+#
+# ikplugin - 插件管理命令行
+#
+#   ikplugin list                 列出已安装插件
+#   ikplugin install <zip|目录>    安装插件
+#   ikplugin remove <名称>         卸载插件
+#   ikplugin scan                 扫描 /etc/mnt/plugins/*.zip 并安装
+#   ikplugin boot                 重新铺开所有已安装插件(开机动作)
+#   ikplugin verify <zip|目录>     仅校验插件包
+#   ikplugin pack <目录> <zip>     打包(自动生成清单并签名)
+#   ikplugin keygen [目录]         生成签名密钥对
+#
+# 安装插件最简单的方式: 把 xxx.zip 传到 /etc/mnt/plugins/ 后执行 `ikplugin scan`，
+# 或直接重启(开机会自动安装)。
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SELF_DIR/../lib/common.sh"
+. "$SELF_DIR/../lib/plugin.sh"
+
+usage() {
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+cmd="$1"
+shift 2>/dev/null
+
+case "$cmd" in
+    list|ls)
+        plugin_list
+        ;;
+    install|add)
+        test -n "$1" || { usage; exit 1; }
+        plugin_install "$1" || exit 1
+        ;;
+    remove|rm|uninstall)
+        test -n "$1" || { usage; exit 1; }
+        plugin_remove "$1" || exit 1
+        ;;
+    scan)
+        plugin_ensure_dirs
+        plugin_scan_zips
+        ;;
+    boot)
+        plugin_boot
+        ;;
+    verify)
+        test -n "$1" || { usage; exit 1; }
+        if plugin_verify "$1"; then
+            log "[plugin] 校验通过: $1"
+        else
+            log "[plugin] 校验失败: $1"
+            exit 1
+        fi
+        ;;
+    pack)
+        test -n "$1" || { usage; exit 1; }
+        plugin_pack "$1" "${2:-/tmp/$(basename "$1").zip}" || exit 1
+        ;;
+    keygen)
+        plugin_keygen "$1"
+        ;;
+    ""|-h|--help|help)
+        usage
+        ;;
+    *)
+        log "[plugin] 未知命令: $cmd"
+        usage
+        exit 1
+        ;;
+esac

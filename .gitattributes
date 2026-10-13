@@ -1,0 +1,12 @@
+# 统一换行符: 框架脚本在设备的 squashfs 上是 bash 直接执行,
+# 一旦带上 CRLF 会让 install.sh / *.sh 全部语法报错(实测),
+# 因此所有文本文件强制 LF, 二进制文件不做转换。
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
+*.zip binary
+*.bin binary
+*.gz binary

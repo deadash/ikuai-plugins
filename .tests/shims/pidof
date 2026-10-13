@@ -1,0 +1,4 @@
+#!/bin/sh
+# 测试替身: 假装进程存在(返回0), 以便验证 bd_kill 逻辑
+echo "pidof $*" >> "$SHIM_LOG"
+exit 0
