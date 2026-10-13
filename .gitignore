@@ -1,15 +1,19 @@
 .dist
 .doc
+
 # .tools.zip 里含签名私钥, 绝不能提交
 .tools.zip
-*.pem
+# 私钥只留在本地(公钥 public.pem 是固件内置公钥, 属于公开信息, 要进仓库)
+.tools/private.pem
+.tools/*private*.pem
+
 # .tests
-.tools
-MANIFEST.MF
-SIGNATURE.RSA
 .tests/.mock
 .tests/.build
 .tests/.shim.log
+
+MANIFEST.MF
+SIGNATURE.RSA
 
 # Rust 示例插件的构建产物(build.sh 会生成)
 examples/rust-plugin/target

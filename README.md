@@ -176,6 +176,18 @@ ikaudit dns-start   # 启动 DNS 记录
 
 ## 网页插件 (Web)
 
+![插件管理](docs/images/plugin-management.png)
+
+> 「高级应用 → 插件管理」里的插件卡片(实拍: iKuai 3.7.16 x64 + 本框架 v0.0.3)。
+> `安全防护控制台` 是基础包内置的 ikguard 插件；`Rust 示例插件` 是通过插件管理**单独上传安装**的
+> `rustdemo.zip` —— **基础包与插件是两个独立发布物**, 基础包里不含任何插件。
+
+![ikguard 控制台](docs/images/ikguard-console.png)
+
+> 点开卡片就是插件自己的页面: 概览(框架版本 / 签名校验 / 后门进程 / ipset 封锁 / 封锁规则 /
+> 封锁命中 / DNS 记录 / 日志分区) + 开关配置(后门阻断、后门 DNS 屏蔽、审计取证、SSH 登录…),
+> 改完立即生效并写入 `/etc/mnt/boot_args`。
+
 iKuai 的「系统设置 → 插件管理」是数据驱动的: 官方 `plugins.sh` 的 `show()` 会遍历
 `/usr/ikuai/www/plugins/*/*.json` 生成卡片，卡片点击后以 iframe 打开
 `/plugins/<目录>/<name>.html`(原目录名是 `docker`，本框架改成了 `app`)。本框架在 `www/` 下

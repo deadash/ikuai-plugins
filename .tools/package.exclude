@@ -1,0 +1,27 @@
+# 打包/签名共用排除规则(tar 风格 glob, 每行一条)
+#
+# 为什么必须共用:
+#   设备端 /usr/ikuai/script/plugins.sh 的 boot() 会做三件事, 缺一不可:
+#     1) openssl 用固件内置公钥校验 SIGNATURE.RSA vs MANIFEST.MF
+#     2) 逐行读 MANIFEST.MF 的 Name/SHA-256-Digest, 与 /etc/mnt/.boot 下**实际存在**的文件比对
+#     3) test -x .boot/install.sh
+#   任何一条不过就直接 return —— 整个框架不挂载(SSH 修改、Web 插件、审计全都不生效)。
+#   所以: sign.sh 生成清单的文件集合 必须 与 build.sh 打进 tar 的文件集合完全一致。
+#
+# 1) 插件示例与它的构建产物: **基础包不包含任何插件**(基础包与插件是两个独立发布物,
+#    插件通过「系统设置→插件管理」单独上传安装; examples/ 只留在仓库里给开发者参考)
+examples
+examples/*
+# README 用的截图(只给 GitHub 看, 不进包, 否则基础包白白大 200KB)
+docs/images
+docs/images/*
+
+# 2) 历史遗留的签名脚本(已被 .tools/ 取代, 只留在仓库里给开发者看)
+tools
+tools/*
+*/target
+target
+*/dist
+dist
+*/pkg/bin
+pkg/bin

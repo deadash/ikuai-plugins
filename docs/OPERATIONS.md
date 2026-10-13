@@ -148,6 +148,41 @@ bash .tools/test_firmware.sh .dist/custom.bin   # 查看包头与固件信息
 JSON 头: {filename,firmwareid,version,md5,sha256,length,timestamp}
 ```
 
+### 2.4 打包的"红线": 清单必须与实际铺开的文件完全一致
+
+设备端挂载由固件自带的 `/usr/ikuai/script/plugins.sh:boot()` 负责，它做三件事，**缺一即整包不挂载**：
+
+```bash
+local BOOT_PATH="/etc/mnt/.boot"
+openssl dgst -sha256 -verify <内置公钥> -signature $BOOT_PATH/SIGNATURE.RSA $BOOT_PATH/MANIFEST.MF && \
+while read -r line; do          # 逐行读清单
+    Name: <文件>                #   → 与 .boot 下真实文件比对
+    SHA-256-Digest: <摘要>      #   → sha256sum 必须一致, 否则直接 return
+done < $BOOT_PATH/MANIFEST.MF && \
+test -x "$BOOT_PATH/install.sh" && "$BOOT_PATH/install.sh"   # 最后才执行
+echo 1 > /etc/plugins_ok
+```
+
+> 踩过的坑(整包不挂载 = 框架、Web 插件、**连 SSH 的 shell 修改一起全丢**)：
+> * `sign.sh` 扫的是**工作区**(当时含 `examples/rust-plugin/target/` 的 35MB cargo 缓存)，
+>   而 `build.sh` 打 tar 时用 `--exclude` 排掉了它们 → 清单 103 项里 64 项在包里不存在 →
+>   设备校验 sha256 失败 → 直接 return；
+> * 另一个方向：`sign.sh` 用 `! -name "install.sh"` 把**所有**同名文件都排除了，
+>   而 tar 里带着 `examples/rust-plugin/pkg/install.sh` → 反向漏项。
+>
+> 修法：`sign.sh` 与 `build.sh` 共用 `.tools/package.exclude`(一套规则)，
+> 并且新增 `.tools/verify_package.sh` —— **本地复刻设备端那三步校验**，打包后必跑：
+
+```bash
+bash .tools/sign.sh && bash .tools/build.sh
+bash .tools/verify_package.sh            # >>> 通过: 该包在设备上可正常挂载
+# 失败会逐条列出"缺失/摘要不一致/未列入清单"的文件, 修好再发版
+```
+
+**基础包与插件是两个独立发布物**：基础包只含框架本体，`package.exclude` 里排除了
+`examples/`(插件示例与构建产物)、`tools/`(历史签名脚本)、`docs/images/`(README 截图)；
+插件(docker/rustdemo 等 zip)在「系统设置 → 插件管理」里单独上传安装，不需要签名、不参与这份清单。
+
 ---
 
 ## 3. 通过 SSH 命令行升级(官方 90001 插件通道)
@@ -782,4 +817,23 @@ python3 ikctl.py audit --tail 60                    # 看报告/审计/DNS/连�
 
 `verify` 依次检查: 签名校验 → `plugins_ok` → `boot.log` 各阶段 → 后门进程/程序 →
 ipset/iptables → 审计日志与体检结论 → DNS 抓包 → Web 插件资源/接口，最后给出
-`通过 N/19` 汇总。实测重启后为 19/19 通过。
+`通过 N/24` 汇总。实测重启后为 24/24 通过。
+
+## 附录 C. 一条命令更新+重启(ikupd.py)
+
+只要 **地址 / 账号 / 密码** 就能升级插件包并重启(全程走设备自带接口, 不依赖 ssh 里的文件操作):
+
+```bash
+# 更新基础包并自动重启、等它回来
+python3 ikupd.py -a 192.168.9.1 -u admin -p '<控制台密码>' \
+        update ikuai-plugins-v0.0.3-base.bin --reboot --wait
+
+python3 ikupd.py -a 192.168.9.1 -u admin -p '<控制台密码>' update <包>   # 只更新
+python3 ikupd.py -a 192.168.9.1 -u admin -p '<控制台密码>' reboot --wait  # 只重启
+python3 ikupd.py -a 192.168.9.1 -u admin -p '<控制台密码>' status        # 看挂载状态
+```
+
+动作链: `POST /Action/login` → `POST /Action/upload`(字段名=文件名) →
+`/Action/call {func_name:upgrade, action:parse_file}` → `{action:update_file}` → SSH `reboot`。
+`status` 会打印 `/etc/plugins_ok`、`/etc/mnt/.boot/Release` 里的版本、`boot_args`、
+`sshd` 账号 shell 以及 `ikguard` 是否挂载。
