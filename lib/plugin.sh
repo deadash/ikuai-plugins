@@ -55,6 +55,22 @@ plugin_ensure_dirs() {
 #
 # 幂等(每次开机挂一次; 挂载不持久)、失败安全(任何一步不满足就保持原样, 不碰插件数据)。
 PLUGIN_STORE_LINK="/etc/disk_sys/plugin"
+PLUGIN_PURPOSE=6     # 「插件存储」绑定业务的编号(见 plugin_fw_patch)
+
+# 找出"绑了插件存储"的那个分区。直接读分区里写的业务标记(和 disk_mgmt 的
+# __part_purpose_get 一个套路: 第 2 个扇区偏移 896 起的 1 个字节), 不依赖 iKuai 的
+# cache, 也不依赖它什么时候挂盘 —— 开机时我们可能比它的 disk_mgmt init 跑得早,
+# 那时候 cache 还是空的、盘还没挂, 只认 cache 就会误判成"未绑定数据盘"。
+plugin_store_find_dev() {
+    local d b
+    for d in /dev/sd?[0-9]* /dev/hd?[0-9]* /dev/vd?[0-9]* /dev/nvme[0-9]n[0-9]p[0-9]*; do
+        [ -b "$d" ] || continue
+        b="$(dd if="$d" bs=1 skip=896 count=1 2>/dev/null)"
+        [ "$b" = "$PLUGIN_PURPOSE" ] && { printf '%s' "$d"; return 0; }
+    done
+    return 1
+}
+
 # 插件包归档: 放在**系统盘**、且在插件目录之外 —— 插件目录会被 bind 到数据盘上,
 # 数据盘万一被格式化(用户在磁盘页点了格式化/换盘), 插件本体就没了; 这里留底才能装回来。
 # 系统盘只有 43.4M, 所以只给"不占地方"的包留底(超过 PLUGIN_ZIP_MAX_KB 就跳过并说明)。
@@ -98,7 +114,7 @@ plugin_store_ready() {
 }
 plugin_store_setup() {
     local link="$PLUGIN_STORE_LINK" store="$PLUGIN_STORE_LINK/plugins"
-    local root need_restore=0
+    local root need_restore=0 dev uuid
 
     root="$(P "$PLUGIN_ROOT")"
     # 挂载不持久, 每次开机都得挂; 同一次启动里也可能被调用两次(03 和"同意条款"后又跑一遍 03),
@@ -108,6 +124,26 @@ plugin_store_setup() {
     if grep -qs " $root " /proc/mounts 2>/dev/null; then
         umount "$root" 2>/dev/null || return 0
     fi
+
+    # 链接不存在(开机时 iKuai 还没把它挂好/建链): 自己找那块盘, 挂上并补链接。
+    # 关键 —— 少了这步, 开机就会误判成"未绑定数据盘": 插件目录留在系统盘 ->
+    # 看不到 .eula -> 页面提示"需要开启插件功能"、工具页盘符也不对(偶发, 看谁跑在前)。
+    if [ ! -d "$(P "$link")" ]; then
+        dev="$(plugin_store_find_dev)"
+        if [ -n "$dev" ]; then
+            uuid="$(blkid "$dev" -o value -s UUID 2>/dev/null)"
+            if [ -n "$uuid" ]; then
+                if [ ! -d "$(P "/etc/disk/$uuid")" ]; then
+                    mkdir -p "$(P "/etc/disk/$uuid")" 2>/dev/null
+                    mount -o noatime "$dev" "$(P "/etc/disk/$uuid")" 2>/dev/null
+                fi
+                mkdir -p "$(P /etc/disk_sys)" 2>/dev/null
+                ln -sfn "/etc/disk/$uuid" "$(P "$link")" 2>/dev/null
+                plugin_log "插件存储: $PLUGIN_STORE_LINK -> $dev ($uuid) [自行挂载/建链, 不等 iKuai]"
+            fi
+        fi
+    fi
+
     plugin_store_ready "$link" "$PLUGIN_ROOT" || {
         plugin_log "插件存储: 系统盘 $PLUGIN_ROOT (未绑定数据盘)"
         return 0
@@ -203,7 +239,11 @@ plugin_store_notify_install() {
         echo '# 目的: 和视频缓存/行为记录那些业务一样, 绑定后立刻生效, 不需要重启。'
         echo 'case "$1" in'
         echo '    disk_remove) exec /etc/mnt/.boot/bin/ikplugin store off ;;'
-        echo '    *)           exec /etc/mnt/.boot/bin/ikplugin store on ;;'
+        echo '    *)'
+        echo '        /etc/mnt/.boot/bin/ikplugin store on'
+        echo '        # 换个盘之后插件卡片/页面/启动都要重铺一遍(后台跑, 别拖住 iKuai 的磁盘流程)'
+        echo '        bash /etc/mnt/.boot/scripts/03_enable_plugins.sh >/dev/null 2>&1 &'
+        echo '        ;;'
         echo 'esac'
     } > "$tmp" 2>/dev/null
     if [ -s "$tmp" ]; then

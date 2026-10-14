@@ -19,6 +19,14 @@ is_enabled "plugins" || { log "[plugin] 未启用(plugins=0), 跳过"; exit 0; }
 
 plugin_ensure_dirs
 
+# 插件存储: **必须最先做** —— 后面"铺 Web 卡片"会读 /etc/mnt/plugins/.eula、
+# "铺开插件"会读 /etc/mnt/plugins/<名>/, 而这些都是插件目录里的东西。
+# 如果这里还没把那块数据盘挂上, 就会误判成"未同意条款 + 没装插件"(实测: 页面提示
+# "需要开启插件功能"、工具页显示的盘也不对)。setup 内部会自己找盘/挂盘/建链,
+# 不依赖 iKuai 的 disk_mgmt init 谁先谁后。
+plugin_store_setup
+plugin_store_notify_install
+
 # 自动安装上传的 zip 包
 plugin_scan_zips
 
@@ -37,11 +45,6 @@ plugin_web_patch
 
 # 固件侧补丁: 磁盘分区页加第 6 种绑定业务(插件存储), 配套 disk_mgmt.sh 与 i18n
 plugin_fw_patch
-
-# 插件存储: 若用户把某块数据盘绑成了「插件存储」业务(6), 上面那次 init 已经把它挂到
-# /etc/disk_sys/plugin, 这里再把 /etc/mnt/plugins 挂到那块盘上(见 lib/plugin.sh)
-# —— 必须在 plugin_fw_patch 之后: 数据盘是那一步才挂起来的
-plugin_store_setup
 
 # 注册免重启回调: 之后在磁盘分区页把某块盘绑成「插件存储」时, disk_mgmt 会立刻
 # 执行 /etc/disk_notify/plugin, 插件目录当场切换(不用重启)
