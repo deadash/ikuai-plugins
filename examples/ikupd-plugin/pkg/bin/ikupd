@@ -1,0 +1,624 @@
+#!/bin/bash
+#
+# ikupd - iKuai 插件在线升级(从 GitHub Release 检查 / 下载 / 安装插件包)
+#
+# 只依赖设备自带能力: bash + curl + jq(设备是 1.4, 语法子集有限) + unzip + sha256sum,
+# 不引入任何二进制。功能刻意最小化: 只有"仓库列表 / 代理 / 检查更新 / 下载 / 安装"。
+#
+# 工作方式:
+#   1) 仓库列表(data/repos.conf, 一行一个 "<地址><TAB><说明>")里每个地址解析出
+#      owner/repo, 调 https://api.github.com/repos/<owner>/<repo>/releases/latest
+#      (地址写成 .../releases/tag/<tag> 时读该 tag 而不是 latest)
+#   2) 只保留 .zip 资源, 排除 GitHub 自动生成的 Source code 压缩包;
+#      用文件名前缀匹配插件: <插件名>-v<版本>-plugin.zip -> 插件名 + 版本
+#   3) 用资源自带的 sha256(API 的 digest)与本地同前缀插件的哈希比对, 判断
+#      new(新插件) / update(可更新) / current(已是最新); 本地哈希优先取本插件的
+#      安装记录, 其次取框架归档 /etc/mnt/plugins/.installed/<前缀>*.zip 的 sha256
+#   4) 用户确认后下载(校验 sha256, 并读出包内 Release 信息), 再确认后调用
+#      ikplugin install 安装
+#
+# 子命令:
+#   show                     状态 + 仓库 + 可用更新(JSON, 给 Web 页面)
+#   check                    检查所有仓库的最新 Release
+#   repo-add <地址> [说明]    添加仓库
+#   repo-del <地址>           删除仓库
+#   proxy-set <键> <值>       键: enabled(1|0) | url | token
+#   download <slug> <文件名>  下载插件包
+#   install <文件名>          安装已下载的插件包
+#   discard <文件名>          丢弃已下载的包
+#   status                   一行摘要
+#   log [n]                  查看日志
+#
+set -u
+
+ROOT="${PLUGIN_DIR:-/etc/mnt/plugins/ikupd}"
+BIN="$ROOT/bin/ikupd"
+DATA="$ROOT/data"
+CACHE="$DATA/cache"
+DL="$DATA/dl"
+REPOS="$DATA/repos.conf"
+INSTALLED="$DATA/installed.conf"
+PROXYCFG="$DATA/proxy.conf"
+PLUGINS="/etc/mnt/plugins"
+ARCHIVE="/etc/mnt/plugins/.installed"
+LOG="/etc/log/ikupd/ikupd.log"
+
+DIR=""
+OWNER=""; REPO=""; SLUG=""; API=""; TAG_HINT=""
+ASSET_PREFIX=""; ASSET_VER=""
+P_ENABLED=0; P_URL=""; P_TOKEN=""
+LV=""; LH=""
+
+mkdir -p "$DATA" "$CACHE" "$DL" "$(dirname "$LOG")" 2>/dev/null
+
+# ------------------------------------------------------------------ 基础工具
+logf() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null; }
+log()  { logf "$*"; printf '%s\n' "$*"; }
+
+kv_get() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1; }
+kv_set() {   # <文件> <键> <值>
+    local f="$1" k="$2" v="$3"
+    { [ -f "$f" ] && grep -v "^$k=" "$f" 2>/dev/null; printf '%s=%s\n' "$k" "$v"; } \
+        > "$DATA/.kv.$$" 2>/dev/null
+    mv -f "$DATA/.kv.$$" "$f" 2>/dev/null
+}
+
+# JSON 字符串转义(纯 bash, 不 fork; 设备 jq 1.4 没有 -Rs, 用参数展开更快)
+json_str() {
+    local s="${1-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\r'/}"
+    s="${s//$'\n'/\\n}"
+    printf '"%s"' "$s"
+}
+
+load_proxy() {
+    P_ENABLED="$(kv_get "$PROXYCFG" enabled)"; [ -n "$P_ENABLED" ] || P_ENABLED=0
+    P_URL="$(kv_get "$PROXYCFG" url)"
+    P_TOKEN="$(kv_get "$PROXYCFG" token)"
+}
+proxy_on() { [ "${P_ENABLED:-0}" = "1" ] && [ -n "${P_URL:-}" ]; }
+
+# curl 统一入口: 启用代理时所有请求(含 API 与下载)都走代理
+curl_run() {
+    if proxy_on; then
+        curl -sS -L --connect-timeout 10 --max-time "${CURL_MAX:-20}" -A ikupd/1.0 -x "$P_URL" "$@"
+    else
+        curl -sS -L --connect-timeout 10 --max-time "${CURL_MAX:-20}" -A ikupd/1.0 "$@"
+    fi
+}
+
+# 带鉴权头的 API 请求(可选 token, 避免继续踩 GitHub 匿名限流)
+http_get() {   # <url> <输出文件> -> 打印 http 状态码
+    local url="$1" out="$2" code
+    if [ -n "${P_TOKEN:-}" ]; then
+        code="$(curl_run -H "Authorization: Bearer $P_TOKEN" \
+                     -H 'Accept: application/vnd.github+json' \
+                     -o "$out" -w '%{http_code}' "$url" 2>/dev/null)"
+    else
+        code="$(curl_run -H 'Accept: application/vnd.github+json' \
+                     -o "$out" -w '%{http_code}' "$url" 2>/dev/null)"
+    fi
+    [ -n "$code" ] || code=000
+    printf '%s' "$code"
+}
+
+# ------------------------------------------------------------------ 地址解析
+# <地址> -> OWNER REPO SLUG API [TAG_HINT]
+parse_repo() {
+    local u="${1-}"
+    OWNER=""; REPO=""; SLUG=""; API=""; TAG_HINT=""
+    u="${u%%\?*}"; u="${u%%#*}"; u="${u%/}"
+    case "$u" in
+        *github.com/*) u="${u#*github.com/}" ;;
+        *) return 1 ;;
+    esac
+    u="${u#/}"
+    OWNER="${u%%/*}"
+    REPO="${u#*/}"; REPO="${REPO%%/*}"; REPO="${REPO%.git}"
+    case "$u" in
+        */releases/tag/*) TAG_HINT="${u##*/releases/tag/}"; TAG_HINT="${TAG_HINT%%/*}" ;;
+    esac
+    case "$OWNER$REPO$TAG_HINT" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ -n "$OWNER" ] && [ -n "$REPO" ] || return 1
+    # 同一个仓库的 latest 与 tag 地址必须是两个条目(否则缓存互相覆盖)
+    SLUG="${OWNER}__${REPO}"
+    [ -n "$TAG_HINT" ] && SLUG="${SLUG}__${TAG_HINT}"
+    if [ -n "$TAG_HINT" ]; then
+        API="https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG_HINT"
+    else
+        API="https://api.github.com/repos/$OWNER/$REPO/releases/latest"
+    fi
+    return 0
+}
+
+# 文件名前缀 -> 插件名 + 版本:  ikadblock-v1.0.0-plugin.zip -> ikadblock / v1.0.0
+split_asset() {
+    local base="${1##*/}"
+    case "$base" in
+        *.[zZ][iI][pP]) base="${base%.*}" ;;
+    esac
+    ASSET_PREFIX="$base"; ASSET_VER=""
+    case "$base" in
+        *-v*)
+            ASSET_VER="${base#*-v}"; ASSET_VER="${ASSET_VER%%-*}"
+            ASSET_PREFIX="${base%%-v*}"
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------------ 本地信息
+local_ver() {   # <插件名> -> 本地版本(未安装则空)
+    local p="$1" v
+    v="$(sed -n 's/^version=//p' "$PLUGINS/$p/Release" 2>/dev/null | head -n1)"
+    [ -n "$v" ] || v="$(sed -n 's/^version=//p' "$PLUGINS/.state/$p" 2>/dev/null | head -n1)"
+    printf '%s' "$v"
+}
+
+local_hash() {  # <插件名> -> 本地同前缀包的 sha256(没有则空)
+    local p="$1" h f pn
+    h="$(awk -F'\t' -v p="$p" '$1==p{print $2}' "$INSTALLED" 2>/dev/null | tail -n1)"
+    [ -n "$h" ] && { printf '%s' "$h"; return 0; }
+    # 框架归档(.installed/)里的包: 先按文件名前缀找, 再按包内 Release 的 plugin= 找
+    # (网页上传安装/开机 scan 安装的包都会归档在这里, 于是"不是经由本插件安装"也能拿到哈希)
+    for f in "$ARCHIVE/$p"*.zip "$ARCHIVE"/*.zip; do
+        [ -f "$f" ] || continue
+        case "${f##*/}" in
+            "$p"*.zip) ;;
+            *)
+                pn="$(unzip -p "$f" Release 2>/dev/null | sed -n 's/^plugin=//p' | head -n1)"
+                [ -n "$pn" ] || pn="$(unzip -p "$f" Release 2>/dev/null | sed -n 's/^name=//p' | head -n1)"
+                [ "$pn" = "$p" ] || continue
+                ;;
+        esac
+        h="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+        [ -n "$h" ] || continue
+        printf '%s\t%s\t\t\n' "$p" "$h" >> "$INSTALLED" 2>/dev/null
+        printf '%s' "$h"
+        return 0
+    done
+    printf ''
+}
+
+find_ikplugin() {
+    local p
+    for p in /usr/sbin/ikplugin /etc/mnt/.boot/bin/ikplugin; do
+        [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+    done
+    printf ''
+}
+
+# 包内 Release 所在目录(兼容 zip -r 单层目录的包)
+find_pkg_dir() {
+    local d="$1" sub cnt
+    [ -f "$d/Release" ] && { printf '%s' "$d"; return 0; }
+    cnt="$(find "$d" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
+    sub="$(find "$d" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n1)"
+    if [ "$cnt" = "1" ] && [ -n "$sub" ] && [ -f "$sub/Release" ]; then
+        printf '%s' "$sub"; return 0
+    fi
+    printf '%s' "$d"
+}
+
+# ------------------------------------------------------------------ 检查更新
+check_one() {   # <仓库地址>
+    local url="$1" resp code msg
+    parse_repo "$url" || { logf "无法识别的仓库地址: $url"; return 1; }
+    resp="$CACHE/$SLUG.json.tmp"
+    code="$(http_get "$API" "$resp")"
+    if [ "$code" != "200" ]; then
+        msg="$(jq -r '.message + ""' "$resp" 2>/dev/null)"
+        [ -n "$msg" ] || msg="HTTP $code"
+        rm -f "$resp"
+        rm -f "$CACHE/$SLUG.meta"
+        kv_set "$CACHE/$SLUG.meta" error "$msg"
+        kv_set "$CACHE/$SLUG.meta" at "$(date '+%F %T')"
+        logf "检查失败 $url: $msg"
+        return 1
+    fi
+    mv -f "$resp" "$CACHE/$SLUG.json" 2>/dev/null
+    rm -f "$CACHE/$SLUG.meta"
+    kv_set "$CACHE/$SLUG.meta" error ""
+    kv_set "$CACHE/$SLUG.meta" tag  "$(jq -r '.tag_name + ""'     "$CACHE/$SLUG.json" 2>/dev/null)"
+    kv_set "$CACHE/$SLUG.meta" name "$(jq -r '.name + ""'         "$CACHE/$SLUG.json" 2>/dev/null)"
+    kv_set "$CACHE/$SLUG.meta" when "$(jq -r '.published_at + ""' "$CACHE/$SLUG.json" 2>/dev/null)"
+    kv_set "$CACHE/$SLUG.meta" at   "$(date '+%F %T')"
+    jq -r '.body + ""' "$CACHE/$SLUG.json" > "$CACHE/$SLUG.body" 2>/dev/null
+    logf "检查成功 $url: $(kv_get "$CACHE/$SLUG.meta" tag)"
+    return 0
+}
+
+cmd_check() {
+    load_proxy
+    local url desc n=0 ok=0
+    [ -f "$REPOS" ] || { printf '仓库列表为空\n'; return 1; }
+    while IFS=$'\t' read -r url desc; do
+        [ -n "$url" ] || continue
+        n=$((n + 1))
+        if check_one "$url"; then
+            ok=$((ok + 1))
+            printf '  %s  %s\n' "$(kv_get "$CACHE/$SLUG.meta" tag)" "$url"
+        else
+            printf '  [失败] %s  %s\n' "$url" "$(kv_get "$CACHE/$SLUG.meta" error)"
+        fi
+    done < "$REPOS"
+    printf '检查完成: 共 %s 个仓库, 成功 %s 个\n' "$n" "$ok"
+    [ "$n" -gt 0 ] && return 0 || return 1
+}
+
+# ------------------------------------------------------------------ 下载/安装
+# 从缓存里查一条资源的信息: DOWNLOAD_URL SIZE HASH_HEX
+asset_lookup() {   # <slug> <文件名>
+    local json="$CACHE/$1.json" name="$2" line
+    DOWNLOAD_URL=""; ASSET_SIZE=""; ASSET_HASH=""
+    [ -f "$json" ] || return 1
+    line="$(jq -r --arg n "$name" \
+        '.assets[] | select(.name==$n) | .browser_download_url + "\u0001" + (.size|tostring) + "\u0001" + (.digest + "")' \
+        "$json" 2>/dev/null | head -n1)"
+    [ -n "$line" ] || return 1
+    DOWNLOAD_URL="${line%%$'\001'*}"
+    line="${line#*$'\001'}"
+    ASSET_SIZE="${line%%$'\001'*}"
+    ASSET_HASH="${line#*$'\001'}"
+    ASSET_HASH="${ASSET_HASH#sha256:}"
+    [ -n "$DOWNLOAD_URL" ] || return 1
+    return 0
+}
+
+cmd_download() {   # <slug> <文件名>
+    local slug="${1:-}" name="${2:-}" dest info url code tmpd pdir got want
+    load_proxy
+    case "$name" in
+        ''|*/*|*..*) printf '文件名不合法\n'; return 1 ;;
+    esac
+    if ! asset_lookup "$slug" "$name"; then
+        printf '缓存里没有这个资源, 请先"检查更新"\n'
+        return 1
+    fi
+    url="$DOWNLOAD_URL"
+    dest="$DL/$name"
+    info="$DL/$name.info"
+    rm -f "$dest" "$info"
+
+    printf '正在下载 %s (%s 字节)%s...\n' "$name" "$ASSET_SIZE" \
+        "$(proxy_on && printf ' 经代理 %s' "$P_URL")"
+    logf "下载开始 $name <- $url$(proxy_on && printf ' (代理 %s)' "$P_URL")"
+    CURL_MAX=120 code="$(curl_run -o "$dest" -w '%{http_code}' "$url" 2>/dev/null)"
+    [ -n "$code" ] || code=000
+    if [ "$code" != "200" ] || [ ! -s "$dest" ]; then
+        printf '下载失败(HTTP %s)\n' "$code"
+        logf "下载失败 $name: HTTP $code"
+        rm -f "$dest"
+        return 1
+    fi
+
+    got="$(sha256sum "$dest" 2>/dev/null | cut -d' ' -f1)"
+    want="$ASSET_HASH"
+    if [ -n "$want" ] && [ "$got" != "$want" ]; then
+        printf 'SHA-256 校验失败: 期望 %s 实际 %s(已删除下载文件)\n' "${want:0:12}" "${got:0:12}"
+        logf "下载校验失败 $name: 期望 $want 实际 $got"
+        rm -f "$dest"
+        return 1
+    fi
+
+    # 读出包内 Release(用户要的"下载后按 Release 信息展示")
+    tmpd="$(mktemp -d)"
+    if ! unzip -o -q "$dest" -d "$tmpd" 2>/dev/null; then
+        rm -rf "$tmpd"; rm -f "$dest"
+        printf '不是合法的 zip 包\n'
+        logf "下载的不是合法 zip: $name"
+        return 1
+    fi
+    pdir="$(find_pkg_dir "$tmpd")"
+    P_PLUGIN="$(sed -n 's/^plugin=//p' "$pdir/Release" 2>/dev/null | head -n1)"
+    [ -n "$P_PLUGIN" ] || P_PLUGIN="$(sed -n 's/^name=//p' "$pdir/Release" 2>/dev/null | head -n1)"
+    P_VERSION="$(sed -n 's/^version=//p' "$pdir/Release" 2>/dev/null | head -n1)"
+    P_COMMENT="$(sed -n 's/^comment=//p' "$pdir/Release" 2>/dev/null | head -n1)"
+    P_EXEC=0
+    [ -x "$pdir/install.sh" ] && P_EXEC=1
+    P_MANIFEST=0
+    [ -f "$pdir/MANIFEST.MF" ] && P_MANIFEST=1
+    rm -rf "$tmpd"
+
+    {
+        printf 'name=%s\n' "$name"
+        printf 'slug=%s\n' "$slug"
+        printf 'url=%s\n' "$url"
+        printf 'sha256=%s\n' "$got"
+        printf 'size=%s\n' "$(wc -c < "$dest" 2>/dev/null | tr -d ' ')"
+        printf 'plugin=%s\n' "$P_PLUGIN"
+        printf 'version=%s\n' "$P_VERSION"
+        printf 'comment=%s\n' "$P_COMMENT"
+        printf 'exec=%s\n' "$P_EXEC"
+        printf 'manifest=%s\n' "$P_MANIFEST"
+        printf 'time=%s\n' "$(date '+%F %T')"
+    } > "$info"
+
+    printf '下载完成并校验通过\n'
+    printf '  包内 Release: plugin=%s version=%s%s\n' "${P_PLUGIN:--}" "${P_VERSION:--}" \
+        "$([ -n "$P_COMMENT" ] && printf ' comment=%s' "$P_COMMENT")"
+    printf '  sha256=%s  大小=%s 字节\n' "$got" "$(kv_get "$info" size)"
+    [ "$P_EXEC" = "1" ] || printf '  注意: 包内 install.sh 没有执行位, 安装动作不会执行\n'
+    logf "下载完成 $name: plugin=$P_PLUGIN version=$P_VERSION sha256=${got:0:12}"
+    return 0
+}
+
+cmd_install() {   # <文件名>
+    local name="${1:-}" dest info rc out ikp h plugin ver
+    case "$name" in
+        ''|*/*|*..*) printf '文件名不合法\n'; return 1 ;;
+    esac
+    dest="$DL/$name"; info="$DL/$name.info"
+    if [ ! -s "$dest" ]; then
+        printf '找不到已下载的包: %s\n' "$name"
+        return 1
+    fi
+    ikp="$(find_ikplugin)"
+    if [ -z "$ikp" ]; then
+        printf '未找到 ikplugin(插件框架未启用?), 可把包放到 /etc/mnt/plugins/ 后重启自动安装\n'
+        return 1
+    fi
+    plugin="$(kv_get "$info" plugin)"; ver="$(kv_get "$info" version)"
+    logf "安装开始 $name ($plugin $ver)"
+    out="$("$ikp" install "$dest" 2>&1)"
+    rc=$?
+    if [ "$rc" != "0" ]; then
+        printf '安装失败: %s\n' "${out:-未知错误}"
+        logf "安装失败 $name: $out"
+        return 1
+    fi
+
+    # 记录哈希(升级判断要用), 再删掉暂存包省持久盘空间
+    split_asset "$name"
+    [ -n "$plugin" ] || plugin="$ASSET_PREFIX"
+    h="$(sha256sum "$dest" 2>/dev/null | cut -d' ' -f1)"
+    { grep -v "^$plugin$(printf '\t')" "$INSTALLED" 2>/dev/null; \
+      printf '%s\t%s\t%s\t%s\n' "$plugin" "$h" "$ver" "$(date '+%F %T')"; } \
+        > "$DATA/.inst.$$" 2>/dev/null
+    mv -f "$DATA/.inst.$$" "$INSTALLED" 2>/dev/null
+    rm -f "$dest" "$info"
+    printf '安装完成: %s %s (sha256 %s)\n' "$plugin" "$ver" "${h:0:12}"
+    logf "安装完成 $plugin $ver sha256=${h:0:12}"
+    return 0
+}
+
+cmd_discard() {   # <文件名>
+    local name="${1:-}"
+    case "$name" in
+        ''|*/*|*..*) printf '文件名不合法\n'; return 1 ;;
+    esac
+    rm -f "$DL/$name" "$DL/$name.info" 2>/dev/null
+    printf '已丢弃下载的包: %s\n' "$name"
+    logf "丢弃暂存包 $name"
+    return 0
+}
+
+# ------------------------------------------------------------------ 仓库/代理
+cmd_repo_add() {   # <地址> [说明]
+    local url="${1:-}" desc="${2:-}"
+    parse_repo "$url" || { printf '地址无法识别(需要 github.com/用户/仓库 形式)\n'; return 1; }
+    if grep -qF "$url" "$REPOS" 2>/dev/null; then
+        printf '该地址已在列表中\n'; return 1
+    fi
+    printf '%s\t%s\n' "$url" "$desc" >> "$REPOS"
+    logf "添加仓库 $url ($desc)"
+    printf '已添加仓库: %s\n' "$url"
+    return 0
+}
+
+cmd_repo_del() {   # <地址>
+    local url="${1:-}" tmp
+    grep -qF "$url" "$REPOS" 2>/dev/null || { printf '列表里没有这个地址\n'; return 1; }
+    tmp="$DATA/.repos.$$"
+    grep -vF "$url" "$REPOS" > "$tmp" 2>/dev/null
+    mv -f "$tmp" "$REPOS" 2>/dev/null
+    parse_repo "$url" && rm -f "$CACHE/$SLUG.json" "$CACHE/$SLUG.meta" "$CACHE/$SLUG.body" 2>/dev/null
+    logf "删除仓库 $url"
+    printf '已删除仓库: %s\n' "$url"
+    return 0
+}
+
+cmd_proxy_set() {   # <键> <值>
+    local k="${1:-}" v="${2-}"
+    case "$k" in
+        enabled)
+            case "$v" in
+                1|on|true|yes) v=1 ;;
+                0|off|false|no) v=0 ;;
+                *) printf '取值不合法: %s\n' "$v"; return 1 ;;
+            esac
+            kv_set "$PROXYCFG" enabled "$v"
+            if [ "$v" = "1" ]; then
+                [ -n "$(kv_get "$PROXYCFG" url)" ] || { printf '已启用代理, 但还没填代理地址\n'; return 0; }
+                printf '已启用代理: %s\n' "$(kv_get "$PROXYCFG" url)"
+            else
+                printf '已关闭代理(直连)\n'
+            fi
+            logf "代理开关: $v"
+            ;;
+        url)
+            case "$v" in
+                *\ *|*\"*|*\`*) printf '代理地址不能含空格/引号\n'; return 1 ;;
+            esac
+            kv_set "$PROXYCFG" url "$v"
+            printf '%s\n' "$([ -n "$v" ] && printf '代理地址已保存: %s' "$v" || printf '代理地址已清空')"
+            logf "代理地址: $v"
+            ;;
+        token)
+            kv_set "$PROXYCFG" token "$v"
+            printf '%s\n' "$([ -n "$v" ] && printf 'GitHub Token 已保存' || printf 'GitHub Token 已清空')"
+            logf "GitHub token: $([ -n "$v" ] && printf '已设置' || printf '已清空')"
+            ;;
+        *) printf '不支持的配置项: %s\n' "$k"; return 1 ;;
+    esac
+    return 0
+}
+
+# ------------------------------------------------------------------ 展示
+# 一个仓库缓存里的可用资源 -> JSON 数组片段
+assets_json() {   # <slug> <仓库地址> <说明> -> 逗号分隔的对象(可能为空)
+    local slug="$1" rurl="$2" desc="$3" json="$CACHE/$1.json"
+    local o="" sep="" name size digest durl info hash lv state lvn rvn
+    local rplugin rver2 rexec rmanifest rtime rcomment rready rnote
+    [ -f "$json" ] || { printf ''; return 0; }
+    while IFS=$'\001' read -r name size digest durl; do
+        case "$name" in
+            *.[zZ][iI][pP]) ;;
+            *) continue ;;
+        esac
+        case "$name" in
+            *[Ss]ource*[Cc]ode*) continue ;;
+        esac
+        [ -n "$durl" ] || continue
+        split_asset "$name"
+        lv="$(local_ver "$ASSET_PREFIX")"
+        hash="$(local_hash "$ASSET_PREFIX")"
+        digest="${digest#sha256:}"
+        lvn="${lv#v}"; rvn="${ASSET_VER#v}"
+        if [ ! -f "$PLUGINS/$ASSET_PREFIX/Release" ]; then
+            state="new"
+        elif [ -n "$digest" ] && [ -n "$hash" ]; then
+            [ "$digest" = "$hash" ] && state="current" || state="update"
+        elif [ -n "$rvn" ] && [ "$lvn" = "$rvn" ]; then
+            # 本地没有该包的哈希(不是经由本插件安装的), 只能比版本号
+            state="same"
+        else
+            state="update"
+        fi
+
+        # 已下载的暂存包(下载后按包内 Release 展示)
+        info="$DL/$name.info"
+        if [ -f "$DL/$name" ] && [ -f "$info" ]; then
+            rready=1
+            rplugin="$(kv_get "$info" plugin)"
+            rver2="$(kv_get "$info" version)"
+            rcomment="$(kv_get "$info" comment)"
+            rexec="$(kv_get "$info" exec)"
+            rmanifest="$(kv_get "$info" manifest)"
+            rtime="$(kv_get "$info" time)"
+            rnote=""
+            [ "$rexec" = "1" ] || rnote="包内 install.sh 没有执行位, 安装动作不会执行"
+        else
+            rready=0; rplugin=""; rver2=""; rcomment=""; rexec=""
+            rmanifest=""; rtime=""; rnote=""
+            [ "$state" = "same" ] && \
+                rnote="本地找不到该插件包的 zip(不是经由本插件安装, 框架里也没有归档), 因此只能比版本号"
+        fi
+
+        o="$o$sep{\"name\":$(json_str "$name"),\"slug\":$(json_str "$slug"),\"repo\":$(json_str "$rurl"),\"desc\":$(json_str "$desc")
+,\"plugin\":$(json_str "$ASSET_PREFIX"),\"remote_ver\":$(json_str "$ASSET_VER"),\"local_ver\":$(json_str "$lv"),\"state\":$(json_str "$state")
+,\"size\":$(json_str "$size"),\"sha256\":$(json_str "$digest"),\"hash\":$(json_str "$hash"),\"downloaded\":$rready
+,\"pkg_plugin\":$(json_str "$rplugin"),\"pkg_version\":$(json_str "$rver2"),\"pkg_comment\":$(json_str "$rcomment")
+,\"pkg_exec\":$(json_str "$rexec"),\"pkg_manifest\":$(json_str "$rmanifest"),\"pkg_time\":$(json_str "$rtime"),\"note\":$(json_str "$rnote")}"
+        sep=","
+    done < <(jq -r '.assets[] | .name + "\u0001" + (.size|tostring) + "\u0001" + (.digest + "") + "\u0001" + (.browser_download_url + "")' "$json" 2>/dev/null)
+    printf '%s' "$o"
+}
+
+cmd_show() {
+    load_proxy
+    local url desc slug_out meta chunk out_repos="" out_assets="" r="" a="" nrepo=0
+    local tag rname when err at ndl dlsize
+    if [ -f "$REPOS" ]; then
+        while IFS=$'\t' read -r url desc; do
+            [ -n "$url" ] || continue
+            nrepo=$((nrepo + 1))
+            if parse_repo "$url"; then
+                meta="$CACHE/$SLUG.meta"
+                tag="$(kv_get "$meta" tag)"; err="$(kv_get "$meta" error)"
+                rname="$(kv_get "$meta" name)"; when="$(kv_get "$meta" when)"
+                at="$(kv_get "$meta" at)"
+                r="{\"url\":$(json_str "$url"),\"desc\":$(json_str "$desc"),\"slug\":$(json_str "$SLUG")
+,\"tag\":$(json_str "$tag"),\"name\":$(json_str "$rname"),\"when\":$(json_str "$when"),\"at\":$(json_str "$at"),\"error\":$(json_str "$err")}"
+                chunk="$(assets_json "$SLUG" "$url" "$desc")"
+                [ -n "$chunk" ] && out_assets="$out_assets${out_assets:+,}$chunk"
+            else
+                r="{\"url\":$(json_str "$url"),\"desc\":$(json_str "$desc"),\"slug\":\"\"
+,\"tag\":\"\",\"name\":\"\",\"when\":\"\",\"at\":\"\",\"error\":\"地址无法识别(需 github.com/用户/仓库)\"}"
+            fi
+            out_repos="$out_repos${out_repos:+,}$r"
+        done < "$REPOS"
+    fi
+
+    ndl=0; dlsize=0
+    local sz notes
+    for f in "$DL"/*.info; do
+        [ -f "$f" ] || continue
+        ndl=$((ndl + 1))
+        sz="$(kv_get "$f" size)"
+        case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
+        dlsize=$((dlsize + sz))
+    done
+
+    printf '{"proxy":{"enabled":%s,"url":%s,"token":%s},"repos":[%s],"assets":[%s],"staged":{"count":%s,"size":%s},"release_notes":{' \
+        "${P_ENABLED:-0}" "$(json_str "$P_URL")" "$([ -n "$P_TOKEN" ] && printf '1' || printf '0')" \
+        "$out_repos" "$out_assets" "$ndl" "$dlsize"
+    sep=""
+    if [ -f "$REPOS" ]; then
+        while IFS=$'\t' read -r url desc; do
+            [ -n "$url" ] || continue
+            parse_repo "$url" || continue
+            [ -f "$CACHE/$SLUG.body" ] || continue
+            notes="$(head -c 4000 "$CACHE/$SLUG.body" 2>/dev/null | jq -R -s . 2>/dev/null)"
+            [ -n "$notes" ] || notes='""'
+            printf '%s%s:%s' "$sep" "$(json_str "$SLUG")" "$notes"
+            sep=","
+        done < "$REPOS"
+    fi
+    printf '},"log":'
+    cmd_log_json 12
+    printf '}\n'
+    return 0
+}
+
+cmd_log() {
+    local n="${1:-40}"
+    case "$n" in ''|*[!0-9]*) n=40 ;; esac
+    [ -f "$LOG" ] || { printf '(暂无日志)\n'; return 0; }
+    tail -n "$n" "$LOG" 2>/dev/null
+    return 0
+}
+
+cmd_log_json() {
+    local n="${1:-20}" o="" l
+    if [ -f "$LOG" ]; then
+        while IFS= read -r l; do
+            o="$o${o:+,}$(json_str "$l")"
+        done < <(tail -n "$n" "$LOG" 2>/dev/null)
+    fi
+    printf '[%s]' "$o"
+}
+
+cmd_status() {
+    load_proxy
+    local nrepo=0 ndl=0
+    [ -f "$REPOS" ] && nrepo="$(grep -c . "$REPOS" 2>/dev/null)"
+    for f in "$DL"/*.info; do [ -f "$f" ] && ndl=$((ndl + 1)); done
+    printf 'ikupd: 仓库 %s 个, 代理 %s%s, 暂存包 %s 个\n' "${nrepo:-0}" \
+        "$([ "${P_ENABLED:-0}" = "1" ] && printf '已启用' || printf '未启用')" \
+        "$(proxy_on && printf '(%s)' "$P_URL")" "$ndl"
+    return 0
+}
+
+# ------------------------------------------------------------------ 入口
+cmd="${1:-}"; shift 2>/dev/null || true
+case "$cmd" in
+    show)       cmd_show ;;
+    check)      cmd_check ;;
+    repo-add)   cmd_repo_add "$@" ;;
+    repo-del)   cmd_repo_del "$@" ;;
+    proxy-set)  cmd_proxy_set "$@" ;;
+    download)   cmd_download "$@" ;;
+    install)    cmd_install "$@" ;;
+    discard)    cmd_discard "$@" ;;
+    status)     cmd_status ;;
+    log)        cmd_log "$@" ;;
+    *)
+        sed -n '2,40p' "$BIN" | sed 's/^# \{0,1\}//'
+        exit 1
+        ;;
+esac

@@ -1,0 +1,3 @@
+plugin=ikupd
+version=1.0.0
+comment=插件在线升级(从 GitHub Release 检查/下载/安装插件包)

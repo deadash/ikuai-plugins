@@ -1,0 +1,131 @@
+#!/bin/bash /etc/ikcommon
+#
+# ikupd 插件后端接口(前端页面 /plugins/app/ikupd.html)
+#
+# 动作:
+#   show        TYPE=data              仓库列表 + 可用更新 + 暂存包 + 日志(JSON)
+#   seting      key=proxy      value=1|0   代理开关
+#               key=proxy_url  value=...   代理地址(如 socks5h://192.168.1.100:1080)
+#               key=token      value=...   GitHub Token(可选, 用于避开匿名限流)
+#   repo_add    url=... desc=...       添加仓库(desc 里的空格由前端编码为 +)
+#   repo_del    url=...                删除仓库
+#   check                              检查所有仓库的最新 Release
+#   download    slug=... name=...      下载某个资源(校验 sha256, 读出包内 Release)
+#   install     name=...               安装已下载的包(ikplugin install)
+#   discard     name=...               丢弃已下载的包
+#
+# 真正的逻辑都在插件自带的 bin/ikupd(纯 shell + curl + jq), 这里只做参数校验与转发。
+
+B="/etc/mnt/plugins/ikupd/bin/ikupd"
+
+run() { [ -x "$B" ] && "$B" "$@" 2>/dev/null; }
+
+# 前端把空格编码成 +, 后端还原(请求参数不能含空格)
+unsp() { printf '%s' "${1-}" | tr '+' ' '; }
+
+__show_data() {
+    local data
+    if [ ! -x "$B" ]; then
+        data='{"error":"插件可执行文件缺失, 请重新安装插件"}'
+    else
+        data="$(run show)"
+        [ -n "$data" ] || data='{"error":"状态读取失败"}'
+    fi
+    json_append __json_result__ data:json
+}
+
+show() { Show __json_result__; }
+
+# 只允许字母数字与 _ . - / : @ 等安全字符(模块名/文件名/地址共用)
+__check_safe() {
+    case "${1-}" in
+        ''|*[!A-Za-z0-9._:@/-]*) return 1 ;;
+    esac
+    return 0
+}
+
+__check_asset() {
+    case "${1-}" in
+        ''|*/*|*..*) return 1 ;;
+        *.[zZ][iI][pP]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+seting() {
+    local k v
+    case "${key:-}" in
+        proxy)
+            case "${value:-}" in
+                1|on|true|yes) v=1 ;;
+                0|off|false|no) v=0 ;;
+                *) echo "不支持的取值: ${value:-}"; return 1 ;;
+            esac
+            k=enabled ;;
+        proxy_url)
+            k=url; v="${value-}"
+            case "$v" in
+                *\ *|*\"*|*\'*) echo "代理地址不能含空格/引号"; return 1 ;;
+                *[!A-Za-z0-9._:@/-]*) echo "代理地址含不支持字符(例: socks5h://192.168.1.100:1080)"; return 1 ;;
+            esac
+            ;;
+        token)
+            k=token; v="${value-}"
+            case "$v" in
+                *[!A-Za-z0-9._-]*) echo "Token 含不支持字符"; return 1 ;;
+            esac
+            ;;
+        *) echo "不支持的配置项: ${key:-}"; return 1 ;;
+    esac
+    run proxy-set "$k" "$v" && return 0
+    echo "配置写入失败"
+    return 1
+}
+
+repo_add() {
+    local u="${url:-}" d
+    d="$(unsp "${desc-}")"
+    __check_safe "$u" || { echo "仓库地址含不支持字符"; return 1; }
+    case "$u" in
+        *github.com/*) ;;
+        *) echo "只支持 github.com/用户/仓库 形式的地址"; return 1 ;;
+    esac
+    run repo-add "$u" "$d" && return 0
+    echo "添加失败(地址不合法或已存在)"
+    return 1
+}
+
+repo_del() {
+    local u="${url:-}"
+    __check_safe "$u" || { echo "仓库地址含不支持字符"; return 1; }
+    run repo-del "$u" && return 0
+    echo "删除失败(列表里没有这个地址)"
+    return 1
+}
+
+check() {
+    run check
+    return 0
+}
+
+download() {
+    local s="${slug:-}" n="${name:-}"
+    __check_safe "$s" || { echo "仓库标识不合法"; return 1; }
+    __check_asset "$n" || { echo "文件名不合法(需为 .zip)"; return 1; }
+    run download "$s" "$n"
+    return $?
+}
+
+install() {
+    local n="${name:-}"
+    __check_asset "$n" || { echo "文件名不合法(需为 .zip)"; return 1; }
+    run install "$n"
+    return $?
+}
+
+discard() {
+    local n="${name:-}"
+    __check_asset "$n" || { echo "文件名不合法(需为 .zip)"; return 1; }
+    run discard "$n"
+    return $?
+}

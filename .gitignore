@@ -26,3 +26,6 @@ examples/bnfix-plugin/pkg/lib
 
 # ikadblock 插件的构建产物(build.sh 生成)
 examples/adblock-plugin/dist
+
+# ikupd 插件的构建产物(build.sh 生成)
+examples/ikupd-plugin/dist
