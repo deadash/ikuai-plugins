@@ -43,6 +43,10 @@ plugin_fw_patch
 # —— 必须在 plugin_fw_patch 之后: 数据盘是那一步才挂起来的
 plugin_store_setup
 
+# 注册免重启回调: 之后在磁盘分区页把某块盘绑成「插件存储」时, disk_mgmt 会立刻
+# 执行 /etc/disk_notify/plugin, 插件目录当场切换(不用重启)
+plugin_store_notify_install
+
 # 暴露 ikplugin 命令
 plugin_link_cli
 

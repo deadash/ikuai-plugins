@@ -142,6 +142,51 @@ plugin_store_setup() {
     return 0
 }
 
+# 解绑「插件存储」: 先把插件搬回系统盘再卸挂载 —— 不然插件会跟着数据盘一起"消失"。
+plugin_store_off() {
+    local store="$PLUGIN_STORE_LINK/plugins" root
+    root="$(P "$PLUGIN_ROOT")"
+    grep -qs " $root " /proc/mounts 2>/dev/null || return 0
+    if [ -d "$(P "$store")" ] && [ -n "$(ls -A "$(P "$store")" 2>/dev/null)" ]; then
+        cp -a "$(P "$store")"/. "$root"/ 2>/dev/null || \
+            plugin_log "插件存储: 拷回系统盘时有文件没放下(系统盘小), 缺失的可在清出空间后重装"
+        plugin_log "插件存储: 已把数据盘上的插件拷回系统盘"
+    fi
+    umount "$root" 2>/dev/null
+    plugin_log "插件存储: 业务已解绑, 插件回到系统盘 $PLUGIN_ROOT"
+    return 0
+}
+
+# 注册「免重启」回调: iKuai 的 disk_mgmt 在绑定/解绑业务时会执行
+# /etc/disk_notify/<name> disk_setting|disk_remove(<name> 是绑定目标路径的最后一段,
+# 业务 6 的落点是 /etc/disk_sys/plugin, 所以 <name>=plugin)。和 2/3/4/5 那几个业务
+# (dingtalk/video/audit/youyu)完全一样的套路 —— 绑定后立即挂载, 不用重启。
+PLUGIN_NOTIFY="/etc/disk_notify/plugin"
+plugin_store_notify_install() {
+    local f tmp
+    f="$(P "$PLUGIN_NOTIFY")"
+    if [ -x "$f" ] && grep -q 'ikplugin store' "$f" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+    tmp="$(mktemp)" || return 0
+    {
+        echo '#!/bin/sh'
+        echo '# 「插件存储」业务(绑定业务=插件存储)的回调, 由 disk_mgmt.__notify_service 调用:'
+        echo '#   disk_setting -> 立即把插件目录挂到数据盘; disk_remove -> 搬回系统盘并卸挂载'
+        echo '# 目的: 和视频缓存/行为记录那些业务一样, 绑定后立刻生效, 不需要重启。'
+        echo 'case "$1" in'
+        echo '    disk_remove) exec /etc/mnt/.boot/bin/ikplugin store off ;;'
+        echo '    *)           exec /etc/mnt/.boot/bin/ikplugin store on ;;'
+        echo 'esac'
+    } > "$tmp" 2>/dev/null
+    if [ -s "$tmp" ]; then
+        cat "$tmp" > "$f" && chmod +x "$f" 2>/dev/null
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
 # 从 Release 读取字段
 plugin_meta() {
     sed -n "s/^$2=//p" "$1/Release" 2>/dev/null | head -n1
@@ -642,11 +687,21 @@ plugin_fw_patch() {
     local s tmp n=0 i18n f label
     s="$(P /usr/ikuai/script/disk_mgmt.sh)"
 
-    # 1) 业务枚举: __link_setting 加 6), partition_set 的"不用起名"列表加 6
-    if [ -f "$s" ] && ! grep -q 'disk_sys/plugin' "$s" 2>/dev/null; then
+    # 1) 业务枚举, 三处都要改:
+    #    ① __link_setting 加 6) 分支   ② partition_set 的"不用起名"列表
+    #    ③ __notify_service 的两个分支(绑定时回调 /etc/disk_notify/plugin, 免重启)
+    #    判定"要不要动": 缺任何一条都算缺 —— 只看"有没有 6) 分支"会让新增的回调枚举补不上。
+    if [ -f "$s" ]; then
+        want_fw=0
+        grep -q 'disk_sys/plugin' "$s" 2>/dev/null || want_fw=1
+        grep -q '2|3|4|5)' "$s" 2>/dev/null && want_fw=1
+    fi
+    if [ "${want_fw:-0}" = 1 ]; then
         tmp="$(mktemp)" || tmp=""
         if [ -n "$tmp" ]; then
-            awk -v ins=1 '
+            ins6=1
+            grep -q 'disk_sys/plugin' "$s" 2>/dev/null && ins6=0   # 已有 6) 分支就别重复插
+            awk -v ins="$ins6" '
                 { print }
                 /__link_replace \$uuid \/etc\/disk_sys\/dingtalk/ {
                     if (ins) {
@@ -657,9 +712,18 @@ plugin_fw_patch() {
                     }
                 }
             ' "$s" > "$tmp" 2>/dev/null
-            sed -i 's/^\t2|3|4|5)/\t2|3|4|5|6)/' "$tmp" 2>/dev/null
+            # 三处业务枚举: ①__link_setting 加 6) 分支 ②partition_set 的"免起名"列表
+            # ③__notify_service 的两个分支(绑定/解绑时要回调 /etc/disk_notify/plugin)
+            # 按"整行相等"改那三行业务枚举(busybox sed 对 \t 缩进不靠谱, awk 稳)
+            awk -v a="$(printf '\t2|3|4|5)')"     -v A="$(printf '\t2|3|4|5|6)')" \
+                -v b="$(printf '\t\t2|3|4|5)')"   -v B="$(printf '\t\t2|3|4|5|6)')" '
+                { if ($0 == a) print A; else if ($0 == b) print B; else print }' \
+                "$tmp" > "$tmp.2" && mv -f "$tmp.2" "$tmp"
+            # 复核: 6) 分支在, 且**那两行 switch 标签**已经改到
+            # (不能只 grep '2|3|4|5)' —— partition_set 里还有一行 `1|2|3|4|5)`
+            #  是"内部盘 sda1~sda5 禁止绑定"的列表, 那行本来就不该动)
             if grep -q 'disk_sys/plugin' "$tmp" 2>/dev/null && \
-               grep -q '2|3|4|5|6)' "$tmp" 2>/dev/null; then
+               [ "$(awk -v b="$(printf '\t\t2|3|4|5)')" '$0 == b' "$tmp" 2>/dev/null | wc -l)" = 0 ]; then
                 cat "$tmp" > "$s"
                 n=$((n + 1))
                 plugin_log "  已补丁 disk_mgmt.sh(绑定业务 6=插件存储 -> /etc/disk_sys/plugin)"

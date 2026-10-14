@@ -7,6 +7,8 @@
 #   ikplugin remove <名称>         卸载插件
 #   ikplugin scan                 扫描 /etc/mnt/plugins/*.zip 并安装
 #   ikplugin boot                 重新铺开所有已安装插件(开机动作)
+#   ikplugin store on|off          切换插件存储到/离开绑定的「插件存储」数据盘
+#                                 (由 /etc/disk_notify/plugin 在绑定时回调, 免重启)
 #   ikplugin verify <zip|目录>     仅校验插件包
 #   ikplugin pack <目录> <zip>     打包(自动生成清单并签名)
 #   ikplugin keygen [目录]         生成签名密钥对
@@ -48,6 +50,15 @@ case "$cmd" in
         ;;
     boot)
         plugin_boot
+        ;;
+    store)
+        # 插件存储位置: on=用绑定的数据盘, off=搬回系统盘
+        # 由 /etc/disk_notify/plugin 在「插件存储」业务绑定/解绑时回调(免重启)
+        plugin_ensure_dirs
+        case "${1:-on}" in
+            off|0) plugin_store_off ;;
+            *)     plugin_store_setup ;;
+        esac
         ;;
     verify)
         test -n "$1" || { usage; exit 1; }
