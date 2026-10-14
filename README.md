@@ -32,6 +32,7 @@
 5. cron, cron, cron_test
 6. 程序安装, shell
 7. 审计取证, audit (默认开启, 日志写 /etc/log/ikguard)
+8. 定时自检, probe (默认关闭, 开启后把云端连通性自检写入定时任务, 重启仍生效)
 
 > 两个曾经存在的开关已经去掉:
 > `remote`(历史遗留的空开关, iKuai 云的"远程控制/远程维护"已由 backdoor 层覆盖)、
@@ -161,24 +162,26 @@ bin/*                            命令行      -> /usr/sbin/
 | `audit-YYYYMMDD.log` | 结构化事件: `proc.start` `conn.out` `dns.cloud` `cloud.ip` `cloud.port` `block.hit` `backdoor.proc` `backdoor.alive` `probe.*` |
 | `proc-YYYYMMDD.log` | 进程快照对比(新启动的进程) |
 | `conn-YYYYMMDD.log` | 出向连接快照对比(新增公网连接) |
-| `dns-YYYYMMDD.log` | DNS 查询记录(tcpdump 逐网卡抓 `udp port 53`)；**默认关闭，仅用户在控制台手动启停** |
+| `dns-YYYYMMDD.log` | DNS 查询记录(tcpdump 逐网卡抓 `udp port 53`)；**默认关闭，手动启停且不持久化(重启即失效)** |
 | `report.txt` | 最近一次体检报告(结论: 正常/异常) |
 
 ```
 ikaudit status      # 日志目录/占用/DNS 采集/封锁规则
 ikaudit tail 80     # 最近的审计事件
 ikaudit report      # 立刻体检(发现后门进程/云端连接时返回码 1)
-ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试；仅手动触发一次)
-ikaudit dns-start   # 手动启动 DNS 抓包(默认关闭)
+ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试；立即执行一次)
+ikaudit dns-start   # 手动启动 DNS 抓包(默认关闭, 重启即失效)
 ikaudit dns-stop    # 手动停止 DNS 抓包
+ikaudit cronsync    # 按开关重建定时任务(probe=1 才加入定时自检)
 ```
 
 采集由 cron 驱动(`/etc/crontabs/cron.d/ikguard_audit` 每分钟、`ikguard_report` 每 10 分钟)，
 并用 iKuai 的 `crond_commit` 立即提交到 `/etc/crontabs/root`，不必重启。
 
-> **DNS 抓包与 cron 无关**：它默认关闭，只有用户点了"启动 DNS 记录"才抓；点"停止"即停，
-> 不会被定时任务重新拉起(启动写 pid 文件，停止按 pid 关闭并删除)。`ikaudit watch` 只做
-> 采集与日志维护，不启停抓包。云端连通性自检同理，只在用户点击时执行一次。
+> **DNS 抓包与 cron 无关，且不持久化**：默认关闭，只有用户点了"启动 DNS 记录"才抓；点"停止"即停，
+> 设备重启后自动失效，不会被定时任务重新拉起(启动写 pid 文件，停止按 pid 关闭并删除)。
+> `ikaudit watch` 只做采集与日志维护，不启停抓包。
+> **定时自检是开关(`probe`)**：默认关闭(不写入定时任务)，开启后才加入 crontab，重启按配置重建 —— 开了就继续定时跑，没开就既不执行也不进定时任务。
 
 ## 网页插件 (Web)
 

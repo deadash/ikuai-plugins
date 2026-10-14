@@ -8,7 +8,7 @@
 #   /etc/log/ikguard/audit-YYYYMMDD.log 审计事件(结构化)
 #   /etc/log/ikguard/proc-YYYYMMDD.log  进程快照与新增进程
 #   /etc/log/ikguard/conn-YYYYMMDD.log  出向连接快照与新增连接
-#   /etc/log/ikguard/dns-YYYYMMDD.log   DNS 查询原始记录(tcpdump, 默认关闭, 仅用户手动启停)
+#   /etc/log/ikguard/dns-YYYYMMDD.log   DNS 查询原始记录(tcpdump, 默认关闭, 仅用户手动启停, 不持久化)
 #   /etc/log/ikguard/report.txt         最近一次体检报告
 #
 # 日志规模控制(大小 + 时间双限):
@@ -27,6 +27,11 @@ AU_STATE="/tmp/.ikaudit"
 AU_REPORT="report.txt"
 AU_DNS_PIDFILE="$AU_STATE/dns.pids"         # DNS 抓包 pid 文件: 启动写入, 停止读取后删除
 
+# 开关(boot_args)与定时任务:
+#   probe =1 才把"定时自检"写进定时任务(默认 0) —— 持久化, 重启按配置决定是否加入
+#   DNS 抓包**不持久化**: 只当次生效(pid 文件), 重启即失效, 且永远不进定时任务
+AU_PROBE_CRON="${AU_PROBE_CRON:-*/10}"      # 定时自检的 cron 周期
+
 # 兜底名单(backdoor.sh 未加载时使用)
 : "${BD_PROCS:=ik_rc_client cre cre_client pmd dtalkd dtalkc catcherd}"
 : "${BD_PORTS:=1853 2016 2221 2502 6000 9443 15602 1863 32015 32017 8086 6444 21422}"
@@ -44,6 +49,15 @@ AU_PS_IGNORE="${AU_PS_IGNORE:-/etc/mnt/.boot/|^[0-9]+ (/bin/|/usr/bin/)?(busybox
 au_log() { log "[audit] $*"; }
 
 # ---------------------------------------------------------------- 基础
+
+# 读取开关(boot_args); 缺省返回 $2(默认 0)
+au_flag() {
+    if command -v get_flag >/dev/null 2>&1; then
+        get_flag "$1" "${2:-0}"
+    else
+        printf '%s' "${2:-0}"
+    fi
+}
 
 au_dir() { printf '%s' "$(P "$AU_DIR")"; }
 
@@ -540,22 +554,22 @@ au_watch() {
     return 0
 }
 
-# 安装审计 cron(每分钟目录采集 + 每 10 分钟体检)
+# 定时自检开关: 只有用户开启了(probe=1)才写入定时任务
+au_probe_cron_on() { test "$(au_flag probe 0)" = "1"; }
+
+# 安装审计 cron(每分钟采集 + 每 10 分钟体检; 定时自检按开关决定是否加入)
+# 幂等且"声明式": 每次都先清掉本框架的任务行, 再按当前开关重建 ——
+#   关闭的功能重启后不会被拉起, 也不会留在定时任务里。
 au_install_cron() {
-    local cron_dir root bin
+    local cron_dir root bin probe_state
     cron_dir="$(P /etc/crontabs/cron.d)"
     root="$(P /etc/crontabs/root)"
     bin="$(P /etc/mnt/.boot/bin/ikaudit)"
     mkdir -p "$cron_dir" 2>/dev/null
-    # 保留 cron.d 文件(便于查看/别的脚本复用)
-    printf '* * * * * %s watch\n' "$bin" > "$cron_dir/ikguard_audit"
-    printf '*/10 * * * * %s report\n' "$bin" > "$cron_dir/ikguard_report"
 
     # 关键: iKuai 的 crond 只读 /etc/crontabs/root, cron.d 只是它自己的暂存目录,
     # 而且它的 crond_commit 会整体重写 root —— 所以必须把任务直接写进 root,
     # 否则"每分钟采集"根本不会执行(日志里只有开机那一次的数据)。
-    # 先清掉本框架的旧任务行(旧版本可能残留 probe 等自动动作), 再写入当前应有的两条,
-    # 保证 root 里只保留"该做的事"; 直接追加也能保证幂等(不会重复)。
     if [ -f "$root" ]; then
         grep -v "$bin" "$root" > "$root.ikguard.tmp" 2>/dev/null || :
         mv -f "$root.ikguard.tmp" "$root" 2>/dev/null
@@ -563,9 +577,23 @@ au_install_cron() {
         mkdir -p "$(dirname "$root")" 2>/dev/null
         : > "$root"
     fi
-    printf '* * * * * %s watch\n'   "$bin" >> "$root"
-    printf '*/10 * * * * %s report\n' "$bin" >> "$root"
-    au_event INFO "cron.install" "已安装审计任务到 $root (每分钟 watch / 每10分钟 report)"
+
+    # 固定两条: 采集 + 体检
+    printf '* * * * * %s watch\n'      "$bin" >> "$root"
+    printf '*/10 * * * * %s report\n'  "$bin" >> "$root"
+    printf '* * * * * %s watch\n'     "$bin" > "$cron_dir/ikguard_audit"
+    printf '*/10 * * * * %s report\n' "$bin" > "$cron_dir/ikguard_report"
+
+    # 可选: 定时自检(默认关闭, 由 probe 开关决定)
+    if au_probe_cron_on; then
+        printf '%s * * * * %s probe >/dev/null 2>&1\n' "$AU_PROBE_CRON" "$bin" >> "$root"
+        printf '%s * * * * %s probe >/dev/null 2>&1\n' "$AU_PROBE_CRON" "$bin" > "$cron_dir/ikguard_probe"
+        probe_state="$AU_PROBE_CRON"
+    else
+        rm -f "$cron_dir/ikguard_probe" 2>/dev/null
+        probe_state="未启用(probe=0)"
+    fi
+    au_event INFO "cron.install" "已安装审计任务到 $root (每分钟 watch / 每10分钟 report / 定时自检 $probe_state)"
 
     # 兜底: 让 iKuai 自己再提交一次(iKuai 的 crond 每分钟会检查 crontab 变化)
     if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then

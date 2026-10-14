@@ -122,16 +122,17 @@
     <b>云端连通性自检</b>
     <div class="tip">解析爱快云端域名并尝试建立 TCP 443 连接，用来确认后门封锁是否真的生效。
       自检需要设备能上外网(WAN 已拨号)；预期结果是"能解析出 IP，但连接失败"。
-      <b>仅在你点击"开始自检"时执行一次</b>，约 20 秒，不会自动/定时运行；结果同时写入审计日志(<code>probe.*</code>)。</div>
-    <button class="pri" onclick="runProbe()">开始自检</button>
+      <b>此按钮立即执行一次</b>，约 20 秒；如需按期自动执行，请在"开关配置"里打开 <code>定时自检</code>
+      (开启后会写入定时任务，重启仍生效)。结果同时写入审计日志(<code>probe.*</code>)。</div>
+    <button class="pri" onclick="runProbe()">立即自检一次</button>
   </div>
   <div class="tool">
     <b>DNS 查询记录</b>
     <div class="tip">用 tcpdump 抓取 53 端口的 DNS 请求(自动跳过桥成员网卡，避免重复记录)，落到
       <code>/etc/log/ikguard/dns-YYYYMMDD.log</code>，用于核对是否有云端域名被解析。
       审计日志里的 <code>dns.cloud</code> 事件就是对它的汇总。</div>
-    <div class="tip"><b>默认关闭</b>：只有你点"启动"才会抓包；点"停止"即停，不会被定时任务重新拉起。
-      抓包日志按体积封顶(超限自动滚动)，长时间挂机也不会撑爆磁盘。</div>
+    <div class="tip"><b>默认关闭，且不持久化</b>：只有你点"启动"才会抓包，点"停止"即停；设备重启后自动失效，
+      不会被定时任务重新拉起。抓包日志按体积封顶(超限自动滚动)，长时间挂机也不会撑爆磁盘。</div>
     <div class="tip">当前状态：<b id="dns-state">-</b></div>
     <button onclick="dnsAct('start')">启动 DNS 记录</button>
     <button onclick="dnsAct('stop')">停止 DNS 记录</button>
@@ -158,6 +159,7 @@ var FLAGS = [
   ['backdoor','后门阻断','阻断/删除爱快云端后门与更新通道(不影响路由/DHCP/NAT)'],
   ['backdoor_hosts','后门 DNS 屏蔽','把云端域名写入 /etc/hosts 指向 0.0.0.0(可选加固)'],
   ['audit','审计取证','记录进程启动/DNS 请求/网络连接/封锁命中'],
+  ['probe','定时自检','按周期自动执行云端连通性自检；默认关闭，开启后写入定时任务，重启仍生效'],
   ['sshd','SSH 登录','把控制台账号的 shell 换成 bash, 便于 SSH 维护'],
   ['plugins','插件系统','开机自动铺开 /etc/mnt/plugins 下的插件'],
   ['cron','定时任务','铺开 /etc/mnt/cron.d 下的 crontab'],
@@ -241,7 +243,7 @@ function load() {
     if (ds) {
       ds.textContent = (s.dns_running == 1)
         ? '运行中（正在写 ' + (s.log_dir||'/etc/log/ikguard') + '/dns-*.log）'
-        : '未运行（默认关闭；点击"启动 DNS 记录"才开始抓取）';
+        : '未运行（默认关闭；点击"启动 DNS 记录"才开始，重启即失效）';
       ds.className = (s.dns_running == 1) ? 'ok' : 'warn';
     }
 

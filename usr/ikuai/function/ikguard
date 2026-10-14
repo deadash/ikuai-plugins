@@ -6,11 +6,12 @@
 # 动作:
 #   show    TYPE=data,flags,plugins,eula,logs,probe  读取状态/开关/插件/条款/日志/自检结果
 #   seting  key=<配置项> value=<0|1>                 修改 /etc/mnt/boot_args 开关并立即生效
+#           (probe=1 加入定时自检, =0 移除; 其余开关见前端列表)
 #   eula    op=accept|reject                         记录《使用条款》是否已同意(插件功能前置条件)
 #   apply   -                                        重新应用后门阻断 + 审计
 #   plugin  op=scan|install|remove|list [name=...]    插件管理(install 用于安装刚上传的 zip)
-#   dns     op=start|stop                            DNS 查询记录(默认关闭, 仅用户手动启停)
-#   probe   -                                        云端连通性自检(仅用户点击触发一次)
+#   dns     op=start|stop                            DNS 查询记录(默认关闭, 手动启停, 不持久化)
+#   probe   -                                        云端连通性自检(手动立即执行一次)
 #   logclear -                                       清空审计日志(含滚动出的 .1)
 #
 # 说明: 本文件通过 /usr/ikuai/function/ikguard 软链被 func_api.sh 分发,
@@ -242,13 +243,19 @@ show()
 # ---------------------------------------------------------------- seting
 
 __apply_for() {
-    case "$1" in
+    local k="$1"
+    case "$k" in
         backdoor)  ikg_run_script 02_disable_backdoor.sh ;;
         plugins)   ikg_run_script 03_enable_plugins.sh ;;
         cron)      ikg_run_script 04_enable_cron.sh ;;
         shell)     ikg_run_script 05_enable_shell.sh ;;
         audit)     ikg_run_script 06_enable_audit.sh ;;
+        probe)
+            # 定时自检: 重建定时任务(probe=1 才加入 crontab, =0 则移除)
+            "$IK_IKAUDIT" cronsync >/dev/null 2>&1
+            ;;
     esac
+    return 0
 }
 
 seting()
@@ -262,6 +269,7 @@ seting()
         cron)            k="cron" ;;
         shell)           k="shell" ;;
         audit)           k="audit" ;;
+        probe)           k="probe" ;;
         *)               echo "不支持的配置项: $key" ; return 1 ;;
     esac
 
@@ -279,7 +287,7 @@ seting()
     Syslog "[ikguard] 开关变更: $k=$value"
     ikg_audit INFO "flag.change" "开关变更 $k=$value"
 
-    __apply_for "$k"
+    __apply_for "$k" "$value"
     echo "$k=$value 已保存并生效"
     return 0
 }
@@ -386,7 +394,7 @@ dns()
     case "$op" in
         start)
             "$IK_IKAUDIT" dns-start >/dev/null 2>&1 || { echo "启动失败: tcpdump 不可用或没有可用网卡"; return 1; }
-            echo "DNS 记录已启动"
+            echo "DNS 记录已启动(仅本次有效，重启后自动失效)"
             ;;
         stop)
             "$IK_IKAUDIT" dns-stop >/dev/null 2>&1 || { echo "停止失败"; return 1; }

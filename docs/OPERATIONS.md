@@ -384,6 +384,10 @@ $ iptables -nvx -L FORWARD | grep ikuai_blk
 > DNS 日志是多个 `tcpdump`(逐网卡)并发追加同一个文件，高并发时行可能交错；
 > **事件级的 `audit-*.log` 才是可靠证据来源**，`dns-*.log` 只当原始抓包存档看。
 
+> 上面是本框架固定写入的 **3 条**。若打开了 `probe` 开关，还会多一条
+> `*/10 * * * * /etc/mnt/.boot/bin/ikaudit probe >/dev/null 2>&1`；关闭该开关时
+> `ikaudit cronsync`(或重启)会把它从 `/etc/crontabs/root` 里删掉。DNS 抓包永远不在其中。
+
 ---
 
 ## 6. Web 插件系统(iKuai 官方插件机制)
@@ -503,11 +507,11 @@ $ curl -s -H 'Accept-Encoding: gzip' http://127.0.0.1:18080/static/js/152.*.js.g
   `apply` / `plugin` / `dns` / `probe` / `logclear`
 * 页面功能:
   * **概览**: 框架版本、签名校验、后门进程、ipset 条目、封锁规则/命中数、DNS 采集状态、日志占用
-  * **开关配置**: `backdoor` `backdoor_hosts` `audit` `sshd` `plugins` `cron` `shell`
-    修改即写入 `/etc/mnt/boot_args` 并立刻重跑对应脚本
+  * **开关配置**: `backdoor` `backdoor_hosts` `audit` `probe` `sshd` `plugins` `cron` `shell`
+    修改即写入 `/etc/mnt/boot_args` 并立刻重跑对应脚本(`probe` 打开/关闭会即时重建定时任务)
   * **插件管理**: **上传 zip 安装**、扫描 `/etc/mnt/plugins/*.zip`、列出/卸载插件
   * **审计日志**: 实时查看 report/audit/dns/proc/conn/boot 日志
-  * **工具**: 云端连通性自检(带结果回读)、DNS 记录开关 —— 每一项都有用途说明
+  * **工具**: 云端连通性自检(立即执行一次 + 结果回读)、DNS 记录开关(不持久化) —— 每一项都有用途说明
 
 前端图标与页面都在 `www/plugins/app/`(`ikguard.{html,png}`、`terms.{html,png}`)，
 图标是 64×64 的圆角盾牌(盾牌=安全防护，文档图标=使用条款)。
@@ -665,6 +669,9 @@ $ /usr/ikuai/function/rustdemo show TYPE=data
 | `cron` | 1 | 铺开 `/etc/mnt/cron.d` |
 | `shell` | 1 | 链接 `/etc/mnt/shells` 下的程序/配置 |
 | `audit` | 1 | 审计取证(进程/DNS/网络/封锁命中) |
+| `probe` | 0 | **定时**云端连通性自检: 只有开启才写入定时任务(`*/10`)，重启按该配置重建 |
+
+> DNS 抓包**没有开关**：它默认关闭、手动启停、**不持久化**(重启即失效)，也永远不写入定时任务。
 
 **已废弃并会自动清理的两个键**(升级时 install.sh 会 `sed -i` 删除):
 
