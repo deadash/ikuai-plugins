@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>广告拦截</title>
+<style>
+  :root{
+    --bg:#f4f6fb; --card:#fff; --line:#e6eaf2; --txt:#1f2733; --sub:#7c8798;
+    --pri:#2f6fed; --ok:#12a150; --warn:#e8a33d; --err:#e04b4b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:18px}
+  .hd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .hd h1{font-size:19px;margin:0;font-weight:600}
+  .badge{font-size:12px;padding:2px 9px;border-radius:10px;background:#eef2fa;color:var(--sub)}
+  .badge.on{background:#e6f7ee;color:var(--ok)}
+  .badge.off{background:#fdeaea;color:var(--err)}
+  .grow{flex:1}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+  .card h2{font-size:14px;margin:0 0 10px;font-weight:600;color:#39445a}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .stat{background:#fafbfe;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .stat b{display:block;font-size:20px;font-weight:600;letter-spacing:.3px}
+  .stat span{font-size:12px;color:var(--sub)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button{font:inherit;padding:7px 14px;border-radius:8px;border:1px solid var(--line);
+         background:#fff;color:var(--txt);cursor:pointer}
+  button:hover{border-color:#c8d4ea}
+  button.pri{background:var(--pri);border-color:var(--pri);color:#fff}
+  button.pri:hover{background:#2560d8}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  input[type=text]{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:8px;min-width:230px}
+  input[type=text]:focus{outline:none;border-color:var(--pri)}
+  .sw{position:relative;width:46px;height:26px;border-radius:14px;background:#ccd4e2;cursor:pointer;transition:.2s}
+  .sw.on{background:var(--ok)}
+  .sw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.2s}
+  .sw.on i{left:23px}
+  .tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;min-height:24px}
+  .tag{display:inline-flex;align-items:center;gap:6px;background:#eef2fa;border-radius:6px;padding:3px 8px;font-size:12px}
+  .tag em{cursor:pointer;color:var(--sub);font-style:normal}
+  .tag em:hover{color:var(--err)}
+  pre{background:#1d2333;color:#cdd6e6;border-radius:10px;padding:12px;overflow:auto;max-height:260px;
+      font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;margin:0}
+  .muted{color:var(--sub);font-size:12px}
+  .msg{font-size:13px;padding:8px 12px;border-radius:8px;display:none;margin-bottom:10px}
+  .msg.show{display:block}
+  .msg.ok{background:#e6f7ee;color:#0d7f41}
+  .msg.err{background:#fdeaea;color:#b33030}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0;font-size:13px}
+  dt{color:var(--sub)}
+  details summary{cursor:pointer;color:var(--sub);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hd">
+    <h1>广告拦截</h1>
+    <span id="bEnable" class="badge">加载中</span>
+    <span id="bRun" class="badge">—</span>
+    <div class="grow"></div>
+    <div class="row">
+      <span class="muted" id="swLabel">启用</span>
+      <div id="sw" class="sw" title="开启/关闭广告拦截"><i></i></div>
+      <button id="btnRefresh">刷新</button>
+    </div>
+  </div>
+
+  <div id="msg" class="msg"></div>
+
+  <div class="card">
+    <h2>运行状态</h2>
+    <div class="grid">
+      <div class="stat"><b id="sDomains">—</b><span>拦截域名</span></div>
+      <div class="stat"><b id="sLocal">—</b><span>本地应答(缓存或拦截)</span></div>
+      <div class="stat"><b id="sQuery">—</b><span>DNS 查询总数</span></div>
+      <div class="stat"><b id="sHit">—</b><span>本地应答占比</span></div>
+      <div class="stat"><b id="sRules">—</b><span>劫持规则(接口)</span></div>
+      <div class="stat"><b id="sDl">—</b><span>规则库条目</span></div>
+    </div>
+    <dl style="margin-top:12px">
+      <dt>上游 DNS</dt><dd id="dUp">—</dd>
+      <dt>上游转发 / 缓存计数</dt><dd id="dCache">—</dd>
+      <dt>规则更新时间</dt><dd id="dUpd">—</dd>
+      <dt>拦截接口</dt><dd id="dIf">—</dd>
+      <dt>IPv6(AAAA)</dt><dd id="dV6">—</dd>
+      <dt>守护进程 / 自动更新</dt><dd id="dDaemon">—</dd>
+    </dl>
+    <p class="muted" style="margin:10px 0 0">
+      统计来自设备自带 DNS 转发器每 60 秒写的报表(实例重启会归零, 插件按增量累加)。
+      被 sinkhole 拦下的查询不会转发上游, 所以「本地应答 = 查询总数 − 上游转发」,
+      它包含拦截命中与缓存命中两部分 —— 转发器只给聚合计数, 分不出两者的比例。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>规则库</h2>
+    <p class="muted" style="margin:0 0 10px">
+      内置种子表离线即可拦截常见广告/跟踪域名; 点「更新规则库」会从开源项目拉取完整列表
+      (anti-AD、StevenBlack、1Hosts Lite) 并合并去重, 源可在
+      <code>data/sources.conf</code> 里增删。
+    </p>
+    <div class="row">
+      <button class="pri" id="btnUpdate">更新规则库</button>
+      <button id="btnRebuild">重新建表</button>
+      <button id="btnVerify">立即自检</button>
+      <span class="muted" id="updHint"></span>
+    </div>
+    <pre id="verifyOut" style="margin-top:10px;display:none"></pre>
+  </div>
+
+  <div class="card">
+    <h2>自定义拦截</h2>
+    <div class="row">
+      <input type="text" id="inAdd" placeholder="例: ads.example.com(自动含全部子域)">
+      <button id="btnAdd">加入拦截</button>
+    </div>
+    <div class="tags" id="tagsCustom"></div>
+  </div>
+
+  <div class="card">
+    <h2>白名单(不拦截)</h2>
+    <div class="row">
+      <input type="text" id="inWhite" placeholder="例: s.click.taobao.com">
+      <button id="btnWhite">加入白名单</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">
+      白名单语义: 加入 <code>good.example.com</code> 后, 它<b>及它的所有子域</b>都不再拦截,
+      规则库里单独列出的子域条目也一并让开; 同时它的<b>父域条目</b>(<code>example.com</code>)
+      也会让开 —— 因为拦截是父域通配的, 不让开的话白名单就无从生效。
+    </p>
+    <div class="tags" id="tagsWhite"></div>
+  </div>
+
+  <div class="card">
+    <h2>最近日志 <span class="muted" id="logPath"></span></h2>
+    <pre id="logs">—</pre>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>工作原理与接口说明</summary>
+      <div style="margin-top:10px" class="muted">
+        <p><b>1) DNS sinkhole</b>: 插件用设备自带的 DNS 转发器 <code>ikdnsx</code> 跑一个独立实例
+        (监听 5353), 静态表里对每个拦截域名写 <code>ipv4 *.域名 0.0.0.0</code> /
+        <code>ipv6 *.域名 ::</code> —— 一条通配即覆盖该域名及其任意层级子域。</p>
+        <p><b>2) 全网 DNS 纳管</b>: 用 iptables nat 把 LAN 侧所有 UDP/53 查询 REDIRECT 到这个实例
+        (与 iKuai 自带 DNS 代理同一套路, 我们的链在最前面), 所以客户端即使自己指定
+        8.8.8.8/114.114.114.114 也绕不过去。</p>
+        <p><b>3) 其余域名照常解析</b>: 该实例同时是转发器, 非拦截域名按设备
+        <code>/etc/resolv.conf</code> 里的上游正常解析。</p>
+        <p><b>4) 安全兜底</b>: 守护进程 + 每分钟的定时守卫负责"进程/规则被冲掉后自动补回";
+        一旦实例起不来会主动撤掉劫持规则(fail-open), 不会把 DNS 弄挂。卸载插件后立即恢复原状。</p>
+        <p><b>局限</b>: 只处理 DNS; 客户端走 DoH/DoT、或广告与业务同域(如某些应用的自家 CDN)
+        时拦不住; 也不做 HTTPS 证书级拦截。</p>
+      </div>
+    </details>
+  </div>
+</div>
+
+<script>
+const FN = 'ikadblock';
+const $ = id => document.getElementById(id);
+
+function api(action, param){
+  return fetch('/Action/call', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({func_name:FN, action:action, param:param||{}})
+  }).then(r => r.json()).then(j => {
+    if (j.Result !== 30000) throw new Error(j.ErrMsg || ('错误码 ' + j.Result));
+    return j.Data === undefined ? {} : j.Data;
+  });
+}
+
+function msg(text, ok){
+  const m = $('msg');
+  m.textContent = text;
+  m.className = 'msg show ' + (ok ? 'ok' : 'err');
+  clearTimeout(msg._t);
+  msg._t = setTimeout(() => { m.className = 'msg'; }, 5000);
+}
+
+function fmtTime(sec){
+  sec = parseInt(sec, 10) || 0;
+  if (sec <= 0) return '内置种子表(尚未联网更新)';
+  const d = new Date(sec * 1000);
+  const p = n => (n < 10 ? '0' : '') + n;
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' +
+         p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function renderTags(box, list, action){
+  const el = $(box);
+  el.innerHTML = '';
+  if (!list || !list.length){
+    el.innerHTML = '<span class="muted">(空)</span>';
+    return;
+  }
+  list.forEach(d => {
+    const t = document.createElement('span');
+    t.className = 'tag';
+    t.innerHTML = '<span></span><em title="删除">×</em>';
+    t.firstChild.textContent = d;
+    t.querySelector('em').onclick = async () => {
+      try { await api(action, {domain:d}); msg('已删除 ' + d, true); load(); }
+      catch(e){ msg(e.message, false); }
+    };
+    el.appendChild(t);
+  });
+}
+
+async function load(){
+  try{
+    const d = await api('show', {TYPE:'data'});
+    const s = d.status || {};
+    const en = String(s.enabled) === '1';
+    $('bEnable').textContent = en ? '已启用' : '已停用';
+    $('bEnable').className = 'badge ' + (en ? 'on' : 'off');
+    const run = s.running === true || String(s.running) === 'true';
+    $('bRun').textContent = run ? '拦截服务运行中' : '拦截服务未运行';
+    $('bRun').className = 'badge ' + (run ? 'on' : 'off');
+    $('sw').className = 'sw' + (en ? ' on' : '');
+    $('swLabel').textContent = en ? '已开启' : '已关闭';
+
+    $('sDomains').textContent = s.domains !== undefined ? s.domains : '—';
+    $('sLocal').textContent   = s.total_local !== undefined ? s.total_local : '—';
+    $('sQuery').textContent   = s.total_query !== undefined ? s.total_query : '—';
+    $('sHit').textContent     = (s.hit !== undefined ? s.hit : '0.0') + '%';
+    $('sRules').textContent   = s.rules !== undefined ? s.rules : '—';
+    $('sDl').textContent      = s.downloaded !== undefined ? s.downloaded : '—';
+
+    $('dCache').textContent = (s.total_miss || 0) + ' / ' + (s.total_cache || 0);
+    $('dUp').textContent   = s.upstream ? s.upstream : '设备默认';
+    $('dUpd').textContent  = fmtTime(s.last_update);
+    $('dIf').textContent   = s.ifaces ? s.ifaces : '(暂无 LAN 接口, 守护进程会重试)';
+    $('dV6').textContent   = s.ipv6 ? '同时拦截' : '仅 IPv4';
+    $('dDaemon').textContent = (s.daemon ? '守护中' : '守护未运行') +
+                               ' / 自动更新' + (String(s.auto_update) === '1' ? '已开' : '已关');
+    $('updHint').textContent = '源 ' + (s.sources || 0) + ' 个';
+
+    renderTags('tagsCustom', d.custom, 'del');
+    renderTags('tagsWhite', d.whitelist, 'whitedel');
+    const logs = d.logs || [];
+    $('logs').textContent = logs.length ? logs.join('\n') : '(暂无日志)';
+  }catch(e){
+    msg('读取状态失败: ' + e.message, false);
+  }
+}
+
+async function act(action, param, okText){
+  const btns = document.querySelectorAll('button');
+  btns.forEach(b => b.disabled = true);
+  msg('正在执行, 请稍候…', true);
+  try{
+    const d = await api(action, param);
+    if (action === 'verify' && d.verify){
+      $('verifyOut').style.display = 'block';
+      $('verifyOut').textContent = JSON.stringify(d.verify, null, 2);
+    }
+    msg(okText || '操作完成', true);
+    await load();
+  }catch(e){
+    msg(e.message, false);
+  }finally{
+    btns.forEach(b => b.disabled = false);
+  }
+}
+
+$('sw').onclick = () => {
+  const on = $('sw').className.indexOf('on') >= 0;
+  act('seting', {key:'enabled', value: on ? '0' : '1'}, on ? '已关闭广告拦截' : '已开启广告拦截');
+};
+$('btnRefresh').onclick = load;
+$('btnUpdate').onclick  = () => act('update', {}, '规则库更新完成');
+$('btnRebuild').onclick = () => act('rebuild', {}, '已重新建表');
+$('btnVerify').onclick  = () => act('verify', {TYPE:'data'}, '自检完成');
+$('btnAdd').onclick = () => {
+  const v = $('inAdd').value.trim();
+  if (!v) return;
+  act('add', {domain:v}, '已加入拦截: ' + v).then(() => { $('inAdd').value = ''; });
+};
+$('btnWhite').onclick = () => {
+  const v = $('inWhite').value.trim();
+  if (!v) return;
+  act('whiteadd', {domain:v}, '已加入白名单: ' + v).then(() => { $('inWhite').value = ''; });
+};
+[$('inAdd'), $('inWhite')].forEach(el => el.addEventListener('keydown', e => {
+  if (e.key === 'Enter') (el === $('inAdd') ? $('btnAdd') : $('btnWhite')).click();
+}));
+
+load();
+</script>
+</body>
+</html>

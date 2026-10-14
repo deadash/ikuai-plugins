@@ -1,0 +1,688 @@
+#!/bin/bash
+#
+# ikadblock - iKuai 广告/跟踪域名拦截(DNS sinkhole)
+#
+# 只依赖设备自带能力, 不引入任何二进制:
+#   1) 拿设备自带的 ikdnsx(DNS 缓存/转发器)跑一个**独立实例**(端口 5353),
+#      静态表里放 `ipv4 *.域名 0.0.0.0` / `ipv6 *.域名 ::`。ikdnsx 的静态表支持
+#      通配符, 一条 `*.a.com` 同时覆盖 a.com 本身与任意层级子域(实测:
+#      `*.a.com` 命中 a.com / x.a.com / x.y.a.com, 不命中 a.com.evil.net)。
+#   2) 用 iptables nat 把 LAN 侧进来的 UDP/53 查询 REDIRECT 到这个实例 —— 与
+#      iKuai 自带 DNS 代理(DNSPROXY, REDIRECT 到 53)是同一套路, 我们的链插在最
+#      前面, 所以客户端即使自己指定 8.8.8.8/114.114.114.114 也会被拦下。
+#   3) 这个实例同时是转发器: 不在黑名单里的域名照常向上游(默认取设备
+#      /etc/resolv.conf 里的 nameserver)解析, 广告以外的上网行为不变。
+#   4) 守护/守卫保证"实例被 iKuai 冲掉、规则被清掉"时自动补回; 一旦实例拉不起来,
+#      主动撤掉劫持规则(fail-open), 绝不把用户的 DNS 弄挂。
+#
+# 子命令:
+#   status            状态 JSON
+#   apply | enable    启用(建表 + 起实例 + 装劫持规则 + 拉起守护)
+#   revert | disable  停用(撤规则 + 停实例 + 停守护)
+#   rebuild           用当前列表重建域名表并重载实例
+#   update [源名]     从开源规则库下载并重建
+#   add <域名>        加入自定义拦截
+#   del <域名>        移出自定义拦截
+#   whiteadd <域名>   加入白名单(该域名及其子域不再拦截)
+#   whitedel <域名>   移出白名单
+#   verify            自检(实例 + 通配拦截 canary + 转发 + 劫持规则) JSON
+#   sync              一次幂等校准(守护进程/定时守卫调用)
+#   daemon            常驻守护循环
+#   daemon-start      拉起守护进程
+#   daemon-stop       停止守护进程
+#   log [n]           查看日志
+#
+set -u
+
+ROOT="${PLUGIN_DIR:-/etc/mnt/plugins/ikadblock}"
+DATA="$ROOT/data"
+SHARE="$ROOT/share"
+BIN="$ROOT/bin/ikadblock"
+
+STATE="$DATA/state"
+STATS="$DATA/stats"
+SOURCES="$DATA/sources.conf"
+SOURCES_DEF="$SHARE/sources.conf"
+SEED="$SHARE/seed.txt"
+DOWNLOADED="$DATA/downloaded.txt"
+AUTOWHITE="$DATA/auto-white.txt"
+CUSTOM="$DATA/custom.txt"
+WHITE="$DATA/whitelist.txt"
+DOMAINS="$DATA/domains.txt"
+HOSTS="$DATA/sinkhole.hosts"
+IKCONF="$DATA/ikdnsx.conf"
+IKPID="$DATA/ikdnsx.pid"
+DPID="$DATA/daemon.pid"
+REPORT="$DATA/report.txt"
+
+LOG="/etc/log/ikadblock/ikadblock.log"
+PORT=5353
+CHAIN=IKADB
+CANARY="ikadblock-canary.test"
+MAX_DOMAINS=120000
+AUTO_UPDATE_SECS=604800
+
+mkdir -p "$DATA" "$(dirname "$LOG")" 2>/dev/null
+
+# ------------------------------------------------------------------ 基础工具
+log() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null
+    echo "$*"
+}
+# 只写日志文件, 不污染 stdout(给输出 JSON 的命令用)
+logf() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null; }
+
+kv_get() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1; }
+kv_set() {
+    local f="$1" k="$2" v="$3" t="$1.tmp"
+    { grep -v "^$k=" "$f" 2>/dev/null; echo "$k=$v"; } > "$t" 2>/dev/null
+    mv -f "$t" "$f" 2>/dev/null
+}
+state_get() { kv_get "$STATE" "$1"; }
+state_set() { kv_set "$STATE" "$1" "$2"; }
+stats_get() { kv_get "$STATS" "$1"; }
+stats_set() { kv_set "$STATS" "$1" "$2"; }
+state_int() { local v; v="$(state_get "$1")"; [ -n "$v" ] && echo "$v" || echo 0; }
+stats_int() { local v; v="$(stats_get "$1")"; [ -n "$v" ] && echo "$v" || echo 0; }
+
+count_lines() { [ -f "$1" ] && wc -l < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
+file_size() { [ -f "$1" ] && wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
+# 规则源的"有效行数"(不含注释与空行)
+count_sources() { [ -f "$1" ] && grep -cE '^[[:space:]]*[^#[:space:]]' "$1" 2>/dev/null || echo 0; }
+
+is_domain() {
+    case "${1:-}" in
+        ''|*[!a-zA-Z0-9._-]*) return 1 ;;
+        *.*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 设备上的 LAN 侧接口名(iKuai 用 lan1/wan1 这类镜像接口承载数据面)
+all_ifaces() { ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | sort -u; }
+lan_ifaces() {
+    all_ifaces | grep -E '^(lan|vlan|ppp|tap|sovpn|sdwan|ikec|doc_|wlan|wl)[0-9]*$'
+}
+
+# ------------------------------------------------------------------ DNS 实例
+upstream_ns() {
+    local o
+    o="$(state_get upstream)"
+    if [ -n "$o" ]; then
+        printf '%s\n' "$o" | tr ',' '\n' | grep -E '^[0-9a-fA-F:.]{3,}$'
+        return 0
+    fi
+    grep -E '^[[:space:]]*nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' \
+        | grep -vE '^(127\.|::1$|0\.0\.0\.0$)' | head -n 3
+}
+
+ik_conf_write() {
+    local ns n=0
+    {
+        echo "[global]"
+        echo "host = 0.0.0.0"
+        echo "port = $PORT"
+        echo "cache_max = 10000"
+        echo "cache_ttl = 300"
+        echo "report_time = 60"
+        echo "report_file = $REPORT"
+        echo "service = iKuaiOS"
+        for ns in $(upstream_ns); do echo "nameserver = $ns"; n=$((n + 1)); done
+    } > "$IKCONF" 2>/dev/null
+    if [ "$n" = "0" ]; then
+        { echo "nameserver = 223.5.5.5"; echo "nameserver = 114.114.114.114"; } >> "$IKCONF"
+    fi
+}
+
+ik_pid() { cat "$IKPID" 2>/dev/null; }
+ik_running() {
+    local p
+    p="$(ik_pid)"
+    [ -n "$p" ] || return 1
+    kill -0 "$p" 2>/dev/null
+}
+ik_stop() {
+    local p i=0
+    p="$(ik_pid)"
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+        kill "$p" 2>/dev/null
+        while [ "$i" -lt 5 ] && kill -0 "$p" 2>/dev/null; do sleep 1; i=$((i + 1)); done
+        kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    fi
+    rm -f "$IKPID"
+}
+ik_start() {
+    local tries i
+    ik_running && return 0
+    command -v ikdnsx >/dev/null 2>&1 || { logf "找不到 ikdnsx, 无法启动 sinkhole"; return 1; }
+    [ -f "$HOSTS" ] || build_domains || return 1
+    ik_conf_write
+    # 新实例的报表计数器从 0 开始: 丢掉旧快照并把增量基准归零, 统计才不会错
+    rm -f "$REPORT" 2>/dev/null
+    stats_set prev_query 0; stats_set prev_cache 0; stats_set prev_miss 0
+    for tries in 1 2 3; do
+        ( trap '' HUP; exec ikdnsx -C "$IKCONF" -S "$HOSTS" -P "$IKPID" >> "$LOG" 2>&1 ) &
+        i=0
+        while [ "$i" -lt 8 ]; do
+            sleep 1
+            if ik_running; then
+                logf "sinkhole 已启动 pid=$(ik_pid) 端口=$PORT 规则=$(count_lines "$HOSTS")"
+                return 0
+            fi
+            i=$((i + 1))
+        done
+        logf "sinkhole 第 $tries 次启动失败"
+    done
+    return 1
+}
+
+# ------------------------------------------------------------------ iptables 劫持
+hijack_count() {
+    iptables -t nat -S PREROUTING 2>/dev/null | grep -c -- "-j $CHAIN" || true
+}
+hijack_apply() {
+    local i rc=0
+    iptables -t nat -N "$CHAIN" 2>/dev/null
+    iptables -t nat -F "$CHAIN" 2>/dev/null
+    iptables -t nat -A "$CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$PORT" 2>/dev/null || return 1
+    for i in $(lan_ifaces); do
+        iptables -t nat -C PREROUTING -i "$i" -p udp --dport 53 -j "$CHAIN" 2>/dev/null \
+            || iptables -t nat -I PREROUTING 1 -i "$i" -p udp --dport 53 -j "$CHAIN" 2>/dev/null
+    done
+    logf "DNS 劫持已安装: 接口=[$(lan_ifaces | tr '\n' ' ')] 规则数=$(hijack_count)"
+    [ "$(hijack_count)" -gt 0 ] || rc=1
+    return "$rc"
+}
+hijack_remove() {
+    local i
+    for i in $(all_ifaces); do
+        while iptables -t nat -D PREROUTING -i "$i" -p udp --dport 53 -j "$CHAIN" 2>/dev/null; do :; done
+    done
+    # 兜底: 清掉指向本链、但接口已经不存在的残留跳转
+    for i in $(iptables -t nat -S PREROUTING 2>/dev/null \
+        | sed -n "s/.*-i \([^ ]*\).*-j $CHAIN.*/\1/p"); do
+        while iptables -t nat -D PREROUTING -i "$i" -p udp --dport 53 -j "$CHAIN" 2>/dev/null; do :; done
+    done
+    iptables -t nat -F "$CHAIN" 2>/dev/null
+    iptables -t nat -X "$CHAIN" 2>/dev/null
+    logf "DNS 劫持已撤除"
+}
+
+# ------------------------------------------------------------------ 域名表
+build_domains() {
+    local t="$DATA/.build.$$" wp="$DATA/.white.$$"
+    mkdir -p "$DATA"
+    : > "$wp"
+    cat "$WHITE" "$AUTOWHITE" 2>/dev/null \
+        | tr -d '\r' | tr 'A-Z' 'a-z' \
+        | grep -E '^[a-z0-9][a-z0-9._-]*$' | grep '\.' | awk '!seen[$0]++' > "$wp"
+    # 白名单语义: 该域名**及其子域**都不拦截, 同时它的父域条目也要让开
+    # (通配 *.父域 会连子域一起拦, 所以父域条目必须整条去掉; 规则库里单独列出的
+    #  子域条目也要一并去掉, 否则"白名单 000dn.com 但 kwcdn.000dn.com 还被拦")。
+    # 注意: 用 "W/B 前缀 + 单路输入" 而不是 awk 的 NR==FNR 双文件写法 ——
+    # 第一个文件为空(NR==FNR 恒真)时会把所有域名都当白名单吃掉, 表就空了(实测踩过)。
+    # 合并顺序 = 种子表 -> 自定义 -> 下载(下载内部按 sources.conf 顺序), 保序去重,
+    # 所以超出 MAX_DOMAINS 时先砍掉的是排在后面的规则源。
+    {
+        sed 's/^/W /' "$wp"
+        cat "$SEED" "$CUSTOM" "$DOWNLOADED" 2>/dev/null \
+            | tr -d '\r' | tr 'A-Z' 'a-z' \
+            | grep -E '^[a-z0-9][a-z0-9._-]*$' | grep '\.' \
+            | awk '!seen[$0]++' | sed 's/^/B /'
+    } | awk '
+        $1 == "W" { wl[$2]=1; d=$2; prot[d]=1
+                    while (d ~ /\./) { sub(/^[^.]+\./, "", d); prot[d]=1 }
+                    next }
+        $1 == "B" { d=$2
+                    if (d in prot) next
+                    s=d; hit=0
+                    while (s ~ /\./) {
+                        if (s in wl) { hit=1; break }
+                        sub(/^[^.]+\./, "", s)
+                    }
+                    if (!hit && (s in wl)) hit=1
+                    if (!hit) print d
+                  }' \
+        | head -n "$MAX_DOMAINS" > "$DOMAINS"
+    {
+        awk '{ print "ipv4 *." $1 " 0.0.0.0" }' "$DOMAINS"
+        if [ "$(state_get block_ipv6)" != "0" ]; then
+            awk '{ print "ipv6 *." $1 " ::" }' "$DOMAINS"
+        fi
+        echo "ipv4 *.$CANARY 0.0.0.0"
+        echo "ipv6 *.$CANARY ::"
+    } > "$t.hosts" 2>/dev/null
+    mv -f "$t.hosts" "$HOSTS" 2>/dev/null
+    rm -f "$t.dom" "$t.hosts" "$wp" 2>/dev/null
+    logf "域名表已生成: 拦截域名=$(count_lines "$DOMAINS") 静态条目=$(count_lines "$HOSTS")"
+    return 0
+}
+
+build_reload() {
+    build_domains || return 1
+    if [ "$(state_get enabled)" = "1" ]; then
+        ik_stop
+        if ! ik_start; then
+            log "重建后 sinkhole 起不来, 撤掉劫持规则(fail-open)"
+            hijack_remove
+            return 1
+        fi
+        hijack_apply >/dev/null || log "重建后劫持规则安装失败"
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------ 统计
+# ikdnsx 的 report.txt(每 60 秒一份快照)里:
+#   count_query  查询总数
+#   count_miss   需要向上游转发的查询
+#   count_cache  缓存相关计数(实测: 既不等于"缓存命中", 也不等于"上游解析数",
+#                同一个域名解析一次会同时进 miss 和 cache 各一次, 重复查询只进 cache;
+#                官方没给字段含义说明, 所以只把它当参考值展示)
+#   count_static 静态表**条目数**(不是命中数), memory_static 静态表内存字节数
+# 唯一可靠的推导: 被 sinkhole 拦下的查询**不会**转发上游, 于是
+#   本地应答(缓存 + 拦截) = count_query - count_miss
+# 这里按增量累加(实例重启会让报表归零, 归零按"重置"处理)。
+stats_accumulate() {
+    local cq cc cm pq pc pm dq dc dm dl
+    [ -f "$REPORT" ] || return 0
+    cq="$(sed -n 's/^[[:space:]]*count_query=//p' "$REPORT" 2>/dev/null | head -n1)"
+    cc="$(sed -n 's/^[[:space:]]*count_cache=//p' "$REPORT" 2>/dev/null | head -n1)"
+    cm="$(sed -n 's/^[[:space:]]*count_miss=//p'  "$REPORT" 2>/dev/null | head -n1)"
+    case "${cq:-}" in ''|*[!0-9]*) return 0 ;; esac
+    case "${cc:-}" in ''|*[!0-9]*) cc=0 ;; esac
+    case "${cm:-}" in ''|*[!0-9]*) cm=0 ;; esac
+    pq="$(stats_int prev_query)"; pc="$(stats_int prev_cache)"; pm="$(stats_int prev_miss)"
+    dq=$((cq - pq)); [ "$dq" -lt 0 ] && dq="$cq"
+    dc=$((cc - pc)); [ "$dc" -lt 0 ] && dc="$cc"
+    dm=$((cm - pm)); [ "$dm" -lt 0 ] && dm="$cm"
+    dl=$((dq - dm)); [ "$dl" -lt 0 ] && dl=0
+    stats_set total_query $(( $(stats_int total_query) + dq ))
+    stats_set total_cache $(( $(stats_int total_cache) + dc ))
+    stats_set total_miss  $(( $(stats_int total_miss)  + dm ))
+    stats_set total_local $(( $(stats_int total_local) + dl ))
+    stats_set prev_query "$cq"
+    stats_set prev_cache "$cc"
+    stats_set prev_miss  "$cm"
+    stats_set updated "$(date +%s)"
+}
+
+# ------------------------------------------------------------------ 规则库下载
+fetch_url() {
+    local url="$1" out="$2"
+    rm -f "$out" 2>/dev/null
+    curl -fsSL --connect-timeout 8 --max-time 180 "$url" -o "$out" 2>/dev/null
+    [ "$(file_size "$out")" -gt 1000 ] && return 0
+    # 设备 CA 库较老, 证书链校验可能失败: 退化成不校验(仅用于拉取公开黑名单)
+    rm -f "$out" 2>/dev/null
+    curl -kfsSL --connect-timeout 8 --max-time 180 "$url" -o "$out" 2>/dev/null
+    if [ "$(file_size "$out")" -gt 1000 ]; then
+        logf "  (证书校验失败, 已用 -k 拉取 $url)"
+        return 0
+    fi
+    return 1
+}
+
+# 把各家格式统一成 "B 域名" / "W 域名" 两列
+# 支持: 纯域名表 / hosts 表(0.0.0.0 域名) / dnsmasq(address=/域名/ip) / adblock(||域名^, @@||域名^)
+# 注意: awk 正则字面量里不能出现未转义的 `/`(busybox/awk 都会把它当成结束符),
+#       所以这里一律用 `sub(/[^a-z0-9._-].*$/, "", t)` 这种"从第一个非法字符截断"的写法。
+parse_rules() {
+    awk -v canary="$CANARY" '
+    function emit(tag, d) {
+        if (d == "" || d == canary) return
+        if (d !~ /\./) return
+        if (d !~ /^[a-z0-9][a-z0-9._-]*$/) return
+        print tag, d
+    }
+    {
+        line = $0
+        sub(/\r$/, "", line)
+        sub(/#.*/, "", line)
+        n = split(line, f, /[ \t]+/)
+        for (i = 1; i <= n; i++) {
+            t = tolower(f[i])
+            if (t == "") continue
+            if (t == "0.0.0.0" || t == "127.0.0.1" || t == "::" || t == "::1" || t == "localhost") continue
+            tag = "B"
+            if (t ~ /^@@/) { tag = "W"; sub(/^@@/, "", t) }
+            if (t ~ /^address=/) {
+                sub(/^address=/, "", t)
+                if (substr(t, 1, 1) == "/") { sub(/^\/+/, "", t); sub(/\/.*$/, "", t) }
+            }
+            if (t ~ /^\|\|/) { sub(/^\|\|/, "", t); sub(/\^.*$/, "", t) }
+            if (t ~ /^\*/) { sub(/^\*\.?/, "", t) }
+            sub(/^\.+/, "", t)
+            sub(/[^a-z0-9._-].*$/, "", t)
+            sub(/\.$/, "", t)
+            emit(tag, t)
+        }
+    }' "$1"
+}
+
+# ------------------------------------------------------------------ 命令
+cmd_status() {
+    local en run domains customs whites dl rules ifs last now hit tq tb
+    en="$(state_get enabled)"; [ -n "$en" ] || en=0
+    run=false; ik_running && run=true
+    domains="$(count_lines "$DOMAINS")"
+    customs="$(count_lines "$CUSTOM")"
+    whites="$(count_lines "$WHITE")"
+    dl="$(count_lines "$DOWNLOADED")"
+    rules="$(hijack_count)"
+    ifs="$(lan_ifaces | tr '\n' ',' | sed 's/,$//')"
+    last="$(state_get last_update)"; [ -n "$last" ] || last=0
+    tq="$(stats_int total_query)"; tb="$(stats_int total_local)"
+    now="$(date +%s)"; hit="0.0"
+    [ "$tq" -gt 0 ] && hit="$(awk -v a="$tb" -v b="$tq" 'BEGIN{printf "%.1f", a*100/b}')"
+    printf '{"enabled":"%s","running":%s,"port":"%s","domains":%s,"custom":%s,"whitelist":%s,' \
+        "$en" "$run" "$PORT" "$domains" "$customs" "$whites"
+    printf '"downloaded":%s,"sources":%s,"rules":%s,"ifaces":"%s","ipv6":%s,"daemon":%s,' \
+        "$dl" "$(count_sources "$SOURCES")" "$rules" "$ifs" \
+        "$( [ "$(state_get block_ipv6)" = "0" ] && echo false || echo true )" \
+        "$( daemon_running && echo true || echo false )"
+    printf '"last_update":%s,"since":%s,"total_query":%s,"total_local":%s,"total_cache":%s,"total_miss":%s,"hit":"%s",' \
+        "$last" "$( [ "$last" -gt 0 ] && echo $((now - last)) || echo -1 )" "$tq" "$tb" \
+        "$(stats_int total_cache)" "$(stats_int total_miss)" "$hit"
+    printf '"auto_update":"%s","upstream":"%s","report":%s,"max_domains":%s}\n' \
+        "$(state_get auto_update)" "$(upstream_ns | tr '\n' ',' | sed 's/,$//')" \
+        "$( [ -f "$REPORT" ] && echo true || echo false )" "$MAX_DOMAINS"
+}
+
+daemon_running() {
+    [ -f "$DPID" ] && kill -0 "$(cat "$DPID" 2>/dev/null)" 2>/dev/null
+}
+
+cmd_apply() {
+    state_set enabled 1
+    [ -f "$DOMAINS" ] || build_domains
+    [ -f "$HOSTS" ] || build_domains || { log "域名表生成失败"; return 1; }
+    if ! ik_start; then
+        log "sinkhole 启动失败: 不接管 DNS(fail-open), 请检查设备是否自带 ikdnsx"
+        hijack_remove
+        return 1
+    fi
+    if ! hijack_apply; then
+        log "劫持规则安装失败(可能还没有 LAN 接口), 守护进程会继续重试"
+    fi
+    daemon_start
+    log "广告拦截已启用: 域名 $(count_lines "$DOMAINS") 条, 劫持接口 [$(lan_ifaces | tr '\n' ' ')]"
+    return 0
+}
+
+cmd_disable() {
+    state_set enabled 0
+    hijack_remove
+    ik_stop
+    daemon_stop
+    rm -f "$REPORT" 2>/dev/null
+    log "广告拦截已停用: 劫持规则/实例/守护均已停止"
+    return 0
+}
+
+cmd_rebuild() { build_reload && log "重建完成: 域名 $(count_lines "$DOMAINS") 条"; }
+
+cmd_update() {
+    local only="${1:-}" raw="$DATA/raw.tmp" parsed="$DATA/parsed.tmp"
+    local ok=0 fail=0 name url fmt
+    [ -f "$SOURCES" ] || cp -f "$SOURCES_DEF" "$SOURCES" 2>/dev/null
+    [ -f "$SOURCES" ] || { log "缺少规则源配置 $SOURCES"; return 1; }
+    : > "$parsed"
+    while IFS='|' read -r name url fmt; do
+        case "${name:-}" in ''|\#*) continue ;; esac
+        [ -n "${url:-}" ] || continue
+        if [ -n "$only" ] && [ "$only" != "$name" ]; then continue; fi
+        log "拉取规则库: $name -> $url"
+        if fetch_url "$url" "$raw"; then
+            parse_rules "$raw" >> "$parsed" 2>/dev/null
+            log "  ok ($(file_size "$raw") 字节)"
+            ok=$((ok + 1))
+        else
+            log "  ! 拉取失败: $name"
+            fail=$((fail + 1))
+        fi
+    done < "$SOURCES"
+    rm -f "$raw"
+    if [ "$ok" = "0" ]; then
+        rm -f "$parsed"
+        log "所有规则源都失败(网络不可达?), 保留原表不动"
+        state_set last_result "fail=$fail"
+        return 1
+    fi
+    # 保序去重(规则源之间的先后顺序即优先级), 并顺手截断, 避免中间文件过大
+    grep '^B ' "$parsed" 2>/dev/null | cut -d' ' -f2 | awk '!seen[$0]++' \
+        | head -n "$MAX_DOMAINS" > "$DOWNLOADED"
+    grep '^W ' "$parsed" 2>/dev/null | cut -d' ' -f2 | awk '!seen[$0]++' > "$AUTOWHITE"
+    rm -f "$parsed"
+    state_set last_update "$(date +%s)"
+    state_set last_result "ok=$ok fail=$fail"
+    log "规则库更新完成: 源 ok=$ok fail=$fail, 下载条目 $(count_lines "$DOWNLOADED") 条"
+    build_reload || return 1
+    log "已重建: 拦截域名 $(count_lines "$DOMAINS") 条 / 静态条目 $(count_lines "$HOSTS") 条"
+    return 0
+}
+
+list_add() {   # $1=文件 $2=域名 $3=描述
+    is_domain "$2" || { log "$3失败: 不是合法域名 ($2)"; return 1; }
+    local d; d="$(printf '%s' "$2" | tr 'A-Z' 'a-z')"
+    touch "$1" 2>/dev/null
+    grep -qxF "$d" "$1" 2>/dev/null || echo "$d" >> "$1"
+    sort -u "$1" -o "$1" 2>/dev/null
+    log "$3: $d"
+}
+list_del() {   # $1=文件 $2=域名 $3=描述
+    local d; d="$(printf '%s' "${2:-}" | tr 'A-Z' 'a-z')"
+    awk -v d="$d" '$1 != d' "$1" > "$1.tmp" 2>/dev/null
+    mv -f "$1.tmp" "$1" 2>/dev/null
+    log "$3: $d"
+}
+
+cmd_add()       { list_add "$CUSTOM" "${1:-}" "已加入拦截" && build_reload; }
+cmd_del()       { list_del "$CUSTOM" "${1:-}" "已移出拦截" && build_reload; }
+cmd_whiteadd()  { list_add "$WHITE" "${1:-}" "已加入白名单" && build_reload; }
+cmd_whitedel()  { list_del "$WHITE" "${1:-}" "已移出白名单" && build_reload; }
+
+cmd_config() {
+    local k="${1:-}" v="${2:-}"
+    case "$k" in
+        enabled)
+            case "$v" in
+                1|on|true|yes)   cmd_apply ;;
+                0|off|false|no)  cmd_disable ;;
+                *) log "不支持的取值: $v"; return 1 ;;
+            esac ;;
+        auto_update)
+            state_set auto_update "$v"; log "配置已更新: auto_update=$v"; return 0 ;;
+        block_ipv6)
+            state_set block_ipv6 "$v"; build_reload; log "配置已更新: block_ipv6=$v"; return 0 ;;
+        upstream)
+            state_set upstream "$v"; build_reload; log "配置已更新: upstream=$v"; return 0 ;;
+        *) log "不支持的配置项: $k"; return 1 ;;
+    esac
+}
+
+# ------------------------------------------------------------------ 自检
+# 说明: 设备**不接受自己发起的本地 DNS 查询**(实测 127.0.0.1:5353 / 127.0.0.1:54 /
+# 192.168.9.1:5353 三种发法都收不到应答, iKuai 自带的 :54 实例也一样; 设备没有
+# nc -u / dig, busybox nslookup 也不支持指定端口)。
+# 所以自检走一条"真实数据路径": 临时在 nat OUTPUT 插一条只匹配该域名、只把路由器
+# 自己的查询 REDIRECT 到 sinkhole 的规则, 用 nslookup 问一次, 再立刻删掉规则。
+# 注意: 只能用**静态表里的域名**做这一步 —— 若拿一个需要转发的域名去试, sinkhole
+# 自己的上游查询也会被这条规则劫持回来, 形成自环(实测会一直问到超时), 所以不做
+# "转发"自检, 转发是否正常请在 LAN 客户端上实际解析一个普通域名确认。
+
+dns_hex() {   # 域名 -> 报文里的十六进制形态(长度前缀 + 标签, 结尾 00)
+    local d="$1" out="" l h oldifs
+    oldifs="$IFS"; IFS='.'
+    for l in $d; do
+        [ -n "$l" ] || continue
+        h="$(printf '%s' "$l" | hexdump -v -e '1/1 "%02x"' 2>/dev/null)"
+        [ -n "$h" ] || continue
+        out="$out$(printf '%02x' ${#l})$h"
+    done
+    IFS="$oldifs"
+    printf '%s00' "$out"
+}
+probe_add() {
+    iptables -t nat -I OUTPUT 1 -p udp --dport 53 -m string --hex-string "|$1|" --algo bm \
+        -j REDIRECT --to-ports "$PORT" 2>/dev/null
+}
+probe_del() {
+    while iptables -t nat -D OUTPUT -p udp --dport 53 -m string --hex-string "|$1|" --algo bm \
+        -j REDIRECT --to-ports "$PORT" 2>/dev/null; do :; done
+}
+probe_cleanup() { probe_del "$(dns_hex "$CANARY")"; }
+
+# $1=域名 -> 输出 nslookup 的结果文本(带 8 秒看门狗, 不会卡住)
+lookup_via_probe() {
+    local hex pid wd out
+    command -v nslookup >/dev/null 2>&1 || { echo "no-nslookup"; return; }
+    hex="$(dns_hex "$1")"
+    [ -n "$hex" ] || { echo "bad-name"; return; }
+    probe_add "$hex" || { echo "rule-fail"; return; }
+    out="$DATA/.probe.out"
+    rm -f "$out"
+    ( nslookup "$1" > "$out" 2>&1 ) &
+    pid=$!
+    ( sleep 8; kill -9 "$pid" 2>/dev/null ) &
+    wd=$!
+    wait "$pid" 2>/dev/null
+    kill "$wd" 2>/dev/null
+    probe_del "$hex"
+    cat "$out" 2>/dev/null | tr -d '\r'
+    rm -f "$out"
+}
+
+cmd_verify() {
+    local sink=false canary="skip" rules domains pass=false ifs res
+    ik_running && sink=true
+    if [ "$sink" = "true" ]; then
+        res="$(lookup_via_probe "$CANARY")"
+        case "$res" in
+            *0\.0\.0\.0*) canary="0.0.0.0" ;;
+            no-nslookup)  canary="no-nslookup" ;;
+            rule-fail)    canary="rule-fail" ;;
+            bad-name)     canary="bad-name" ;;
+            "")           canary="no-answer" ;;
+            *)            canary="unexpected" ;;
+        esac
+    else
+        canary="no-sinkhole"
+    fi
+    rules="$(hijack_count)"
+    domains="$(count_lines "$DOMAINS")"
+    ifs="$(lan_ifaces | tr '\n' ',' | sed 's/,$//')"
+    [ "$canary" = "0.0.0.0" ] && [ "$rules" -gt 0 ] && pass=true
+    printf '{"sinkhole":%s,"port":"%s","canary":"%s","rules":%s,"ifaces":"%s","domains":%s,"pass":%s}\n' \
+        "$sink" "$PORT" "$canary" "$rules" "$ifs" "$domains" "$pass"
+    if [ "$pass" = "true" ]; then
+        logf "自检通过 (canary=$canary rules=$rules domains=$domains)"
+    else
+        logf "自检未通过 (sinkhole=$sink canary=$canary rules=$rules domains=$domains)"
+    fi
+}
+
+# ------------------------------------------------------------------ 守护/守卫
+cmd_sync() {
+    stats_accumulate
+    if [ "$(state_get enabled)" != "1" ]; then
+        [ "$(hijack_count)" != "0" ] && hijack_remove
+        ik_running && ik_stop
+        return 0
+    fi
+    if ! ik_running; then
+        logf "发现 sinkhole 不在运行, 重新拉起"
+        if ! ik_start; then
+            logf "拉起失败 -> 撤掉劫持规则(fail-open), 保证 DNS 不断"
+            hijack_remove
+            return 1
+        fi
+    fi
+    # 规则数 != LAN 接口数 时重装(接口增减、被 iKuai 冲掉链的情况)
+    if [ "$(hijack_count)" != "$(lan_ifaces | grep -c . )" ] || [ "$(hijack_count)" = "0" ]; then
+        hijack_apply >/dev/null 2>&1
+    fi
+    # 兜底: 自检(verify)用的临时 nat OUTPUT 规则若因异常残留, 这里清掉
+    if iptables -t nat -S OUTPUT 2>/dev/null | grep -q -- "--to-ports $PORT"; then
+        logf "清掉残留的自检临时规则"
+        probe_cleanup
+    fi
+    return 0
+}
+
+auto_update_check() {
+    local last now
+    [ "$(state_get auto_update)" = "1" ] || return 0
+    last="$(state_int last_update)"; now="$(date +%s)"
+    [ "$last" -gt 0 ] && [ $((now - last)) -lt "$AUTO_UPDATE_SECS" ] && return 0
+    logf "自动更新规则库(距上次 $(( (now - last) / 3600 )) 小时)"
+    cmd_update >/dev/null 2>&1
+}
+
+cmd_daemon() {
+    local n=0 gap=5
+    echo $$ > "$DPID"
+    trap 'rm -f "$DPID"; exit 0' TERM INT HUP
+    logf "守护进程启动 pid=$$"
+    while :; do
+        cmd_sync >> "$LOG" 2>&1
+        n=$((n + 1))
+        # 开机那一刻 LAN 接口常常还没建好(then iptables 加不上劫持规则),
+        # 所以前 2 分钟用 5 秒的节奏快速补齐, 之后回到 30 秒。
+        [ "$n" -ge 24 ] && gap=30
+        [ $((n % 60)) -eq 0 ] && auto_update_check >> "$LOG" 2>&1
+        sleep "$gap"
+    done
+}
+
+daemon_start() {
+    if daemon_running; then
+        logf "守护进程已在运行 pid=$(cat "$DPID")"
+        return 0
+    fi
+    rm -f "$DPID" 2>/dev/null
+    ( trap '' HUP; exec "$BIN" daemon >> "$LOG" 2>&1 ) &
+    local i=0
+    while [ "$i" -lt 5 ]; do
+        sleep 1
+        daemon_running && { logf "守护进程已拉起 pid=$(cat "$DPID")"; return 0; }
+        i=$((i + 1))
+    done
+    logf "守护进程拉起失败(不影响已生效的拦截)"
+    return 1
+}
+
+daemon_stop() {
+    local p
+    p="$(cat "$DPID" 2>/dev/null)"
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+        kill "$p" 2>/dev/null
+        sleep 1
+        kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    fi
+    rm -f "$DPID"
+}
+
+# ------------------------------------------------------------------ 入口
+case "${1:-status}" in
+    status)               cmd_status ;;
+    apply|enable)         cmd_apply ;;
+    revert|disable)       cmd_disable ;;
+    rebuild)              cmd_rebuild ;;
+    update)               cmd_update "${2:-}" ;;
+    add)                  cmd_add "${2:-}" ;;
+    del)                  cmd_del "${2:-}" ;;
+    whiteadd)             cmd_whiteadd "${2:-}" ;;
+    whitedel)             cmd_whitedel "${2:-}" ;;
+    config)               cmd_config "${2:-}" "${3:-}" ;;
+    verify)               cmd_verify ;;
+    sync)                 cmd_sync ;;
+    daemon)               cmd_daemon ;;
+    daemon-start)         daemon_start ;;
+    daemon-stop)          daemon_stop ;;
+    log)                  tail -n "${2:-30}" "$LOG" 2>/dev/null ;;
+    *)
+        sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+        exit 1
+        ;;
+esac

@@ -1,0 +1,154 @@
+#!/bin/bash /etc/ikcommon
+#
+# ikadblock 插件后端接口(前端页面 /plugins/app/ikadblock.html)
+#
+# 动作:
+#   show       TYPE=data              状态 + 自定义/白名单 + 最近日志
+#   seting     key=enabled value=1|0  开关
+#   seting     key=auto_update value=1|0
+#   seting     key=block_ipv6 value=1|0
+#   update     [name=源名]            从开源规则库更新
+#   rebuild                           用现有列表重建并重载
+#   verify                            自检(实例/通配拦截/劫持规则)
+#   add|del|whiteadd|whitedel  domain=域名
+#   log        [lines=N]              查看日志
+#
+# 真正的逻辑都在插件自带的 bin/ikadblock(纯 shell), 这里只做参数校验与 JSON 转发。
+
+B="/etc/mnt/plugins/ikadblock/bin/ikadblock"
+DATA="/etc/mnt/plugins/ikadblock/data"
+
+run() { [ -x "$B" ] && "$B" "$@" 2>/dev/null; }
+
+# 把文件里一行一个的域名变成 JSON 数组(前端用来渲染列表)
+list_json() {
+    local f="$DATA/$1" out="" d
+    if [ -f "$f" ]; then
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
+            out="$out${out:+,}\"$d\""
+        done < "$f"
+    fi
+    printf '[%s]' "$out"
+}
+
+# 把若干行文本变成 JSON 字符串数组(日志预览用)
+lines_json() {
+    local out="" l
+    while IFS= read -r l; do
+        l="$(printf '%s' "$l" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g')"
+        out="$out${out:+,}\"$l\""
+    done
+    printf '[%s]' "$out"
+}
+
+__show_data() {
+    local status custom whitelist logs
+    if [ ! -x "$B" ]; then
+        status='{"error":"插件可执行文件缺失, 请重新安装插件"}'
+    else
+        status="$(run status)"; [ -n "$status" ] || status='{}'
+    fi
+    json_append __json_result__ status:json
+    custom="$(list_json custom.txt)"
+    json_append __json_result__ custom:json
+    whitelist="$(list_json whitelist.txt)"
+    json_append __json_result__ whitelist:json
+    logs="$(run log 20 | lines_json)"
+    json_append __json_result__ logs:json
+}
+
+show() { Show __json_result__; }
+
+__check_domain() {
+    case "${domain:-}" in
+        ''|*[!a-zA-Z0-9._-]*) echo "域名不合法"; return 1 ;;
+    esac
+    case "$domain" in
+        *.*) return 0 ;;
+        *) echo "域名不合法(需要带点, 例: ads.example.com)"; return 1 ;;
+    esac
+}
+
+seting() {
+    case "${key:-}" in
+        enabled|auto_update|block_ipv6)
+            case "${value:-}" in
+                1|on|true|yes) v=1 ;;
+                0|off|false|no) v=0 ;;
+                *) echo "不支持的取值: ${value:-}"; return 1 ;;
+            esac
+            if run config "$key" "$v" >/dev/null 2>&1; then
+                case "$key" in
+                    enabled)      [ "$v" = "1" ] && echo "广告拦截已开启" || echo "广告拦截已关闭" ;;
+                    auto_update)  [ "$v" = "1" ] && echo "已开启规则库自动更新" || echo "已关闭规则库自动更新" ;;
+                    block_ipv6)   [ "$v" = "1" ] && echo "已同时拦截 IPv6(AAAA) 查询" || echo "已只拦截 IPv4(A) 查询" ;;
+                esac
+                return 0
+            fi
+            echo "配置写入失败"
+            return 1 ;;
+        upstream)
+            case "${value:-}" in
+                ''|*[!0-9a-fA-F:.,]*) echo "上游 DNS 不合法(多个用 , 分隔)"; return 1 ;;
+            esac
+            run config upstream "$value" >/dev/null 2>&1 && { echo "上游 DNS 已更新: $value"; return 0; }
+            echo "配置写入失败"; return 1 ;;
+        *) echo "不支持的配置项: ${key:-}"; return 1 ;;
+    esac
+}
+
+update() {
+    if [ ! -x "$B" ]; then echo "插件可执行文件缺失"; return 1; fi
+    "$B" update "${name:-}" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo "规则库更新完成: $(run status | sed -n 's/.*"domains":\([0-9]*\).*/\1/p') 条拦截域名"
+        return 0
+    fi
+    echo "规则库更新失败(网络不可达或规则源都挂了), 原表保持不变"
+    return 1
+}
+
+rebuild() {
+    run rebuild >/dev/null 2>&1
+    echo "已用当前列表重建域名表: $(run status | sed -n 's/.*"domains":\([0-9]*\).*/\1/p') 条"
+    return 0
+}
+
+verify() {
+    local v
+    v="$(run verify)"; [ -n "$v" ] || v='{"error":"自检执行失败"}'
+    json_append __json_result__ verify:json
+    Show __json_result__
+}
+
+add() {
+    __check_domain || return 1
+    run add "$domain" >/dev/null 2>&1 && { echo "已加入自定义拦截: $domain"; return 0; }
+    echo "添加失败"; return 1
+}
+
+del() {
+    __check_domain || return 1
+    run del "$domain" >/dev/null 2>&1 && { echo "已移出自定义拦截: $domain"; return 0; }
+    echo "删除失败"; return 1
+}
+
+whiteadd() {
+    __check_domain || return 1
+    run whiteadd "$domain" >/dev/null 2>&1 && { echo "已加入白名单: $domain 及其子域不再拦截"; return 0; }
+    echo "添加失败"; return 1
+}
+
+whitedel() {
+    __check_domain || return 1
+    run whitedel "$domain" >/dev/null 2>&1 && { echo "已移出白名单: $domain"; return 0; }
+    echo "删除失败"; return 1
+}
+
+log() {
+    local n="${lines:-20}"
+    case "$n" in ''|*[!0-9]*) n=20 ;; esac
+    run log "$n"
+    return 0
+}
