@@ -144,15 +144,41 @@ plugin_store_setup() {
 
 # 解绑「插件存储」: 先把插件搬回系统盘再卸挂载 —— 不然插件会跟着数据盘一起"消失"。
 plugin_store_off() {
-    local store="$PLUGIN_STORE_LINK/plugins" root
+    local store="$PLUGIN_STORE_LINK/plugins" root tmp bare
     root="$(P "$PLUGIN_ROOT")"
     grep -qs " $root " /proc/mounts 2>/dev/null || return 0
-    if [ -d "$(P "$store")" ] && [ -n "$(ls -A "$(P "$store")" 2>/dev/null)" ]; then
-        cp -a "$(P "$store")"/. "$root"/ 2>/dev/null || \
-            plugin_log "插件存储: 拷回系统盘时有文件没放下(系统盘小), 缺失的可在清出空间后重装"
-        plugin_log "插件存储: 已把数据盘上的插件拷回系统盘"
+
+    # 1) 把数据盘上的插件拷回**系统盘的真实目录**。
+    #    不能直接 cp 到 $root —— 那正是数据盘的 bind, 等于往自己身上拷(实测报"有文件没放下")。
+    #    用扩容脚本里的老办法: 对 /etc/mnt 再做一次"裸 bind", 就能看到被挂载遮住的底层目录。
+    tmp="$(mktemp -d 2>/dev/null)"
+    bare=""
+    if [ -n "$tmp" ] && mount --bind "$(P /etc/mnt)" "$tmp" 2>/dev/null; then
+        bare="$tmp/plugins"
     fi
-    umount "$root" 2>/dev/null
+    if [ -n "$bare" ] && [ -d "$bare" ] && \
+       [ -n "$(ls -A "$(P "$store")" 2>/dev/null)" ]; then
+        cp -a "$(P "$store")"/. "$bare"/ 2>/dev/null || \
+            plugin_log "插件存储: 部分文件没拷回(系统盘空间不够?), 缺的可在清出空间后重装"
+        plugin_log "插件存储: 已把数据盘上的插件拷回系统盘"
+    else
+        plugin_log "插件存储: 拿不到底层目录, 跳过拷回(插件仍在数据盘上)"
+    fi
+    if [ -n "$tmp" ]; then
+        umount "$tmp" 2>/dev/null
+        rmdir "$tmp" 2>/dev/null
+    fi
+
+    # 2) 卸挂载。插件进程还占着就试懒卸载; 再不行就保持原样 ——
+    #    内容已经在系统盘上了, 下次开机(那时本就没有 bind)自然就用系统盘那份。
+    if ! umount "$root" 2>/dev/null; then
+        if umount -l "$root" 2>/dev/null; then
+            plugin_log "插件存储: 已解除挂载(懒卸载; 运行中的插件下次启动即用系统盘)"
+            return 0
+        fi
+        plugin_log "插件存储: 插件进程正占用, 本次未卸挂载; 内容已拷回系统盘, 重启后生效"
+        return 0
+    fi
     plugin_log "插件存储: 业务已解绑, 插件回到系统盘 $PLUGIN_ROOT"
     return 0
 }
