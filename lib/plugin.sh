@@ -55,6 +55,39 @@ plugin_ensure_dirs() {
 #
 # 幂等(每次开机挂一次; 挂载不持久)、失败安全(任何一步不满足就保持原样, 不碰插件数据)。
 PLUGIN_STORE_LINK="/etc/disk_sys/plugin"
+# 插件包归档: 放在**系统盘**、且在插件目录之外 —— 插件目录会被 bind 到数据盘上,
+# 数据盘万一被格式化(用户在磁盘页点了格式化/换盘), 插件本体就没了; 这里留底才能装回来。
+# 系统盘只有 43.4M, 所以只给"不占地方"的包留底(超过 PLUGIN_ZIP_MAX_KB 就跳过并说明)。
+PLUGIN_ZIP_ARCHIVE="/etc/mnt/.plugin-zips"
+PLUGIN_ZIP_MAX_KB=16384
+
+plugin_zip_keep() {   # <zip>
+    local zip="$1" d kb
+    case "$zip" in *.zip|*.ZIP) ;; *) return 0 ;; esac
+    d="$(P "$PLUGIN_ZIP_ARCHIVE")"
+    mkdir -p "$d" 2>/dev/null || return 0
+    kb="$(du -k "$zip" 2>/dev/null | awk '{print $1}')"
+    case "${kb:-}" in '' | *[!0-9]*) return 0 ;; esac
+    if [ "$kb" -gt "$PLUGIN_ZIP_MAX_KB" ]; then
+        plugin_log "  包 ${kb}KB 偏大, 不在系统盘留底(数据盘被格式化后需手工重装)"
+        return 0
+    fi
+    cp -f "$zip" "$d/$(basename "$zip")" 2>/dev/null
+}
+
+plugin_zip_restore() {   # 数据盘空 + 系统盘也没有时, 用归档装回来
+    local d z n=0
+    d="$(P "$PLUGIN_ZIP_ARCHIVE")"
+    [ -d "$d" ] || return 0
+    for z in "$d"/*.zip; do
+        [ -f "$z" ] || continue
+        plugin_log "  从归档装回: $(basename "$z")"
+        plugin_install "$z" >/dev/null 2>&1 && n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] && plugin_log "已从 $PLUGIN_ZIP_ARCHIVE 装回 $n 个插件"
+    return 0
+}
+
 plugin_store_ready() {
     local link="$1" root="$2" d_root d_store
     [ -d "$(P "$link")" ] || return 1
@@ -65,10 +98,16 @@ plugin_store_ready() {
 }
 plugin_store_setup() {
     local link="$PLUGIN_STORE_LINK" store="$PLUGIN_STORE_LINK/plugins"
-    local root
+    local root need_restore=0
 
     root="$(P "$PLUGIN_ROOT")"
-    grep -qs " $root " /proc/mounts 2>/dev/null && return 0        # 已经挂好了
+    # 挂载不持久, 每次开机都得挂; 同一次启动里也可能被调用两次(03 和"同意条款"后又跑一遍 03),
+    # 所以先卸掉旧的再重挂 —— 数据盘被格式化过时, 老的 bind 会指着那个已经没人管的旧文件系统
+    # (写进去的东西重启就没), 必须重挂到**当前**这块盘上。卸不掉(插件进程占着)就沿用旧的,
+    # 那种情况下旧挂载本来就是对的。
+    if grep -qs " $root " /proc/mounts 2>/dev/null; then
+        umount "$root" 2>/dev/null || return 0
+    fi
     plugin_store_ready "$link" "$PLUGIN_ROOT" || {
         plugin_log "插件存储: 系统盘 $PLUGIN_ROOT (未绑定数据盘)"
         return 0
@@ -78,20 +117,28 @@ plugin_store_setup() {
         plugin_log "插件存储: 数据盘上建目录失败, 本次沿用系统盘"
         return 0
     }
-    # 首次启用: 把系统盘上已有的插件搬过去(不删源, 万一挂载失败也不丢)
-    if [ -n "$(ls -A "$root" 2>/dev/null)" ] && \
-       [ -z "$(ls -A "$(P "$store")" 2>/dev/null)" ]; then
-        cp -a "$root"/. "$(P "$store")"/ 2>/dev/null || {
-            plugin_log "插件存储: 迁移已有插件失败, 本次沿用系统盘"
-            return 0
-        }
-        plugin_log "插件存储: 已把 $PLUGIN_ROOT 的内容迁到数据盘"
+    # 数据盘上还是空的(刚绑定 / 被格式化过):
+    #   系统盘上还有插件  -> 搬过去(不删源, 万一挂载失败也不丢)
+    #   系统盘也没有了    -> 用系统盘留的 zip 归档装回来(见 plugin_zip_keep)
+    if [ -z "$(ls -A "$(P "$store")" 2>/dev/null)" ]; then
+        if [ -n "$(ls -A "$root" 2>/dev/null)" ]; then
+            cp -a "$root"/. "$(P "$store")"/ 2>/dev/null || {
+                plugin_log "插件存储: 迁移已有插件失败, 本次沿用系统盘"
+                return 0
+            }
+            plugin_log "插件存储: 已把 $PLUGIN_ROOT 的内容迁到数据盘"
+        elif [ -n "$(ls -A "$(P "$PLUGIN_ZIP_ARCHIVE")" 2>/dev/null)" ]; then
+            plugin_log "插件存储: 数据盘是空的(新建或被格式化), 先挂上去再用归档装回"
+            need_restore=1
+        fi
     fi
     mount --bind "$(P "$store")" "$root" 2>/dev/null || {
         plugin_log "插件存储: bind 挂载失败, 本次沿用系统盘"
         return 0
     }
     plugin_log "插件存储: 数据盘 $store (插件不再占系统盘 $PLUGIN_ROOT)"
+    # 挂在后面再装: 这样装回去的插件也落在数据盘上
+    [ "$need_restore" = 1 ] && plugin_zip_restore
     return 0
 }
 
@@ -299,6 +346,7 @@ plugin_install() {
             *.zip|*.ZIP) ;;
             *) plugin_log "不支持的包(需为 zip): $src"; return 1 ;;
         esac
+        plugin_zip_keep "$src"      # 系统盘留底, 数据盘被格式化后能装回来
         tmp=$(mktemp -d)
         if ! unzip -o -q "$src" -d "$tmp" 2>/dev/null; then
             plugin_log "解压失败: $src"
@@ -619,11 +667,22 @@ plugin_fw_patch() {
         rm -f "$tmp"
     done
 
-    # 3) 已经绑定过 purpose=6 的分区, 补丁生效后补一次链接与挂载
+    # 3) 已经绑定过 purpose=6 的分区: 补丁生效后把链接补上
     #    (IK_DIR_CACHE=/tmp/iktmp/cache, 由 iKuai 开机时 init() 从 sqlite 刷进来)
+    #
+    #    **不要**去跑 disk_mgmt.sh init: 它内部会 `rm -rf /etc/disk/<UUID>` 再重挂,
+    #    而 /etc/mnt/plugins 正是 bind 到那个目录下的 —— 源目录一没, 挂载就变成死挂载,
+    #    往里写的东西全部无效(现象: 插件装不上、条款存不下、重启后插件"消失")。
+    #    这里只补一条软链就够了(分区本身由 iKuai 开机时的 init 挂好)。
     if grep -qs 'mt_purpose=6' "$(P /tmp/iktmp/cache/disk_mount)" 2>/dev/null; then
-        "$s" init >/dev/null 2>&1
-        plugin_log "  已重新应用磁盘挂载(补 purpose=6 的链接)"
+        local puuid
+        puuid="$(grep 'mt_purpose=6' "$(P /tmp/iktmp/cache/disk_mount)" 2>/dev/null | \
+                 tr ' ' '\n' | sed -n 's/^mt_uuid=//p' | head -n1)"
+        if [ -n "$puuid" ] && [ -d "/etc/disk/$puuid" ]; then
+            mkdir -p /etc/disk_sys 2>/dev/null
+            ln -sfn "/etc/disk/$puuid" /etc/disk_sys/plugin 2>/dev/null && \
+                plugin_log "  插件存储: /etc/disk_sys/plugin -> /etc/disk/$puuid"
+        fi
     fi
 
     plugin_log "固件侧补丁完成(修改 $n 处)"
