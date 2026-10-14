@@ -256,12 +256,12 @@ ssh sshd@127.0.0.1 -p 10022 "
 | 检查项 | 期望 |
 | --- | --- |
 | `/etc/plugins_ok` | `1` |
-| `boot.log` 末尾 | `[backdoor] 完成`、`[audit] dns.start`、`[plugin] Web 插件资源已同步` |
+| `boot.log` 末尾 | `[backdoor] 完成`、`[plugin] Web 插件资源已同步`(DNS 抓包默认关闭，不在开机启动) |
 | 后门进程 | `cre/cre_client/pmd/ik_rc_client/dtalkd/dtalkc/catcherd` 均不存在 |
 | 后门程序 | `/usr/sbin/ik_rc_client` 等被替换为空壳(含 `[ikblock] disabled`) |
 | ipset | `ikuai_blk` 存在且有条目(云端 IP/网段 + 解析结果) |
 | iptables | OUTPUT/FORWARD 有 `--match-set ikuai_blk dst -j DROP`，OUTPUT 有云端端口 DROP |
-| 审计日志 | `/etc/log/ikguard/audit-<date>.log` 有 `boot.audit`、`block.hit`、`dns.cloud` 等事件 |
+| 审计日志 | `/etc/log/ikguard/audit-<date>.log` 有 `boot.audit`、`block.hit` 等事件(`dns.cloud` 需先手动开启 DNS 抓包) |
 | Web 接口 | `POST /Action/call {"func_name":"ikguard","action":"show","param":{"TYPE":"data"}}` 返回 `Result:30000` |
 | Web 页面 | 系统设置 → 插件管理(`#/system-setting/plugin-management`)：**无"需要绑定爱快云平台"提示**，点开插件后标题显示"插件"而不是"Docker" |
 | 前端补丁 | 分包里 `plugins/docker/` 已变成 `plugins/app/`、`yunbindstatus=2` |
@@ -271,7 +271,8 @@ ssh sshd@127.0.0.1 -p 10022 "
 
 ## 5. 审计日志(进程 / DNS / 网络 / 封锁命中)
 
-日志目录 `/etc/log/ikguard/`（持久分区，保留 3 天，由 `ikaudit watch` 每分钟采集）：
+日志目录 `/etc/log/ikguard/`（持久分区；保留 3 天 + 目录总量 300MB、单文件 10MB、DNS 日志 50MB
+封顶，由 `ikaudit watch` 每分钟采集并整理）：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -279,8 +280,12 @@ ssh sshd@127.0.0.1 -p 10022 "
 | `audit-YYYYMMDD.log` | 结构化审计事件: `proc.start` `conn.out` `dns.cloud` `cloud.ip` `cloud.port` `block.hit` `backdoor.proc` `backdoor.alive` `probe.*` |
 | `proc-YYYYMMDD.log` | 进程快照对比(新出现的进程，命中可疑名单会额外升级为 WARN) |
 | `conn-YYYYMMDD.log` | 出向连接快照对比(新增的公网连接) |
-| `dns-YYYYMMDD.log` | DNS 查询原始记录(tcpdump 逐网卡抓 `udp/tcp port 53`) |
+| `dns-YYYYMMDD.log` | DNS 查询原始记录(tcpdump 逐网卡抓 `udp port 53`；**默认关闭，仅用户手动启停**) |
 | `report.txt` | 最近一次体检报告(结论: 正常/异常) |
+
+> 规模控制: 超过保留天数直接删除；单文件超过上限滚动为 `<文件>.1`(保留一代)；DNS 日志
+> 超限时先停抓包→滚动→按原状态恢复(没在抓就保持关闭)；目录总量超限时按修改时间删最老。
+> 阈值可用环境变量覆盖: `AU_KEEP_DAYS` / `AU_MAX_TOTAL` / `AU_MAX_FILE` / `AU_DNS_MAX`。
 
 常用命令:
 
@@ -288,8 +293,9 @@ ssh sshd@127.0.0.1 -p 10022 "
 /etc/mnt/.boot/bin/ikaudit status      # 日志目录/占用/DNS 采集/封锁规则
 /etc/mnt/.boot/bin/ikaudit tail 80     # 看审计事件
 /etc/mnt/.boot/bin/ikaudit report      # 立刻体检(异常返回码 1)
-/etc/mnt/.boot/bin/ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试)
-/etc/mnt/.boot/bin/ikaudit dns-start   # 手工启动 DNS 抓包
+/etc/mnt/.boot/bin/ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试；仅手动触发)
+/etc/mnt/.boot/bin/ikaudit dns-start   # 手动启动 DNS 抓包(默认关闭)
+/etc/mnt/.boot/bin/ikaudit dns-stop    # 手动停止 DNS 抓包(按 pid 关闭并删 pid 文件)
 grep -E 'backdoor|cloud|block' /etc/log/ikguard/audit-$(date +%Y%m%d).log
 ```
 

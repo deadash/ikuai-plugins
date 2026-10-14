@@ -8,16 +8,24 @@
 #   /etc/log/ikguard/audit-YYYYMMDD.log 审计事件(结构化)
 #   /etc/log/ikguard/proc-YYYYMMDD.log  进程快照与新增进程
 #   /etc/log/ikguard/conn-YYYYMMDD.log  出向连接快照与新增连接
-#   /etc/log/ikguard/dns-YYYYMMDD.log   DNS 查询原始记录(tcpdump)
+#   /etc/log/ikguard/dns-YYYYMMDD.log   DNS 查询原始记录(tcpdump, 默认关闭, 仅用户手动启停)
 #   /etc/log/ikguard/report.txt         最近一次体检报告
+#
+# 日志规模控制(大小 + 时间双限):
+#   AU_KEEP_DAYS 时间周期, AU_MAX_TOTAL 目录总量, AU_MAX_FILE 单文件, AU_DNS_MAX DNS 抓包日志;
+#   由 au_rotate()/au_cap_file()/au_dns_cap() 执行(随每分钟的 au_watch 一起跑)。
 #
 # 依赖: common.sh 的 P()/log()，backdoor.sh 的 BD_PROCS/BD_NETS/BD_PORTS/BD_DOMAINS
 #       (可选: 未加载 backdoor.sh 时使用本文件内置兜底名单)
 
 AU_DIR="${AU_DIR:-/etc/log/ikguard}"
-AU_KEEP_DAYS="${AU_KEEP_DAYS:-3}"
+AU_KEEP_DAYS="${AU_KEEP_DAYS:-3}"           # 时间周期: 日志保留天数
+AU_MAX_TOTAL="${AU_MAX_TOTAL:-314572800}"   # 大小限制: 日志目录总量(默认 300MB), 超出按时间删最老
+AU_MAX_FILE="${AU_MAX_FILE:-10485760}"      # 大小限制: 单个日志文件(默认 10MB), 超出滚动为 .1
+AU_DNS_MAX="${AU_DNS_MAX:-52428800}"        # 大小限制: DNS 抓包日志(默认 50MB), 超出滚动并按原状态恢复抓包
 AU_STATE="/tmp/.ikaudit"
 AU_REPORT="report.txt"
+AU_DNS_PIDFILE="$AU_STATE/dns.pids"         # DNS 抓包 pid 文件: 启动写入, 停止读取后删除
 
 # 兜底名单(backdoor.sh 未加载时使用)
 : "${BD_PROCS:=ik_rc_client cre cre_client pmd dtalkd dtalkc catcherd}"
@@ -26,6 +34,12 @@ AU_REPORT="report.txt"
 
 # 额外可疑关键字(进程/命令行)
 AU_PAT="${AU_PAT:-ikuai8.com cre_client dtalk catcherd monidtalk submit.lua update_hosts.sh}"
+
+# 审计忽略: 框架"自己的动作"不算可疑(否则它自己的 DNS 解析探测会被当成后门进程而误报)
+AU_IGNORE="${AU_IGNORE:-/etc/mnt/.boot/bin/(ikaudit|backdoor_guard)|nslookup .*(114\.114\.114\.114|223\.5\.5\.5)}"
+
+# 进程快照忽略: 框架目录本身 + 它每轮调起的短命工具(否则 proc 日志全是自身噪声)
+AU_PS_IGNORE="${AU_PS_IGNORE:-/etc/mnt/.boot/|^[0-9]+ (/bin/|/usr/bin/)?(busybox +)?(sed|sort|awk|tr|wc|grep|egrep|head|tail|cut|du|find|date|sleep|nslookup) }"
 
 au_log() { log "[audit] $*"; }
 
@@ -75,8 +89,11 @@ au_ps_list() {
 }
 
 # 判断某行是否命中可疑关键字
+# 先排掉"框架自己"的行: 否则 ikaudit/backdoor_guard 及其 DNS 探测(nslookup 公共DNS)
+# 会因为命令行里带 ikuai8.com 而被自己的关键字名单命中, 产生自噪声告警。
 au_suspect() {
     local line="$1" k
+    printf '%s' "$line" | grep -qE "$AU_IGNORE" && return 1
     for k in $BD_PROCS $AU_PAT; do
         case "$line" in *"$k"*) printf '%s' "$k"; return 0 ;; esac
     done
@@ -112,7 +129,8 @@ au_ip_in_nets() {
 au_proc_scan() {
     local snap="$AU_STATE/ps.snap" cur new suspect n=0
     au_init
-    cur="$(au_ps_list | sed 's/^ *//' | sort -k1,1n)"
+    # 过滤框架自身与其短命子进程, 否则 proc 日志每轮都被自身噪声刷屏
+    cur="$(au_ps_list | grep -vE "$AU_PS_IGNORE" | sed 's/^ *//' | sort -k1,1n)"
     printf '%s\n' "$cur" > "$snap.new"
 
     if [ -f "$snap" ]; then
@@ -232,40 +250,38 @@ au_ifaces() {
     return 0
 }
 
-# 找出所有"本框架启动的"DNS 抓包进程(按命令行匹配, 不依赖 pid 文件)
+# DNS 抓包的生命周期: 只认 pid 文件。
+#   启动 -> 记录 pid; 停止 -> 按 pid 关闭并删除 pid 文件。
+#   不参与 cron, 也不在开机脚本里自动启动 —— 默认关闭, 只有用户点了"启动"才抓。
 au_dns_pids() {
-    local dir pid cmd
-    for dir in /proc/[0-9]*; do
-        pid="${dir#/proc/}"
-        cmd="$( { tr '\0' ' ' < "$dir/cmdline"; } 2>/dev/null )"
-        case "$cmd" in *tcpdump*"port 53"*) printf '%s\n' "$pid" ;; esac
-    done
+    test -f "$AU_DNS_PIDFILE" || return 0
+    awk '{print $1}' "$AU_DNS_PIDFILE" 2>/dev/null
     return 0
 }
 
 au_dns_running() {
-    [ -n "$(au_dns_pids)" ] && return 0
+    local pid
+    for pid in $(au_dns_pids); do
+        kill -0 "$pid" 2>/dev/null && return 0
+    done
     return 1
 }
 
-# 启动 DNS 抓包(每张网卡一个 tcpdump, 追加到当天 dns 日志)
-# 说明: 重复点击要幂等 —— 先杀掉旧的再按当前网卡列表重建, 否则会出现同一网卡
-#       多个 tcpdump 且 pid 文件被覆盖, 导致"停止"停不干净(旧 bug)。
+# 启动 DNS 抓包(仅由用户点击触发): 每张网卡一个 tcpdump, pid 写入 pid 文件
 au_dns_start() {
     local i pid n=0
     au_init
     command -v tcpdump >/dev/null 2>&1 || { au_event WARN "dns.nodump" "tcpdump 不可用, 无法记录 DNS 查询"; return 1; }
 
-    # 先清理旧实例(含开机时启动的), 避免重复抓同一张网卡
-    au_dns_stop quiet
+    au_dns_stop quiet            # 幂等: 重复点击先停掉上一轮, 避免同一网卡重复抓包
 
-    : > "$AU_STATE/dns.pids"
+    : > "$AU_DNS_PIDFILE"
     for i in $(au_ifaces); do
         # 忽略 SIGHUP, 避免父进程(SSH/脚本)退出时抓包跟着退出; 设备无 nohup/setsid
-        ( trap '' HUP; exec tcpdump -i "$i" -nn -l -s 400 -tttt "udp port 53 or tcp port 53" ) \
+        ( trap '' HUP; exec tcpdump -i "$i" -nn -l -s 400 -tttt "udp port 53" ) \
             >> "$(au_file dns)" 2>/dev/null &
         pid=$!
-        printf '%s %s\n' "$pid" "$i" >> "$AU_STATE/dns.pids"
+        [ -n "$pid" ] && printf '%s %s\n' "$pid" "$i" >> "$AU_DNS_PIDFILE"
         n=$((n + 1))
     done
     if [ "$n" = 0 ]; then
@@ -276,26 +292,47 @@ au_dns_start() {
     return 0
 }
 
-# 停止 DNS 抓包: 既按 pid 文件, 也按命令行兜底(防止 pid 文件过期/丢失)
+# 停止 DNS 抓包: 按 pid 文件逐个关闭, 然后删除 pid 文件
 au_dns_stop() {
-    local quiet="$1" pid n=0
-    # 1) pid 文件
-    if [ -f "$AU_STATE/dns.pids" ]; then
-        while read -r pid _; do
-            [ -n "$pid" ] || continue
-            kill "$pid" 2>/dev/null && n=$((n + 1))
-        done < "$AU_STATE/dns.pids"
-        rm -f "$AU_STATE/dns.pids"
+    local quiet="${1:-}" pid n=0
+    if [ ! -f "$AU_DNS_PIDFILE" ]; then
+        [ "$quiet" = "quiet" ] || au_event INFO "dns.stop" "DNS 记录未在运行"
+        return 0
     fi
-    # 2) 命令行兜底
-    for pid in $(au_dns_pids); do
-        kill "$pid" 2>/dev/null && n=$((n + 1))
-    done
+    while read -r pid _; do
+        [ -n "$pid" ] || continue
+        n=$((n + 1))
+        kill "$pid" 2>/dev/null
+    done < "$AU_DNS_PIDFILE"
     sleep 1
-    for pid in $(au_dns_pids); do
-        kill -9 "$pid" 2>/dev/null
-    done
+    while read -r pid _; do          # 仍未退出的补 SIGKILL
+        [ -n "$pid" ] || continue
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    done < "$AU_DNS_PIDFILE"
+    rm -f "$AU_DNS_PIDFILE"
     [ "$quiet" = "quiet" ] || au_event INFO "dns.stop" "已停止 DNS 记录($n 个抓包进程)"
+    return 0
+}
+
+# DNS 日志体积封顶: tcpdump 持有文件句柄, 直接 mv 会让它继续写旧文件(变成 .1),
+# 因此必须先停抓包 -> 滚动 -> 按原状态恢复(没在抓就保持关闭)。
+au_dns_cap() {
+    local f max sz running=0
+    f="$(au_file dns)"
+    test -f "$f" || return 0
+    max="$AU_DNS_MAX"
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$sz" -lt "$max" ] && return 0
+
+    au_dns_running && running=1
+    au_dns_stop quiet
+    rm -f "$f.1" 2>/dev/null
+    mv -f "$f" "$f.1" 2>/dev/null
+    rm -f "$AU_STATE"/dns.scan.* 2>/dev/null     # 新文件需从头扫描
+    [ "$running" = 1 ] && au_dns_start >/dev/null 2>&1
+    au_event INFO "dns.rotate" \
+        "DNS 日志超过 $max 字节, 已滚动, 抓包$( [ "$running" = 1 ] && echo '继续' || echo '保持停止')"
     return 0
 }
 
@@ -316,7 +353,9 @@ au_dns_check() {
     [ "$size" -lt "$off" ] && off=0          # 日志被轮转/清空则从头扫
     [ "$size" -eq "$off" ] && { printf '0'; return 0; }
 
-    chunk="$(tail -c "+$((off + 1))" "$f" 2>/dev/null)"
+    # 跳过"框架自己"发往公共 DNS 的解析探测(backdoor_guard 补封锁 IP 用的),
+    # 只保留客户端真实 DNS 查询, 否则 dns.cloud 全是自噪声。
+    chunk="$(tail -c "+$((off + 1))" "$f" 2>/dev/null | grep -vE '(114\.114\.114\.114|223\.5\.5\.5)\.53')"
     for hit in $BD_DOMAINS; do
         if printf '%s\n' "$chunk" | grep -qiF -- "$hit" 2>/dev/null; then
             n=$((n + 1))
@@ -390,8 +429,35 @@ au_blocked_hits() {
     return 0
 }
 
+# 通用单文件体积封顶: 超过上限则滚动为 <文件>.1(只保留一代)
+au_cap_file() {
+    local f="$1" max="$2" sz
+    test -f "$f" || return 0
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$sz" -lt "$max" ] && return 0
+    rm -f "$f.1" 2>/dev/null
+    mv -f "$f" "$f.1" 2>/dev/null
+    return 0
+}
+
+# 日志维护(时间周期 + 目录总量): 每分钟随 au_watch 执行
 au_rotate() {
-    find "$(au_dir)" -type f -name '*.log' -mtime "+$AU_KEEP_DAYS" -delete 2>/dev/null
+    # 1) 时间周期: 超过保留天数直接删除(含滚动出的 .1)
+    find "$(au_dir)" -type f \( -name '*.log' -o -name '*.log.[0-9]*' \) \
+        -mtime "+$AU_KEEP_DAYS" -delete 2>/dev/null
+
+    # 2) 目录总量上限: 超出则按修改时间删最老的, 保证不会无限增长
+    local max used old
+    max=$((AU_MAX_TOTAL / 1024))
+    while :; do
+        used="$(du -sk "$(au_dir)" 2>/dev/null | awk '{print $1}')"
+        case "$used" in ''|*[!0-9]*) break ;; esac
+        [ "$used" -le "$max" ] && break
+        old="$(ls -1t "$(au_dir)"/*.log* 2>/dev/null | tail -n1)"
+        [ -n "$old" ] || break
+        rm -f "$old" 2>/dev/null
+    done
     return 0
 }
 
@@ -456,6 +522,9 @@ EOF
 }
 
 # cron 入口: 每一轮采集
+# 注意: 这里**不启停 DNS 抓包** —— 抓包默认关闭、只由用户在前端手动开关,
+#       否则用户点了"停止", 下一分钟又被拉起来(与 cron 无关)。
+#       这里只做: 采集 + 日志维护(时间/体积), 抓包超限时按原状态滚动。
 au_watch() {
     au_init
     au_rotate
@@ -463,7 +532,11 @@ au_watch() {
     au_conn_scan >/dev/null
     au_blocked_scan >/dev/null
     au_dns_check >/dev/null
-    au_dns_running || au_dns_start >/dev/null 2>&1
+    au_dns_cap
+    au_cap_file "$(au_dir)/boot.log" "$AU_MAX_FILE"
+    au_cap_file "$(au_file audit)"   "$AU_MAX_FILE"
+    au_cap_file "$(au_file proc)"    "$AU_MAX_FILE"
+    au_cap_file "$(au_file conn)"    "$AU_MAX_FILE"
     return 0
 }
 
@@ -481,14 +554,17 @@ au_install_cron() {
     # 关键: iKuai 的 crond 只读 /etc/crontabs/root, cron.d 只是它自己的暂存目录,
     # 而且它的 crond_commit 会整体重写 root —— 所以必须把任务直接写进 root,
     # 否则"每分钟采集"根本不会执行(日志里只有开机那一次的数据)。
+    # 先清掉本框架的旧任务行(旧版本可能残留 probe 等自动动作), 再写入当前应有的两条,
+    # 保证 root 里只保留"该做的事"; 直接追加也能保证幂等(不会重复)。
     if [ -f "$root" ]; then
-        grep -q "$bin watch" "$root" 2>/dev/null || printf '* * * * * %s watch\n' "$bin" >> "$root"
-        grep -q "$bin report" "$root" 2>/dev/null || printf '*/10 * * * * %s report\n' "$bin" >> "$root"
+        grep -v "$bin" "$root" > "$root.ikguard.tmp" 2>/dev/null || :
+        mv -f "$root.ikguard.tmp" "$root" 2>/dev/null
     else
         mkdir -p "$(dirname "$root")" 2>/dev/null
-        printf '* * * * * %s watch\n' "$bin" > "$root"
-        printf '*/10 * * * * %s report\n' "$bin" >> "$root"
+        : > "$root"
     fi
+    printf '* * * * * %s watch\n'   "$bin" >> "$root"
+    printf '*/10 * * * * %s report\n' "$bin" >> "$root"
     au_event INFO "cron.install" "已安装审计任务到 $root (每分钟 watch / 每10分钟 report)"
 
     # 兜底: 让 iKuai 自己再提交一次(iKuai 的 crond 每分钟会检查 crontab 变化)

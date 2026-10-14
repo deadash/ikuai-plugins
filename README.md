@@ -152,7 +152,8 @@ bin/*                            命令行      -> /usr/sbin/
 ## 审计取证 (audit)
 
 `scripts/06_enable_audit.sh` 每次开机启动审计，由 `bin/ikaudit` 采集，日志写在持久分区
-`/etc/log/ikguard/`(保留 3 天):
+`/etc/log/ikguard/`。日志规模有**时间 + 体积双限**(默认保留 3 天、目录上限 300MB、
+单文件 10MB、DNS 抓包日志 50MB)，由 cron 每分钟随采集一起整理：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -160,19 +161,24 @@ bin/*                            命令行      -> /usr/sbin/
 | `audit-YYYYMMDD.log` | 结构化事件: `proc.start` `conn.out` `dns.cloud` `cloud.ip` `cloud.port` `block.hit` `backdoor.proc` `backdoor.alive` `probe.*` |
 | `proc-YYYYMMDD.log` | 进程快照对比(新启动的进程) |
 | `conn-YYYYMMDD.log` | 出向连接快照对比(新增公网连接) |
-| `dns-YYYYMMDD.log` | DNS 查询记录(tcpdump 逐网卡抓 53 端口) |
+| `dns-YYYYMMDD.log` | DNS 查询记录(tcpdump 逐网卡抓 `udp port 53`)；**默认关闭，仅用户在控制台手动启停** |
 | `report.txt` | 最近一次体检报告(结论: 正常/异常) |
 
 ```
 ikaudit status      # 日志目录/占用/DNS 采集/封锁规则
 ikaudit tail 80     # 最近的审计事件
 ikaudit report      # 立刻体检(发现后门进程/云端连接时返回码 1)
-ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试)
-ikaudit dns-start   # 启动 DNS 记录
+ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试；仅手动触发一次)
+ikaudit dns-start   # 手动启动 DNS 抓包(默认关闭)
+ikaudit dns-stop    # 手动停止 DNS 抓包
 ```
 
 采集由 cron 驱动(`/etc/crontabs/cron.d/ikguard_audit` 每分钟、`ikguard_report` 每 10 分钟)，
 并用 iKuai 的 `crond_commit` 立即提交到 `/etc/crontabs/root`，不必重启。
+
+> **DNS 抓包与 cron 无关**：它默认关闭，只有用户点了"启动 DNS 记录"才抓；点"停止"即停，
+> 不会被定时任务重新拉起(启动写 pid 文件，停止按 pid 关闭并删除)。`ikaudit watch` 只做
+> 采集与日志维护，不启停抓包。云端连通性自检同理，只在用户点击时执行一次。
 
 ## 网页插件 (Web)
 

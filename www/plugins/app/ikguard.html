@@ -122,7 +122,7 @@
     <b>云端连通性自检</b>
     <div class="tip">解析爱快云端域名并尝试建立 TCP 443 连接，用来确认后门封锁是否真的生效。
       自检需要设备能上外网(WAN 已拨号)；预期结果是"能解析出 IP，但连接失败"。
-      整轮自检大约 20 秒，结果同时写入审计日志(<code>probe.*</code>)。</div>
+      <b>仅在你点击"开始自检"时执行一次</b>，约 20 秒，不会自动/定时运行；结果同时写入审计日志(<code>probe.*</code>)。</div>
     <button class="pri" onclick="runProbe()">开始自检</button>
   </div>
   <div class="tool">
@@ -130,6 +130,8 @@
     <div class="tip">用 tcpdump 抓取 53 端口的 DNS 请求(自动跳过桥成员网卡，避免重复记录)，落到
       <code>/etc/log/ikguard/dns-YYYYMMDD.log</code>，用于核对是否有云端域名被解析。
       审计日志里的 <code>dns.cloud</code> 事件就是对它的汇总。</div>
+    <div class="tip"><b>默认关闭</b>：只有你点"启动"才会抓包；点"停止"即停，不会被定时任务重新拉起。
+      抓包日志按体积封顶(超限自动滚动)，长时间挂机也不会撑爆磁盘。</div>
     <div class="tip">当前状态：<b id="dns-state">-</b></div>
     <button onclick="dnsAct('start')">启动 DNS 记录</button>
     <button onclick="dnsAct('stop')">停止 DNS 记录</button>
@@ -239,7 +241,7 @@ function load() {
     if (ds) {
       ds.textContent = (s.dns_running == 1)
         ? '运行中（正在写 ' + (s.log_dir||'/etc/log/ikguard') + '/dns-*.log）'
-        : '未运行（点击"启动 DNS 记录"开始抓取）';
+        : '未运行（默认关闭；点击"启动 DNS 记录"才开始抓取）';
       ds.className = (s.dns_running == 1) ? 'ok' : 'warn';
     }
 
