@@ -141,9 +141,14 @@ function/<func_name>             后端接口     -> /usr/ikuai/function/
 bin/*                            命令行      -> /usr/sbin/
 ```
 
-完整可运行示例见 [examples/rust-plugin](examples/rust-plugin/)(Rust + 嵌入式数据库 + Web 配置页)。
-编译方式有两种(见该示例的 README)：**musl 静态**(仓库默认，实测 945KB/整包 454KB)与
-**iKuai SDK 的 uClibc 交叉编译**(动态链接设备自带 libc，体积更小)。
+完整可运行示例：
+
+* [examples/rust-plugin](examples/rust-plugin/) —— Rust + 嵌入式数据库 + Web 配置页。
+  编译方式有两种(见该示例的 README)：**musl 静态**(仓库默认，实测 945KB/整包 454KB)与
+  **iKuai SDK 的 uClibc 交叉编译**(动态链接设备自带 libc，体积更小)。
+* [examples/bnfix-plugin](examples/bnfix-plugin/) —— 纯 shell 的最小示例（整包约 15KB，
+  **不编译任何东西**）：演示"就地给系统共享库打 1 字节定点补丁 + 每次开机重新施加 + 自检"，
+  以及"卸载后重启即彻底失效"的做法。
 
 **安装方式**:
 1. 网页: 系统设置 → 插件管理 → ikguard → 插件管理 → 选择 zip → 上传并安装
@@ -200,9 +205,11 @@ ikaudit cronsync        # 重建定时任务(只有 probe=1 才写自检 cron)
 
 ![插件管理](docs/images/plugin-management.png)
 
-> 「高级应用 → 插件管理」里的插件卡片(实拍: iKuai 3.7.16 x64 + 本框架 v0.0.3)。
+> 「高级应用 → 插件管理」里的插件卡片(实拍: iKuai 3.7.16 x64 + 本框架 v0.0.4)。
 > `安全防护控制台` 是基础包内置的 ikguard 插件；`Rust 示例插件` 是通过插件管理**单独上传安装**的
 > `rustdemo.zip` —— **基础包与插件是两个独立发布物**, 基础包里不含任何插件。
+> 目前随版发布的独立插件有两个：`rustdemo-v1.0.0-plugin.zip`(示例) 与
+> `bnfix-v1.0.0-plugin.zip`(系统 OpenSSL 组件修复)。
 
 ![ikguard 控制台](docs/images/ikguard-console.png)
 

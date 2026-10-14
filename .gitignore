@@ -19,3 +19,7 @@ SIGNATURE.RSA
 examples/rust-plugin/target
 examples/rust-plugin/dist
 examples/rust-plugin/pkg/bin
+
+# bnfix 插件的构建产物(build.sh 生成; pkg/lib 只在 --base 生成整库时出现)
+examples/bnfix-plugin/dist
+examples/bnfix-plugin/pkg/lib

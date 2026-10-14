@@ -668,6 +668,55 @@ $ /usr/ikuai/function/rustdemo show TYPE=data
 {"data":{"stats":{...},"config":{...},"samples":[...]}}
 ```
 
+### 6.7 插件示例: 纯 shell 的 `bnfix`(给系统共享库打定点补丁)
+
+第二个示例 `examples/bnfix-plugin/` 演示的是**另一种形态的插件**：不编译、不带任何二进制，
+只用一个 shell 脚本 + 一行"补丁描述"去修设备上已有的组件。适合"厂商组件有缺陷、又拿不到源码"
+这类场景（本例是给 `/usr/lib/libcrypto.so.1.0.0` 打 1 个字节的定点补丁）。
+
+```
+examples/bnfix-plugin/
+├── build.sh             组装 pkg/ + 打 dist/bnfix.zip(约 15KB，不做任何编译)
+└── pkg/                 Release / install.sh / boot.sh / uninstall.sh /
+                         bin/bnfix / share/bnfix.conf / share/selfcheck.der /
+                         function/bnfix / www/plugins/...
+```
+
+它演示的关键点(详细说明见 `examples/bnfix-plugin/README.md`):
+
+1. **"根分区每次重启还原"正是可用的机制**：补丁打在根分区上，本来重启就没了；
+   于是 `boot.sh` 每次开机重新打一遍 —— 这同时天然满足
+   "卸载后重启即彻底失效"（插件没了，就没人再打补丁了）。
+2. **就地改写已有字节**：设备根分区 `/dev/root` 只有 111MB 且已 100% 占满（`Avail=0`），
+   所以不能往 `/usr/lib` 放新文件；用 `dd conv=notrunc` 覆盖 1 个字节不需要任何新增空间。
+3. **安全护栏**：`share/bnfix.conf` 里写死目标库的原始 md5、补丁后 md5 与 `offset/字节`；
+   只有 md5 命中才动手，打完再核对补丁后 md5，不一致立刻写回。固件换了就拒绝执行，不会乱改。
+4. **自检**：`bnfix verify --full` 会先还原回原始字节、跑一次自检样本（确认会触发原缺陷），
+   再打上补丁跑一次（确认已修复），最后给出 `pass`；`bnfix status` 输出 JSON 供前端展示。
+5. **`LD_PRELOAD` 走不通的坑**（本示例记录在案）：目标库带 `DT_SYMBOLIC` 且整库无 `JUMP_SLOT`
+   重定位，库内部调用在链接期就被绑成相对调用，不经过 PLT，因此 `LD_PRELOAD` 同名符号无效
+   （`/proc/<pid>/maps` 里能看到 shim，但永远不会被调用）。另外 uClibc-ng 1.0.40 的加载器
+   **不支持 `/etc/ld.so.preload`**（只认 `LD_PRELOAD` 环境变量）。
+
+实测(在设备上安装后):
+
+```
+$ ikplugin install /tmp/bnfix.zip
+补丁已生效 -> md5=9c79a8b10fb888035ba77910ffd27e65
+
+$ /usr/sbin/bnfix status
+{"enabled":"1","mode":"patch","lib":"/usr/lib/libcrypto.so.1.0.0","lib_state":"patched","fixed":true,...}
+
+$ /usr/ikuai/function/bnfix show TYPE=data
+{"status":{"enabled":"1","fixed":true,...}}
+
+# 重启后 boot.sh 自动重新施加:
+$ grep boot /etc/log/ikguard/bnfix.log | tail -1
+...[boot] 补丁时刻 uptime=14.38
+
+# 卸载 + 再重启: 库回到原始 md5, 缺陷复现
+```
+
 ---
 
 ## 7. 开关(`/etc/mnt/boot_args`)
@@ -836,13 +885,13 @@ export IK_PASS='<控制台密码>'
 python3 ikctl.py sh "<命令>"                        # 远程执行
 python3 ikctl.py deploy repo/.dist/custom.bin       # 上传 + parse_file + update_file
 python3 ikctl.py reboot --wait                      # 重启并等 SSH 回来
-python3 ikctl.py verify                             # 一键体检(19 项)
+python3 ikctl.py verify                             # 一键体检(28 项)
 python3 ikctl.py audit --tail 60                    # 看报告/审计/DNS/连接日志
 ```
 
 `verify` 依次检查: 签名校验 → `plugins_ok` → `boot.log` 各阶段 → 后门进程/程序 →
 ipset/iptables → 审计日志与体检结论 → DNS 抓包 → Web 插件资源/接口，最后给出
-`通过 N/24` 汇总。实测重启后为 24/24 通过。
+`通过 N/28` 汇总。实测重启后为 28/28 通过。
 
 ## 附录 C. 一条命令更新+重启(ikupd.py)
 
@@ -851,7 +900,7 @@ ipset/iptables → 审计日志与体检结论 → DNS 抓包 → Web 插件资�
 ```bash
 # 更新基础包并自动重启、等它回来
 python3 ikupd.py -a 192.168.9.1 -u admin -p '<控制台密码>' \
-        update ikuai-plugins-v0.0.3-base.bin --reboot --wait
+        update ikuai-plugins-v0.0.4-base.bin --reboot --wait
 
 python3 ikupd.py -a 192.168.9.1 -u admin -p '<控制台密码>' update <包>   # 只更新
 python3 ikupd.py -a 192.168.9.1 -u admin -p '<控制台密码>' reboot --wait  # 只重启

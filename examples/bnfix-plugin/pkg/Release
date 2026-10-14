@@ -1,0 +1,3 @@
+plugin=bnfix
+version=1.0.0
+comment=OpenSSL 组件修复

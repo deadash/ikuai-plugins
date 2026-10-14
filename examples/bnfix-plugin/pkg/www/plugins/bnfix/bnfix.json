@@ -1,0 +1,1 @@
+{"name":"bnfix","manufacturer":"deadash","version":"1.0.0","title":"OpenSSL 修复","author":"deadash","description":"对系统 OpenSSL 组件做解析修复，随开机自动生效，卸载后重启即恢复。"}

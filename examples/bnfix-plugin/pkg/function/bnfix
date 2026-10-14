@@ -1,0 +1,72 @@
+#!/bin/bash /etc/ikcommon
+#
+# bnfix 插件后端接口 (前端页面 /plugins/app/bnfix.html)
+#
+# 动作:
+#   show        TYPE=data  返回状态 JSON (Data.status)
+#   seting      key=enabled value=1|0   启用/撤销修复
+#   verify      -          快速自检(用当前库解析 PoC)
+#   verifyfull  -          完整自检(先还原看原始表现, 再补上确认已修复)
+#   restart     -          重启受影响的服务
+#
+# 说明: 真正的逻辑都在插件自带的 bin/bnfix 里(纯 shell, 不依赖 node/lua),
+#       这里只做 JSON 转发与参数校验。
+
+ROOT="/etc/mnt/plugins/bnfix"
+B="$ROOT/bin/bnfix"
+
+__show_data() {
+    local status
+    if [ ! -x "$B" ]; then
+        status='{"error":"插件二进制缺失, 请重新安装插件"}'
+    else
+        status="$("$B" status 2>/dev/null)"
+        [ -n "$status" ] || status='{}'
+    fi
+    json_append __json_result__ status:json
+}
+
+show()
+{
+    Show __json_result__
+}
+
+seting()
+{
+    case "$key" in
+        enabled)
+            case "$value" in
+                1|on|true|yes)
+                    "$B" apply >/dev/null 2>&1 && echo "修复已启用(重启设备后对所有服务生效)"
+                    return 0 ;;
+                0|off|false|no)
+                    "$B" revert >/dev/null 2>&1 && echo "修复已撤销(重启设备后彻底失效)"
+                    return 0 ;;
+                *) echo "不支持的取值: $value"; return 1 ;;
+            esac ;;
+        *) echo "不支持的配置项: $key"; return 1 ;;
+    esac
+}
+
+verify()
+{
+    local verify
+    verify="$("$B" verify 2>/dev/null)"; [ -n "$verify" ] || verify='{"error":"自检执行失败"}'
+    json_append __json_result__ verify:json
+    Show __json_result__
+}
+
+verifyfull()
+{
+    local verify
+    verify="$("$B" verify --full 2>/dev/null)"; [ -n "$verify" ] || verify='{"error":"自检执行失败"}'
+    json_append __json_result__ verify:json
+    Show __json_result__
+}
+
+restart()
+{
+    "$B" restart >/dev/null 2>&1
+    echo "已尝试重启受影响的服务"
+    return 0
+}

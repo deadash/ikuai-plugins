@@ -1,0 +1,326 @@
+#!/bin/bash
+#
+# bnfix - 给系统 OpenSSL 共享库打 1 字节定点补丁
+#
+# 为什么用"就地定点补丁"而不是换整库:
+#   设备根分区 /dev/root 只有 111MB 且已 100% 占满(Avail=0), 放不下另一份 2MB 的库;
+#   就地覆盖 1 个字节不需要任何新增空间。补丁点与语义论证见仓库 README。
+#
+# 子命令:
+#   status          当前状态(JSON)
+#   apply           让修复生效(幂等)
+#   revert          撤销修复(还原原始字节 / 卸载 bind mount)
+#   verify          自检: 用自检证书实际跑一遍, 看当前库的表现
+#   verify --full   回滚对比自检(先还原看原始表现, 再补上确认已修复)
+#   submit <file>   提交一个打好补丁的整库 .so, 用 bind-mount 覆盖(可选路线)
+#   unsubmit        取消 submit, 回到就地补丁
+#   restart         重启受影响的服务(让已运行的进程换到新库)
+#   log [n]         查看 bnfix 记录
+#
+set -u
+
+ROOT="${PLUGIN_DIR:-/etc/mnt/plugins/bnfix}"
+CONF="$ROOT/share/bnfix.conf"
+POC="$ROOT/share/selfcheck.der"
+SOLIB="$ROOT/lib/libcrypto.so.1.0.0"
+STATE_DIR="$ROOT/data"
+STATE="$STATE_DIR/state"
+LOG="/etc/log/ikguard/bnfix.log"
+POC_TIMEOUT=6
+TMP="/tmp/.bnfix"
+
+mkdir -p "$STATE_DIR" "$(dirname "$LOG")" "$TMP" 2>/dev/null
+
+LIB=/usr/lib/libcrypto.so.1.0.0
+ORIG_MD5=""
+PATCHED_MD5=""
+PATCHES=""
+# shellcheck disable=SC1090
+. "$CONF" 2>/dev/null || {
+    echo "缺少或无法读取 $CONF" >&2
+    exit 1
+}
+
+log() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null
+    echo "$*"
+}
+# 只写日志文件, 不输出到 stdout —— 给"要输出 JSON 给前端"的命令用, 避免污染 JSON
+logf() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG" 2>/dev/null
+}
+md5f() { md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
+state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
+state_set() {
+    local k="$1" v="$2" tmp
+    tmp="$STATE.tmp"
+    { grep -v "^$k=" "$STATE" 2>/dev/null; echo "$k=$v"; } > "$tmp" 2>/dev/null
+    mv -f "$tmp" "$STATE" 2>/dev/null
+}
+lib_state() {
+    local m
+    m="$(md5f "$LIB")"
+    case "$m" in
+        "$ORIG_MD5")    echo original ;;
+        "$PATCHED_MD5") echo patched ;;
+        *)              echo unknown ;;
+    esac
+}
+
+# ------------------------------------------------------------ 1 字节写
+# 设备上没有 od/xxd(只有 hexdump), 所以不做逐字节回读;
+# 合法性靠整库 md5 判定(见 patch_apply), 这比逐字节比较更强。
+write_byte() {
+    local oct
+    oct=$(printf '%03o' "$(( 16#${3} ))") || return 1
+    printf "\\$oct" | dd of="$1" bs=1 seek="$(( $2 ))" count=1 conv=notrunc 2>/dev/null || return 1
+    return 0
+}
+# 把 PATCHES 展开成每行 "off orig new"(条目之间用 ';' 分隔)
+patch_list() {
+    local item off o n saveifs
+    saveifs="$IFS"
+    IFS=';'
+    for item in $PATCHES; do
+        IFS="$saveifs"
+        # shellcheck disable=SC2086
+        set -- $item
+        off="${1:-}"; o="${2:-}"; n="${3:-}"
+        IFS=';'
+        [ -n "$off" ] || continue
+        [ -n "$o" ] && [ -n "$n" ] || continue
+        printf '%s %s %s\n' "$off" "$o" "$n"
+    done
+    IFS="$saveifs"
+}
+
+patch_apply() {
+    local st off o n
+    st="$(lib_state)"
+    case "$st" in
+        patched) return 0 ;;
+        unknown) log "拒绝打补丁: $LIB 的 md5($(md5f "$LIB"))与预期不符(固件版本不同?)"; return 1 ;;
+    esac
+
+    patch_list > "$TMP/patch.list"
+    while read -r off o n; do
+        write_byte "$LIB" "$off" "$n" || { log "写入 $off 失败"; patch_write_back; return 1; }
+    done < "$TMP/patch.list"
+
+    if [ "$(md5f "$LIB")" = "$PATCHED_MD5" ]; then
+        log "补丁已生效 -> md5=$(md5f "$LIB")"
+        state_set mode patch
+        return 0
+    fi
+    log "打完补丁后 md5 校验失败, 自动回滚"
+    patch_write_back
+    return 1
+}
+# 只写回原始字节, 不做任何判断(内部用)
+patch_write_back() {
+    local off o n
+    patch_list > "$TMP/patch.list" 2>/dev/null
+    while read -r off o n; do
+        write_byte "$LIB" "$off" "$o" >/dev/null 2>&1
+    done < "$TMP/patch.list"
+}
+patch_revert() {
+    case "$(lib_state)" in
+        original) log "当前是原始库, 无需还原"; return 0 ;;
+        patched)  patch_write_back; log "已还原原始字节 -> md5=$(md5f "$LIB")"; return 0 ;;
+        *)        log "库 md5 不认识, 拒绝修改"; return 1 ;;
+    esac
+}
+
+# ------------------------------------------------------------ bind mount
+so_mounted() { grep -qF " $LIB " /proc/mounts 2>/dev/null; }
+so_mount() {
+    test -f "$SOLIB" || { log "没有 submit 过的整库"; return 1; }
+    so_mounted && return 0
+    if mount --bind "$SOLIB" "$LIB" 2>/dev/null; then
+        log "已 bind-mount 整库 -> md5=$(md5f "$LIB")"
+        state_set mode so
+        return 0
+    fi
+    log "bind-mount 失败(内核不支持或权限不足)"
+    return 1
+}
+so_umount() { so_mounted && umount "$LIB" 2>/dev/null && log "已卸载 bind mount"; return 0; }
+
+# ------------------------------------------------------------ 受影响进程
+lib_users() {
+    local p
+    for p in /proc/[0-9]*; do
+        [ -r "$p/maps" ] || continue
+        grep -q "libcrypto" "$p/maps" 2>/dev/null || continue
+        printf '%s %s\n' "${p#/proc/}" "$(cat "$p/comm" 2>/dev/null)"
+    done
+}
+restart_all() {
+    local n uniq seen=""
+    uniq="$(lib_users | awk '{print $2}' | sort -u)"
+    [ -n "$uniq" ] || { log "没有发现加载 libcrypto 的进程"; return 0; }
+    for n in $uniq; do
+        # 同一服务的 master/worker 进程名不同, 归一化后去重, 避免重复重启
+        case "$n" in
+            openresty|nginx) n=nginx ;;
+            ikdnsd|ikdnsx)   n=ikdnsd ;;
+        esac
+        case " $seen " in *" $n "*) continue ;; esac
+        seen="$seen $n"
+        case "$n" in
+            openresty|nginx)
+                if [ -x /etc/nginx/script/nginx.service ]; then
+                    /etc/nginx/script/nginx.service restart >/dev/null 2>&1 \
+                        && log "已重启 nginx" || log "nginx 重启失败(重启设备即可生效)"
+                fi ;;
+            ikdnsd|ikdnsx)
+                if [ -r /tmp/iktmp/ikdnsd.status ]; then
+                    pid="$(cat /var/run/ikdnsd.pid 2>/dev/null)"
+                    [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null
+                    sleep 1
+                    sh -c "$(cat /tmp/iktmp/ikdnsd.status)" >/dev/null 2>&1 &
+                    log "已重启 ikdnsd"
+                fi ;;
+            *) log "$n 需要重启设备才能换到新库" ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------ 开关
+do_enable() {
+    if [ -f "$SOLIB" ] && [ "$(state_get mode)" = "so" ]; then
+        so_mount || patch_apply || return 1
+    else
+        patch_apply || return 1
+    fi
+    state_set enabled 1
+    log "修复已启用; 已经在跑的进程仍持有旧库, 需重启服务或重启设备才会换到新库"
+    return 0
+}
+do_disable() {
+    so_umount
+    patch_revert
+    state_set enabled 0
+    log "修复已撤销; 同样需要重启服务/设备才能让已运行的进程回到旧库"
+    return 0
+}
+
+# ------------------------------------------------------------ 自检
+# 用当前 LIB 跑一遍自检证书: 输出 hang 或 ok:rc=N
+run_poc() {
+    local p i=0
+    test -r "$POC" || { echo missing-poc; return; }
+    openssl x509 -in "$POC" -inform DER -text -noout >"$TMP/poc.out" 2>&1 &
+    p=$!
+    while [ "$i" -lt "$POC_TIMEOUT" ]; do
+        kill -0 "$p" 2>/dev/null || break
+        sleep 1
+        i=$((i + 1))
+    done
+    if kill -0 "$p" 2>/dev/null; then
+        kill -9 "$p" 2>/dev/null
+        wait "$p" 2>/dev/null
+        echo hang
+    else
+        wait "$p" 2>/dev/null
+        echo "ok:rc=$?"
+    fi
+}
+cmd_verify() {
+    local full=0 st base fix pass users first=1 u
+    [ "${1:-}" = "--full" ] && full=1
+    st="$(lib_state)"
+
+    if [ "$full" = "1" ]; then
+        patch_revert >/dev/null 2>&1
+        base="$(run_poc)"
+        patch_apply >/dev/null 2>&1
+        fix="$(run_poc)"
+    else
+        base="skip"
+        fix="$(run_poc)"
+    fi
+
+    pass=false
+    case "$fix" in ok:*) pass=true ;; esac
+    if [ "$full" = "1" ]; then
+        case "$base" in hang) ;; *) pass=false ;; esac
+    fi
+
+    printf '{"lib":"%s","md5":"%s","lib_state":"%s","mode":"%s",' \
+        "$LIB" "$(md5f "$LIB")" "$(lib_state)" "$(state_get mode)"
+    printf '"baseline":"%s","with_fix":"%s","pass":%s,"users":[' "$base" "$fix" "$pass"
+    for u in $(lib_users | awk '{print $2}' | sort -u); do
+        [ "$first" = "1" ] || printf ','
+        first=0
+        printf '"%s"' "$u"
+    done
+    printf ']}\n'
+    if [ "$pass" = "true" ]; then
+        logf "自检通过 (baseline=$base with_fix=$fix)"
+    else
+        logf "自检未通过 (baseline=$base with_fix=$fix)"
+    fi
+}
+
+# ------------------------------------------------------------ submit
+cmd_submit() {
+    local f="${1:-}" sz
+    test -n "$f" || { log "用法: bnfix submit <libcrypto.so.1.0.0>"; return 1; }
+    test -r "$f" || { log "读不到 $f"; return 1; }
+    printf '\177ELF' > "$TMP/magic"
+    dd if="$f" bs=1 count=4 2>/dev/null | cmp -s - "$TMP/magic" || { log "不是 ELF 文件"; return 1; }
+    sz=$(wc -c < "$f")
+    mkdir -p "$ROOT/lib" 2>/dev/null
+    cp -f "$f" "$SOLIB" || { log "复制到持久盘失败(空间不足?)"; return 1; }
+    log "已提交整库 ($sz 字节, md5=$(md5f "$SOLIB"))"
+    state_set mode so
+    so_mount || { log "bind-mount 失败, 回退到就地补丁"; state_set mode patch; rm -f "$SOLIB"; patch_apply; }
+    state_set enabled 1
+    return 0
+}
+cmd_unsubmit() {
+    so_umount
+    rm -f "$SOLIB"
+    state_set mode patch
+    log "已取消 submit 的整库, 回到就地补丁"
+    patch_apply
+    state_set enabled 1
+    return 0
+}
+
+# ------------------------------------------------------------ status
+cmd_status() {
+    local st en mode first=1 u
+    st="$(lib_state)"; en="$(state_get enabled)"; mode="$(state_get mode)"
+    [ -n "$en" ] || en=0
+    [ -n "$mode" ] || mode=patch
+    printf '{"enabled":"%s","mode":"%s","lib":"%s","md5":"%s","lib_state":"%s",' \
+        "$en" "$mode" "$LIB" "$(md5f "$LIB")" "$st"
+    if [ "$st" = "patched" ]; then printf '"fixed":true,'; else printf '"fixed":false,'; fi
+    printf '"orig_md5":"%s","patched_md5":"%s","so_submitted":%s,' \
+        "$ORIG_MD5" "$PATCHED_MD5" "$( [ -f "$SOLIB" ] && echo true || echo false )"
+    printf '"users":['
+    for u in $(lib_users | awk '{print $2}' | sort -u); do
+        [ "$first" = "1" ] || printf ','
+        first=0
+        printf '"%s"' "$u"
+    done
+    printf '],"log_lines":%s}\n' "$(wc -l < "$LOG" 2>/dev/null || echo 0)"
+}
+
+case "${1:-status}" in
+    status)          cmd_status ;;
+    apply|enable)    do_enable ;;
+    revert|disable)  do_disable ;;
+    verify)          cmd_verify "${2:-}" ;;
+    submit)          cmd_submit "${2:-}" ;;
+    unsubmit)        cmd_unsubmit ;;
+    restart)         restart_all ;;
+    log)             tail -n "${2:-20}" "$LOG" 2>/dev/null ;;
+    *)
+        sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+        exit 1
+        ;;
+esac
