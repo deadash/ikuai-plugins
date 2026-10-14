@@ -565,7 +565,12 @@ plugin_web_patch() {
         # 注意: /usr/ikuai/www/static/js 是**持久**目录(不像根分区每次还原), 所以这两条补丁
         # 必须幂等 —— 否则每次开机都会再插一条, 下拉里就会攒出一堆"插件存储"。
         grep -q 't\.\$t(i+"5")\]\[1\*s\]' "$tmp" 2>/dev/null && want_purpose=1
-        grep -q -e 'binding_business_name5")))]):t\._e()' -e 'binding_business_name6' "$tmp" 2>/dev/null && want_opt=1
+        # 下拉项: 0=没插过, 1=已经插过(不动它), 2=插重了(清干净重插)
+        case "$(grep -o 'binding_business_name6' "$tmp" 2>/dev/null | wc -l | tr -d ' ')" in
+            0) grep -q 'binding_business_name5")))]):t\._e()' "$tmp" 2>/dev/null && want_opt=1 ;;
+            1) want_opt=0 ;;
+            *) want_opt=2 ;;
+        esac
         if [ "$want_ub" = 0 ] && [ "$want_dir" = 0 ] && [ "$want_title" = 0 ] && \
            [ "$want_bind" = 0 ] && [ "$want_label" = 0 ] && \
            [ "$want_purpose" = 0 ] && [ "$want_opt" = 0 ]; then
@@ -582,7 +587,7 @@ plugin_web_patch() {
 
         # 下拉第 6 项(插件存储)用 awk 按"整串"增删: busybox sed 对带 {} 的长模式不靠谱。
         # 顺序 = 先删掉历史插入的(可能积了好几条), 再在"钉钉闪传"那项后面插恰好一条。
-        if [ "$want_opt" = 1 ] || grep -q 'binding_business_name6' "$patched" 2>/dev/null; then
+        if [ "$want_opt" != 0 ]; then
             awk -v bad='e("option",{attrs:{value:"6"}},[t._v(t._s(t.$t("common.disk-management.diskshowtable.binding_business_name6")))]),t._v(" "),' \
                 -v anchor='binding_business_name5")))]):t._e()' \
                 -v ins=',t._v(" "),e("option",{attrs:{value:"6"}},[t._v(t._s(t.$t("common.disk-management.diskshowtable.binding_business_name6")))])' '
