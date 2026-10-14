@@ -760,6 +760,34 @@ plugin_fw_patch() {
         fi
     fi
 
+    # 1b) disk_find.lua: 它按 df 的"设备名"建表, 业务取自挂载路径里的 /etc/disk/<uuid>。
+    #     而「插件存储」会把同一块盘再挂到 /etc/mnt/plugins —— df 里那条路径匹配不到 uuid,
+    #     于是把已经取到的业务覆盖成 "0", 页面就显示成"不使用"(其实是绑着的)。
+    #     改成: 取不到非 0 业务时, 保留同一设备上已经取到的那个。
+    lua="$(P /usr/ikuai/script/utils/disk_find.lua)"
+    if [ -f "$lua" ] && ! grep -q 'diskf_tab\[part\] and diskf_tab\[part\].mt_purpose' "$lua" 2>/dev/null; then
+        tmp="$(mktemp)" || tmp=""
+        if [ -n "$tmp" ]; then
+            # 只认那一行赋值(mount_cache_p[uuid] 在文件里还有别处出现, 锚点必须更精确)
+            awk -v to='mt_purpose = (mount_cache_p[uuid] and mount_cache_p[uuid] ~= "0" and mount_cache_p[uuid]) or (diskf_tab[part] and diskf_tab[part].mt_purpose) or "0",' '
+                !done && /mt_purpose = mount_cache_p\[uuid\]/ {
+                    match($0, /^[ \t]*/)
+                    print substr($0, 1, RLENGTH) to
+                    done = 1
+                    next
+                }
+                { print }' "$lua" > "$tmp" 2>/dev/null
+            if grep -q 'diskf_tab\[part\] and diskf_tab\[part\].mt_purpose' "$tmp" 2>/dev/null; then
+                cat "$tmp" > "$lua"
+                n=$((n + 1))
+                plugin_log "  已补丁 disk_find.lua(同设备多处挂载时, 绑定业务不再显示成\"不使用\")"
+            else
+                plugin_log "  disk_find.lua 补丁未生效(保留原文件)"
+            fi
+            rm -f "$tmp"
+        fi
+    fi
+
     # 2) i18n: 业务名(页面用 common.disk-management.diskshowtable.binding_business_name6)
     #    注意: 新键**插在 name5 前面**, 这样原有的逗号结构原封不动 ——
     #    早先"插在 name5 后面"的写法会让 JSON 少一个逗号, i18n 直接加载失败、整个页面文案全乱。
