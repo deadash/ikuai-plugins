@@ -3,6 +3,7 @@
 # 审计/取证: 进程启动、网络连接、封锁命中 -> /etc/log/ikguard
 #
 # 开关: /etc/mnt/boot_args 中 audit=1
+#   audit=0 -> 不采集, 并移除定时任务(au_remove_cron) + 停掉 DNS 抓包
 #   probe=1 定时自检(默认 0): 持久化, 只有开启才写入定时任务, 关闭则移除
 # DNS 抓包不持久化: 重启即失效, 不进定时任务, 也不由本脚本启动
 # 说明: 日志写在持久分区 /etc/log (sda5, 15.5G), 重启不丢;
@@ -13,7 +14,14 @@ SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SELF_DIR/../lib/backdoor.sh"
 . "$SELF_DIR/../lib/audit.sh"
 
-is_enabled "audit" || { log "[audit] 未启用(audit=0), 跳过"; exit 0; }
+# 审计关闭时: 不仅要"不启动", 还要把已写入的定时任务清掉、停掉 DNS 抓包 ——
+# 否则关掉开关后采集仍会每分钟继续跑(与"没开的功能不进定时任务"相矛盾)。
+if ! is_enabled "audit"; then
+    log "[audit] 未启用(audit=0): 停止采集并移除定时任务"
+    au_remove_cron
+    au_dns_stop quiet
+    exit 0
+fi
 
 IKAUDIT="$(P /etc/mnt/.boot/bin/ikaudit)"
 

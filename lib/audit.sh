@@ -557,40 +557,47 @@ au_watch() {
 # 定时自检开关: 只有用户开启了(probe=1)才写入定时任务
 au_probe_cron_on() { test "$(au_flag probe 0)" = "1"; }
 
+# 移除本框架写入的定时任务(root 里的 ikaudit 行 + cron.d 副本)
+# 用途: audit=0(整个审计关闭)时清干净, 保证"没开的功能不会留在定时任务里"
+au_remove_cron() {
+    local cron_dir root bin
+    cron_dir="$(P /etc/crontabs/cron.d)"
+    root="$(P /etc/crontabs/root)"
+    bin="$(P /etc/mnt/.boot/bin/ikaudit)"
+    if [ -f "$root" ]; then
+        grep -v "$bin" "$root" > "$root.ikguard.tmp" 2>/dev/null || :
+        mv -f "$root.ikguard.tmp" "$root" 2>/dev/null
+    fi
+    rm -f "$cron_dir/ikguard_audit" "$cron_dir/ikguard_report" "$cron_dir/ikguard_probe" 2>/dev/null
+    return 0
+}
+
 # 安装审计 cron(每分钟采集 + 每 10 分钟体检; 定时自检按开关决定是否加入)
 # 幂等且"声明式": 每次都先清掉本框架的任务行, 再按当前开关重建 ——
 #   关闭的功能重启后不会被拉起, 也不会留在定时任务里。
 au_install_cron() {
-    local cron_dir root bin probe_state
-    cron_dir="$(P /etc/crontabs/cron.d)"
+    local root bin probe_state
     root="$(P /etc/crontabs/root)"
     bin="$(P /etc/mnt/.boot/bin/ikaudit)"
-    mkdir -p "$cron_dir" 2>/dev/null
+    mkdir -p "$(dirname "$root")" 2>/dev/null
+    au_remove_cron
 
     # 关键: iKuai 的 crond 只读 /etc/crontabs/root, cron.d 只是它自己的暂存目录,
     # 而且它的 crond_commit 会整体重写 root —— 所以必须把任务直接写进 root,
     # 否则"每分钟采集"根本不会执行(日志里只有开机那一次的数据)。
-    if [ -f "$root" ]; then
-        grep -v "$bin" "$root" > "$root.ikguard.tmp" 2>/dev/null || :
-        mv -f "$root.ikguard.tmp" "$root" 2>/dev/null
-    else
-        mkdir -p "$(dirname "$root")" 2>/dev/null
-        : > "$root"
-    fi
 
     # 固定两条: 采集 + 体检
     printf '* * * * * %s watch\n'      "$bin" >> "$root"
     printf '*/10 * * * * %s report\n'  "$bin" >> "$root"
-    printf '* * * * * %s watch\n'     "$bin" > "$cron_dir/ikguard_audit"
-    printf '*/10 * * * * %s report\n' "$bin" > "$cron_dir/ikguard_report"
+    printf '* * * * * %s watch\n'     "$bin" > "$(P /etc/crontabs/cron.d/ikguard_audit)"
+    printf '*/10 * * * * %s report\n' "$bin" > "$(P /etc/crontabs/cron.d/ikguard_report)"
 
     # 可选: 定时自检(默认关闭, 由 probe 开关决定)
     if au_probe_cron_on; then
         printf '%s * * * * %s probe >/dev/null 2>&1\n' "$AU_PROBE_CRON" "$bin" >> "$root"
-        printf '%s * * * * %s probe >/dev/null 2>&1\n' "$AU_PROBE_CRON" "$bin" > "$cron_dir/ikguard_probe"
+        printf '%s * * * * %s probe >/dev/null 2>&1\n' "$AU_PROBE_CRON" "$bin" > "$(P /etc/crontabs/cron.d/ikguard_probe)"
         probe_state="$AU_PROBE_CRON"
     else
-        rm -f "$cron_dir/ikguard_probe" 2>/dev/null
         probe_state="未启用(probe=0)"
     fi
     au_event INFO "cron.install" "已安装审计任务到 $root (每分钟 watch / 每10分钟 report / 定时自检 $probe_state)"
