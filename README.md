@@ -13,6 +13,23 @@
 >
 > 该技能只覆盖**插件包**(基础包/签名不在其范围)。技能目录是点目录, 打包与签名会自动排除, 不影响基础包。
 
+# 随版发布的插件
+
+基础包里**不含任何插件**(`examples/`、`tools/` 都在 `package.exclude` 里排除了)，插件是**独立的 zip 发布物**，
+在 Web「高级应用 → 插件管理」里上传安装即可(插件包不需要签名)。
+
+| 插件 | 版本 | 作用 |
+| --- | --- | --- |
+| [ikupd](examples/ikupd-plugin/) | 1.0.0 | **插件在线升级**: 从 GitHub 仓库的 Release 检查有没有新版(按包名前缀匹配、按 sha256 判断)，支持走代理拉取，用户确认后下载并安装 —— 新插件与升级都能做 |
+| [ikadblock](examples/adblock-plugin/) | 1.0.0 | **广告/跟踪域名拦截**: 把 LAN 全网的 DNS 查询纳管到本机一个 sinkhole，命中黑名单返回 `0.0.0.0`，客户端自己指定 8.8.8.8 也绕不过去 |
+| [bnfix](examples/bnfix-plugin/) | 1.0.0 | **系统 OpenSSL 组件修复**: 给设备自带的 `libcrypto` 打 1 字节定点补丁，修掉解析"显式曲线参数 + 压缩点"证书时的死循环 |
+| [rustdemo](examples/rust-plugin/) | 1.0.0 | **Rust 示例插件**: 编译型插件的完整示例(嵌入式数据库 + Web 配置页)，也用来量体积(musl 静态约 945KB) |
+
+> **推荐先装 `ikupd`**：上传安装后打开它的页面，把本仓库地址加进「仓库列表」——
+> `https://github.com/deadash/ikuai-plugins/releases` —— 点「检查更新」即可看到上面这些插件的
+> 状态(新插件 / 可更新 / 已是最新)，之后下载与安装都在页面里完成，**以后随版新增的插件也会自动出现在列表里**，
+> 不需要再手工下载 zip 上传。
+
 # sdk
 
 如果需要自己编译程序，参考 [ikuai-sdk](https://github.com/deadash/ikuai-sdk)
@@ -227,8 +244,9 @@ ikaudit cronsync        # 重建定时任务(只有 probe=1 才写自检 cron)
 > 「高级应用 → 插件管理」里的插件卡片(实拍: iKuai 3.7.16 x64 + 本框架 v0.0.4)。
 > `安全防护控制台` 是基础包内置的 ikguard 插件；`Rust 示例插件` 是通过插件管理**单独上传安装**的
 > `rustdemo.zip` —— **基础包与插件是两个独立发布物**, 基础包里不含任何插件。
-> 目前随版发布的独立插件有三个：`rustdemo-v1.0.0-plugin.zip`(示例)、
-> `bnfix-v1.0.0-plugin.zip`(系统 OpenSSL 组件修复) 与 `ikadblock-v1.0.0-plugin.zip`(广告/跟踪域名拦截)。
+> 目前随版发布的独立插件有四个：`rustdemo-v1.0.0-plugin.zip`(示例)、`bnfix-v1.0.0-plugin.zip`(系统 OpenSSL 组件修复)、
+> `ikadblock-v1.0.0-plugin.zip`(广告/跟踪域名拦截) 与 `ikupd-v1.0.0-plugin.zip`(插件在线升级)。
+> 其中 `ikupd` 可以自己把本仓库加进"仓库列表"后在线检查/下载/安装其余插件(见上文「随版发布的插件」)。
 
 ![ikguard 控制台](docs/images/ikguard-console.png)
 
