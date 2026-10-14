@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>插件模板 plugdemo</title>
+<style>
+  :root { --bd:#e4e7ed; --fg:#303133; --mut:#909399; --pri:#409eff; --ok:#67c23a; --warn:#e6a23c; --err:#f56c6c; --bg:#f5f7fa; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:14px; font:13px/1.6 "Microsoft YaHei",Helvetica,Arial,sans-serif; color:var(--fg); background:#fff; }
+  h3 { margin:0 0 10px; font-size:15px; }
+  h4 { margin:16px 0 6px; font-size:13px; color:#606266; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; }
+  .card { flex:1 1 150px; min-width:140px; border:1px solid var(--bd); border-radius:6px; padding:10px 12px; background:var(--bg); }
+  .card .k { color:var(--mut); font-size:12px; }
+  .card .v { font-size:16px; font-weight:700; margin-top:2px; word-break:break-all; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); }
+  pre { margin:0; padding:10px; background:#1e1e1e; color:#d4d4d4; border-radius:5px; max-height:260px; overflow:auto; font:12px/1.5 Consolas,Monaco,monospace; white-space:pre-wrap; }
+  button { cursor:pointer; border:1px solid var(--bd); background:#fff; border-radius:4px; padding:5px 12px; font-size:12px; }
+  button:hover { border-color:var(--pri); color:var(--pri); }
+  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .msg { min-height:18px; font-size:12px; color:var(--mut); }
+  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; background:var(--bd); color:#fff; }
+  .tip { color:var(--mut); font-size:12px; line-height:1.8; }
+  input { border:1px solid var(--bd); border-radius:4px; padding:4px 8px; font-size:12px; }
+  code { background:#f2f3f5; padding:0 4px; border-radius:3px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h3 style="margin:0">插件模板</h3>
+  <span class="tag">plugdemo</span>
+  <span style="flex:1"></span>
+  <span class="msg" id="msg"></span>
+  <button onclick="load()">刷新</button>
+</div>
+
+<div class="row" id="cards"></div>
+
+<h4>配置</h4>
+<div class="bar">
+  采集间隔(秒) <input id="interval" size="6">
+  <button class="pri" onclick="setk('interval', document.getElementById('interval').value)">保存间隔</button>
+  备注 <input id="note" size="20">
+  <button onclick="setk('note', document.getElementById('note').value)">保存备注</button>
+</div>
+
+<h4>操作</h4>
+<div class="bar">
+  <button onclick="act('sample')">立即采集</button>
+  <button onclick="act('report')">LuaJIT 统计报告</button>
+  <button onclick="act('clear')">清空采样</button>
+</div>
+
+<p class="tip">
+  数据存放在持久分区 <code>/etc/mnt/plugins/plugdemo/data/plugdemo.db</code>(sqlite3)，
+  重启不丢；采集进程由 <code>boot.sh</code> 每次开机重新拉起。
+</p>
+
+<h4>输出</h4>
+<pre id="out">点上面的按钮查看结果…</pre>
+
+<script>
+function api(action, param) {
+  return fetch('/Action/call', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ func_name:'plugdemo', action:action, param:param||{} })
+  }).then(function(r){ return r.json(); }).then(function(j){
+    if (j.Result !== 30000) { throw new Error(j.ErrMsg || ('错误码 '+j.Result)); }
+    return j.Data || {};
+  });
+}
+function tip(t, cls) {
+  var m = document.getElementById('msg');
+  m.textContent = t || ''; m.className = (cls || 'msg');
+  if (t) { setTimeout(function(){ if (m.textContent===t) m.textContent=''; }, 6000); }
+}
+function card(k, v, cls) {
+  return '<div class="card"><div class="k">'+k+'</div><div class="v '+(cls||'')+'">'+v+'</div></div>';
+}
+function pick(d, key) { return (d && d[key]) || (d && d.data && d.data[key]) || null; }
+
+function load() {
+  return api('show', {TYPE:'data'}).then(function(d){
+    var s = pick(d,'status') || {};
+    var run = s.daemon_running === true || s.daemon_running === 'true';
+    var html = '';
+    html += card('采集进程', run ? '运行中' : '未运行', run ? 'ok' : 'err');
+    html += card('采样条数', s.samples || 0);
+    html += card('间隔(秒)', s.interval || '-');
+    html += card('数据库大小', (s.db_size||0) + ' B');
+    document.getElementById('cards').innerHTML = html;
+    if (document.activeElement.id !== 'interval') document.getElementById('interval').value = s.interval || '';
+    if (document.activeElement.id !== 'note') document.getElementById('note').value = s.note || '';
+  }).catch(function(e){ tip('加载失败: '+e.message, 'msg err'); });
+}
+function setk(k, v) {
+  api('seting', {key:k, value:String(v).replace(/ /g,'+')}).then(function(){
+    tip('已保存', 'msg ok'); load();
+  }).catch(function(e){ tip('保存失败: '+e.message, 'msg err'); });
+}
+function act(action) {
+  document.getElementById('out').textContent = '执行中…';
+  api(action, {}).then(function(d){
+    var v = pick(d, action);
+    document.getElementById('out').textContent = JSON.stringify(v || d, null, 2);
+    tip('已执行', 'msg ok');
+    load();
+  }).catch(function(e){ document.getElementById('out').textContent = '失败: '+e.message; tip('操作失败: '+e.message, 'msg err'); });
+}
+load();
+setInterval(function(){ if (!document.hidden) load(); }, 30000);
+</script>
+</body>
+</html>

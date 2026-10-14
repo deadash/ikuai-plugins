@@ -1,0 +1,147 @@
+#!/bin/bash
+#
+# plugdemo —— 插件命令行(纯 shell; 数据结构用设备自带的 sqlite3)
+#
+# 框架会把 pkg/bin/* 软链到 /usr/sbin/(去掉 .sh 后缀), 所以设备上直接 `plugdemo <命令>`。
+#
+# 命令:
+#   init                建库建表 + 默认配置(幂等)
+#   sample              立即采集一条记录
+#   status              输出 JSON 状态(给后端接口/Web 页面用)
+#   report              用设备自带 LuaJIT 统计(演示插件里的 Lua 调用)
+#   set <key> <value>   写配置项(interval / note)
+#   clear               清空采样数据
+#   daemon              前台采集循环
+#   daemon-start/-stop  后台拉起/停止(抗挂断)
+#
+set -u
+
+# 通过软链(/usr/sbin/plugdemo)调用时解析真实路径, 保证 ROOT 指向插件本体
+SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+ROOT="${PLUGIN_DIR:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+DB="${PLUGDEMO_DB:-$ROOT/data/plugdemo.db}"
+PIDFILE="$ROOT/data/daemon.pid"
+LOG=/etc/log/ikguard/plugdemo.log
+RETAIN=500
+
+# sqlite3 3.8.11(fw 自带, 见 references/sqlite3.md): 用 .timeout 处理并发写锁
+db() { sqlite3 -cmd ".timeout 3000" "$DB" "$@" 2>/dev/null; }
+
+interval() {
+    local v
+    v="$(db "SELECT value FROM config WHERE key='interval';" 2>/dev/null)"
+    case "$v" in ''|*[!0-9]*) v=15 ;; esac
+    printf '%s' "$v"
+}
+
+cmd_init() {
+    mkdir -p "$(dirname "$DB")" 2>/dev/null
+    # 3.8 兼容写法: 不用 UPSERT(ON CONFLICT DO UPDATE 要 3.24+), 用 INSERT OR IGNORE
+    db "PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS sample(
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts     INTEGER NOT NULL,
+            uptime TEXT,
+            load1  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sample_ts ON sample(ts);
+        CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT OR IGNORE INTO config(key,value) VALUES('interval','15');
+        INSERT OR IGNORE INTO config(key,value) VALUES('note','');" >/dev/null
+    return 0
+}
+
+cmd_sample() {
+    local up load
+    up="$(cut -d' ' -f1 /proc/uptime)"
+    load="$(cut -d' ' -f1 /proc/loadavg)"
+    db "INSERT INTO sample(ts,uptime,load1)
+        VALUES(CAST(strftime('%s','now') AS INTEGER), '$up', '$load');
+        DELETE FROM sample WHERE id <= (SELECT MAX(id) - $RETAIN FROM sample);" >/dev/null
+    return 0
+}
+
+cmd_status() {
+    local n last itv note size running=false
+    n="$(db 'SELECT COUNT(*) FROM sample;')"
+    last="$(db 'SELECT COALESCE(MAX(ts),0) FROM sample;')"
+    itv="$(interval)"
+    note="$(db "SELECT value FROM config WHERE key='note';")"
+    size="$(ls -l "$DB" 2>/dev/null | awk '{print $5}')"
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+        running=true
+    fi
+    printf '{"samples":%s,"last_ts":%s,"interval":"%s","note":"%s","db_size":%s,"daemon_running":%s}\n' \
+        "${n:-0}" "${last:-0}" "$itv" "${note:-}" "${size:-0}" "$running"
+}
+
+# 演示"插件里调用设备自带 Lua": luajit + lsqlite3 + cjson
+cmd_report() {
+    local lua="$ROOT/share/report.lua"
+    if command -v luajit >/dev/null 2>&1 && [ -f "$lua" ]; then
+        luajit "$lua" "$DB" 2>/dev/null || echo '{}'
+    else
+        echo '{}'
+    fi
+    return 0
+}
+
+cmd_set() {
+    local k="${1:-}" v="${2:-}"
+    case "$k" in
+        interval) case "$v" in ''|*[!0-9]*) return 1 ;; esac ;;
+        note) ;;
+        *) return 1 ;;
+    esac
+    db "INSERT OR REPLACE INTO config(key,value) VALUES('$k','$v');" >/dev/null
+    return 0
+}
+
+cmd_clear() { db "DELETE FROM sample;" >/dev/null; return 0; }
+
+cmd_daemon() {
+    trap 'rm -f "$PIDFILE" 2>/dev/null; exit 0' TERM INT HUP
+    echo $$ > "$PIDFILE"
+    while :; do
+        cmd_sample
+        sleep "$(interval)"
+    done
+}
+
+cmd_daemon_start() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+        echo "守护进程已在运行 pid=$(cat "$PIDFILE")"
+        return 0
+    fi
+    mkdir -p "$(dirname "$LOG")" 2>/dev/null
+    # 设备没有 nohup/setsid: 用子 shell + 忽略 HUP 让进程活过安装脚本/SSH 会话
+    ( trap '' HUP; exec "$SELF" daemon >> "$LOG" 2>&1 ) &
+    sleep 1
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+        echo "守护进程已启动 pid=$(cat "$PIDFILE")"
+        return 0
+    fi
+    echo "守护进程启动失败" >&2
+    return 1
+}
+
+cmd_daemon_stop() {
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+    return 0
+}
+
+case "${1:-}" in
+    init)         cmd_init ;;
+    sample)       cmd_sample ;;
+    status)       cmd_status ;;
+    report)       cmd_report ;;
+    set)          shift; cmd_set "$@" ;;
+    clear)        cmd_clear ;;
+    daemon)       cmd_daemon ;;
+    daemon-start) cmd_daemon_start ;;
+    daemon-stop)  cmd_daemon_stop ;;
+    *)            sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

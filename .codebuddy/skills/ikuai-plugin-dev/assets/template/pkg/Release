@@ -1,0 +1,3 @@
+plugin=plugdemo
+version=1.0.0
+comment=插件模板: 纯 shell + sqlite3 + LuaJIT 报告 + Web 页面 + 开机自启

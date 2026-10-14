@@ -1,3 +1,18 @@
+# 写插件请先用技能
+
+> **推荐: 用 [`.codebuddy/skills/ikuai-plugin-dev/`](.codebuddy/skills/ikuai-plugin-dev/SKILL.md) 技能来生成插件。**
+>
+> 它是本仓库内置的 **iKuai 插件开发技能**, 已经把"每次都要重新读源码才能搞清楚"的东西整理成参考资料:
+> **插件包格式 / 安装-开机-卸载生命周期 / Web 卡片-页面-后端接口 / 开机自启与常驻进程 /
+> sqlite3(设备 3.8.11.1 的语法边界) / LuaJIT(cjson、lsqlite3) 调用 / uClibc SDK 与 Rust 编译 /
+> 真机 SSH 安装-卸载-重启验证流程**。
+>
+> 附带一个**已在真机完整验证过的模板插件**(`assets/template/`)、脚手架脚本 `scripts/new-plugin.sh`
+> 与部署脚本 `scripts/deploy-plugin.sh` —— 用 CodeBuddy 打开本仓库后直接说
+> "用 ikuai-plugin-dev 技能做一个 XXX 插件"(或让它加载该技能)即可, 不必再从 `lib/plugin.sh` 反推。
+>
+> 该技能只覆盖**插件包**(基础包/签名不在其范围)。技能目录是点目录, 打包与签名会自动排除, 不影响基础包。
+
 # sdk
 
 如果需要自己编译程序，参考 [ikuai-sdk](https://github.com/deadash/ikuai-sdk)

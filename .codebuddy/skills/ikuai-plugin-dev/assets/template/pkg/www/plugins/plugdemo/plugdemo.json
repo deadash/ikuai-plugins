@@ -1,0 +1,1 @@
+{"name":"plugdemo","manufacturer":"deadash","version":"1.0.0","title":"插件模板","author":"deadash","description":"插件开发模板：shell 采集 + sqlite3 存储 + LuaJIT 统计 + Web 配置页，随开机自启。"}

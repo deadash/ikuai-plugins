@@ -1,0 +1,65 @@
+#!/bin/bash /etc/ikcommon
+#
+# function/plugdemo —— Web 后端接口(框架软链到 /usr/ikuai/function/plugdemo)。
+#
+# 分发链: openresty -> /usr/ikuai/function/func_api.sh plugdemo <action> k=v...
+# 约定:
+#   * 动作必须是 `name()` 形式(不能以下划线开头), 否则 func_api 判定 invalid action
+#   * show 动作里把数据塞进 __json_result__, 由 Show 包成 {"Result":30000,"Data":{...}}
+#   * 参数值不能带空格/引号(lua 侧会拒), 自由文本里的空格前端用 '+' 传, 这里还原
+#   * 失败: 向 stdout 打印错误并 return 1 -> 前端收到 Result=30002
+
+ROOT="/etc/mnt/plugins/plugdemo"
+BIN="$ROOT/bin/plugdemo"
+
+__show_data() {
+    local status error
+    if [ ! -x "$BIN" ]; then
+        error='插件未正确安装, 请重新安装'
+        json_append __json_result__ error:str
+        return 0
+    fi
+    status="$("$BIN" status 2>/dev/null)"; [ -n "$status" ] || status='{}'
+    json_append __json_result__ status:json
+}
+
+show()
+{
+    Show __json_result__
+}
+
+seting()
+{
+    case "$key" in
+        interval)
+            case "$value" in ''|*[!0-9]*) echo "间隔必须是整数秒"; return 1 ;; esac
+            [ "$value" -ge 2 ] && [ "$value" -le 86400 ] || { echo "间隔需在 2~86400 秒之间"; return 1; }
+            "$BIN" set interval "$value" >/dev/null 2>&1 && { echo "已保存"; return 0; }
+            echo "保存失败"; return 1 ;;
+        note)
+            value="$(printf '%s' "$value" | tr '+' ' ')"
+            "$BIN" set note "$value" >/dev/null 2>&1 && { echo "已保存"; return 0; }
+            echo "保存失败"; return 1 ;;
+        *) echo "不支持的配置项: $key"; return 1 ;;
+    esac
+}
+
+sample()
+{
+    "$BIN" sample >/dev/null 2>&1 && { echo "已采集一条记录"; return 0; }
+    echo "采集失败"; return 1
+}
+
+clear()
+{
+    "$BIN" clear >/dev/null 2>&1 && { echo "采样数据已清空"; return 0; }
+    echo "清空失败"; return 1
+}
+
+report()
+{
+    local report
+    report="$("$BIN" report 2>/dev/null)"; [ -n "$report" ] || report='{}'
+    json_append __json_result__ report:json
+    Show __json_result__
+}
