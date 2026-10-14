@@ -38,6 +38,11 @@ plugin_web_patch
 # 固件侧补丁: 磁盘分区页加第 6 种绑定业务(插件存储), 配套 disk_mgmt.sh 与 i18n
 plugin_fw_patch
 
+# 插件存储: 若用户把某块数据盘绑成了「插件存储」业务(6), 上面那次 init 已经把它挂到
+# /etc/disk_sys/plugin, 这里再把 /etc/mnt/plugins 挂到那块盘上(见 lib/plugin.sh)
+# —— 必须在 plugin_fw_patch 之后: 数据盘是那一步才挂起来的
+plugin_store_setup
+
 # 暴露 ikplugin 命令
 plugin_link_cli
 

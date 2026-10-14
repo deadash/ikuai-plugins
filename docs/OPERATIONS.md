@@ -198,6 +198,20 @@ ikexpand status      # 结果; 过程日志 /etc/log/ikguard/expand.log
 绑定记录在 sqlite `disk_mount` 表(`mt_purpose=6`), 分区第 2 个扇区还写了 `6` 做标记。
 **注意**: 绑了业务的分区会被扩容脚本当"保留分区"绕开(见上), 不会再被吃进 /etc/log。
 
+**这个业务怎么用(谁在消费它)**: 框架自己的**插件存储**。开机时
+`lib/plugin.sh:plugin_store_setup()`(在 `03_enable_plugins.sh` 里、`plugin_fw_patch` **之后**调用,
+因为数据盘是那一步才挂起来的)会:
+
+```
+绑了数据盘  -> 把 <数据盘>/plugins bind 挂到 /etc/mnt/plugins
+              插件本体落在数据盘上, 装多大都行; 所有既有路径(/etc/mnt/plugins/**)完全不变
+没绑数据盘  -> 什么都不做, 插件照旧放系统盘 /etc/mnt
+```
+
+首次切换会把系统盘上已有的插件**拷**过去(不删源, 挂载失败也不丢), 幂等、失败安全。
+「安全防护控制台 → 插件管理」页会显示当前落点: *插件存储: 数据盘(可用 x G)* 或 *系统盘*。
+实测: sda6(6.9G) 绑成插件存储后 `/etc/mnt/plugins` 即 sda6, 四个插件迁过去, `ikplugin` 用法不变。
+
 实现见 `lib/plugin.sh:plugin_fw_patch()` —— 业务枚举写死在固件三处, 而 `/usr/ikuai`
 每次开机还原, 所以框架每次开机重打一遍:
 

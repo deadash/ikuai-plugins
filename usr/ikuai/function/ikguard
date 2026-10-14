@@ -316,6 +316,7 @@ ikg_g() {
 
 __show_disk() {
     local mnt_mib log_mib tot mnt_used log_used log_avail max pend keep disk
+    local sdev mdev
     mnt_mib="$(ikg_part_mib sda3)"
     log_mib="$(ikg_part_mib sda5)"
     tot="$(ikg_part_mib sda)"
@@ -325,6 +326,9 @@ __show_disk() {
     max="$(ikg_expand_max)"
     pend="$(ikg_expand_pending)"
     keep="$(ikg_keep_start)"
+    # 插件存储落在数据盘(绑了「插件存储」业务)还是系统盘: 看插件目录和 /etc/mnt 是不是同一设备
+    sdev="$(stat -c %d "$IK_PLUGIN_DIR" 2>/dev/null)"
+    mdev="$(stat -c %d "$(dirname "$IK_PLUGIN_DIR")" 2>/dev/null)"
     disk="{"
     disk+="$(ikg_num mnt_mib "$mnt_mib"),"
     disk+="$(ikg_num mnt_used "$mnt_used"),"
@@ -334,6 +338,8 @@ __show_disk() {
     disk+="$(ikg_num total_mib "$tot"),"
     disk+="$(ikg_num max_mib "$max"),"
     disk+="$(ikg_num keep_mib "$( [ -n "$keep" ] && echo $(( (tot * 2048 - keep) / 2048 )) || echo 0 )"),"
+    disk+="$(ikg_num store_on_disk "$( { [ -n "$sdev" ] && [ -n "$mdev" ] && [ "$sdev" != "$mdev" ]; } && echo 1 || echo 0 )"),"
+    disk+="$(ikg_num store_avail "$(ikg_df_mib "$IK_PLUGIN_DIR" 4)"),"
     disk+="$(ikg_num pending "$pend"),"
     disk+="$(ikg_num reserve "$IK_EXPAND_RESERVE"),"
     disk+="$(ikg_kv expand_log "$(ikg_tail_file "$IK_EXPAND_LOG" 60)")"

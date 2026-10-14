@@ -44,6 +44,57 @@ plugin_ensure_dirs() {
     mkdir -p "$(P "$PLUGIN_ROOT")" "$(P "$PLUGIN_STATE")" "$(P "$PLUGIN_ARCHIVE")" 2>/dev/null
 }
 
+# ---------------------------------------------------------------- 插件存储
+# 「插件存储」是用户在「系统设置→磁盘分区」里把某块数据盘绑成的业务(见 plugin_fw_patch),
+# 绑定后 disk_mgmt 会把它挂到 /etc/disk_sys/plugin。
+#
+#   绑了数据盘: 把 /etc/mnt/plugins 变成 <数据盘>/plugins 的 bind 挂载 ——
+#               插件本体就落在数据盘上, 装多大都行; 而所有既有路径
+#               (/etc/mnt/plugins/**、ikplugin、ikguard、文档里的写法)完全不用改。
+#   没绑数据盘: 什么都不做, 插件照旧放系统盘 /etc/mnt(43.4M 那个分区)。
+#
+# 幂等(每次开机挂一次; 挂载不持久)、失败安全(任何一步不满足就保持原样, 不碰插件数据)。
+PLUGIN_STORE_LINK="/etc/disk_sys/plugin"
+plugin_store_ready() {
+    local link="$1" root="$2" d_root d_store
+    [ -d "$(P "$link")" ] || return 1
+    d_root="$(stat -c %d "$(P "$root")" 2>/dev/null)"
+    d_store="$(stat -c %d "$(P "$link")" 2>/dev/null)"
+    # 必须是"真的另一块盘": 绑定后这条软链指向 /etc/disk/<UUID> 挂载点
+    [ -n "$d_root" ] && [ -n "$d_store" ] && [ "$d_root" != "$d_store" ]
+}
+plugin_store_setup() {
+    local link="$PLUGIN_STORE_LINK" store="$PLUGIN_STORE_LINK/plugins"
+    local root
+
+    root="$(P "$PLUGIN_ROOT")"
+    grep -qs " $root " /proc/mounts 2>/dev/null && return 0        # 已经挂好了
+    plugin_store_ready "$link" "$PLUGIN_ROOT" || {
+        plugin_log "插件存储: 系统盘 $PLUGIN_ROOT (未绑定数据盘)"
+        return 0
+    }
+
+    mkdir -p "$(P "$store")" 2>/dev/null || {
+        plugin_log "插件存储: 数据盘上建目录失败, 本次沿用系统盘"
+        return 0
+    }
+    # 首次启用: 把系统盘上已有的插件搬过去(不删源, 万一挂载失败也不丢)
+    if [ -n "$(ls -A "$root" 2>/dev/null)" ] && \
+       [ -z "$(ls -A "$(P "$store")" 2>/dev/null)" ]; then
+        cp -a "$root"/. "$(P "$store")"/ 2>/dev/null || {
+            plugin_log "插件存储: 迁移已有插件失败, 本次沿用系统盘"
+            return 0
+        }
+        plugin_log "插件存储: 已把 $PLUGIN_ROOT 的内容迁到数据盘"
+    fi
+    mount --bind "$(P "$store")" "$root" 2>/dev/null || {
+        plugin_log "插件存储: bind 挂载失败, 本次沿用系统盘"
+        return 0
+    }
+    plugin_log "插件存储: 数据盘 $store (插件不再占系统盘 $PLUGIN_ROOT)"
+    return 0
+}
+
 # 从 Release 读取字段
 plugin_meta() {
     sed -n "s/^$2=//p" "$1/Release" 2>/dev/null | head -n1
@@ -544,6 +595,8 @@ plugin_fw_patch() {
     fi
 
     # 2) i18n: 业务名(页面用 common.disk-management.diskshowtable.binding_business_name6)
+    #    注意: 新键**插在 name5 前面**, 这样原有的逗号结构原封不动 ——
+    #    早先"插在 name5 后面"的写法会让 JSON 少一个逗号, i18n 直接加载失败、整个页面文案全乱。
     i18n="$(P /usr/ikuai/www/static/i18n)"
     for f in "$i18n"/zh-CN.json "$i18n"/zh-TW.json "$i18n"/en-US.json; do
         [ -f "$f" ] || continue
@@ -554,9 +607,10 @@ plugin_fw_patch() {
             *)          label="插件存储" ;;
         esac
         tmp="$(mktemp)" || continue
-        sed -r "s|(\\\"binding_business_name5\\\": *\\\"[^\\\"]*\\\"),?|\1,\n        \\\"binding_business_name6\\\": \\\"$label\\\"|" \
+        sed "s|\"binding_business_name5\": \"[^\"]*\"|\"binding_business_name6\": \"$label\", &|" \
             "$f" > "$tmp" 2>/dev/null
-        if grep -q 'binding_business_name6' "$tmp" 2>/dev/null; then
+        # 复核: 新键必须紧跟着 name5(说明逗号结构没被破坏)
+        if grep -q "binding_business_name6\": \"$label\", \"binding_business_name5\"" "$tmp" 2>/dev/null; then
             cat "$tmp" > "$f"
             n=$((n + 1))
         else

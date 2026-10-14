@@ -108,6 +108,7 @@
     <button class="pri" onclick="gotoExpand()">扩容…</button>
   </div>
   <div class="msg" id="d-note"></div>
+  <div class="msg" id="d-store"></div>
 
   <div style="margin:10px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
     <input type="file" id="zipfile" accept=".zip">
@@ -239,6 +240,20 @@ function renderDisk(k) {
     note.innerHTML = '已提交扩容请求：重启后 /etc/mnt → <b>' + fmtG(pend) + '</b>（待执行）';
   } else {
     note.textContent = '';
+  }
+
+  // 插件到底存在哪: 数据盘(绑了「插件存储」业务) 还是系统盘
+  var st = document.getElementById('d-store');
+  if (st) {
+    if (Number(k.store_on_disk) === 1) {
+      st.className = 'msg ok';
+      st.innerHTML = '插件存储：<b>数据盘</b>（可用 ' + fmtG(k.store_avail) +
+          '）—— 插件装在数据盘上，装多大都不受系统盘限制。';
+    } else {
+      st.className = 'msg warn';
+      st.innerHTML = '插件存储：<b>系统盘</b>（可用 ' + fmtG(k.store_avail) +
+          '）—— 想让它挪到数据盘，去「系统设置 → 磁盘分区」把某块盘绑定成「插件存储」再重启。';
+    }
   }
 
   // 工具页
