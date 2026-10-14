@@ -35,6 +35,9 @@ plugin_function_link
 # 去掉「插件管理」页"需要绑定爱快云平台"的前端拦截(本框架插件不依赖云平台)
 plugin_web_patch
 
+# 固件侧补丁: 磁盘分区页加第 6 种绑定业务(插件存储), 配套 disk_mgmt.sh 与 i18n
+plugin_fw_patch
+
 # 暴露 ikplugin 命令
 plugin_link_cli
 

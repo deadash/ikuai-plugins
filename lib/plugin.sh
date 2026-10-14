@@ -363,10 +363,12 @@ plugin_scan_zips() {
     done
 }
 
-# 暴露命令行 /usr/sbin/ikplugin
+# 暴露命令行 /usr/sbin/ikplugin、/usr/sbin/ikexpand
 plugin_link_cli() {
     mkdir -p "$(P /usr/sbin)" 2>/dev/null
     ln -sf "$(P /etc/mnt/.boot/bin/ikplugin)" "$(P /usr/sbin)/ikplugin" 2>/dev/null
+    # ikexpand: 给 /etc/mnt 扩容(写请求 -> 开机时由 scripts/09 执行)
+    ln -sf "$(P /etc/mnt/.boot/bin/ikexpand)" "$(P /usr/sbin)/ikexpand" 2>/dev/null
 }
 
 # ---------------------------------------------------------------- Web 插件(网页版)
@@ -434,6 +436,7 @@ plugin_web_sync() {
 #   3) 点开插件后小标题写死的 "Docker" 文案改成 "插件"
 #   4) 顶部"爱快e云APP 掌上办"云绑定二维码弹框不再弹出(tipCloudBind=!0 -> !1)
 #   5) 插件卡片显示 title 而不是 name(卡片的 name 必须是文件名, 显示不友好)
+#   6) 「系统设置→磁盘分区」的"绑定业务"下拉加第 6 项 —— 插件存储(见 plugin_fw_patch)
 # 前端分包是 gzip 静态资源, 做法: 解开 -> sed 改写 -> 重新压缩 -> 复核后写回。
 plugin_web_patch() {
     local dir f tmp patched gz n=0 want_ub want_dir want_title
@@ -446,21 +449,25 @@ plugin_web_patch() {
 
     for f in "$dir"/*.js.gz; do
         [ -f "$f" ] || continue
-        zcat "$f" 2>/dev/null | grep -q -e "Plugin_management" -e "plugins/docker/" -e "tipCloudBind" 2>/dev/null || continue
+        zcat "$f" 2>/dev/null | grep -q -e "Plugin_management" -e "plugins/docker/" -e "tipCloudBind" -e "binding_business_name" 2>/dev/null || continue
 
         tmp="$(mktemp)"; patched="$(mktemp)"; gz="$(mktemp)"
         if ! zcat "$f" > "$tmp" 2>/dev/null; then
             rm -f "$tmp" "$patched" "$gz"; continue
         fi
 
-        want_ub=0; want_dir=0; want_title=0; want_bind=0; want_label=0
+        want_ub=0; want_dir=0; want_title=0; want_bind=0; want_label=0; want_purpose=0; want_opt=0
         grep -q 'yunbindstatus=""!=i.code?2:1' "$tmp" 2>/dev/null && want_ub=1
         grep -q 'plugins/docker/' "$tmp" 2>/dev/null && want_dir=1
         grep -q 't\._v("Docker")' "$tmp" 2>/dev/null && want_title=1
         grep -q 'tipCloudBind=!0' "$tmp" 2>/dev/null && want_bind=1
         grep -q '_s(e\.name)' "$tmp" 2>/dev/null && want_label=1
+        # 磁盘分区页: 绑定业务下拉加第 6 项(插件存储) + 表格里的业务名数组加第 7 项
+        grep -q 't\.\$t(i+"5")\]\[1\*s\]' "$tmp" 2>/dev/null && want_purpose=1
+        grep -q 'binding_business_name4")))]),t\._v(" "),' "$tmp" 2>/dev/null && want_opt=1
         if [ "$want_ub" = 0 ] && [ "$want_dir" = 0 ] && [ "$want_title" = 0 ] && \
-           [ "$want_bind" = 0 ] && [ "$want_label" = 0 ]; then
+           [ "$want_bind" = 0 ] && [ "$want_label" = 0 ] && \
+           [ "$want_purpose" = 0 ] && [ "$want_opt" = 0 ]; then
             rm -f "$tmp" "$patched" "$gz"; continue
         fi
 
@@ -468,23 +475,104 @@ plugin_web_patch() {
             -e 's|plugins/docker/|plugins/app/|g' \
             -e 's|t\._v("Docker")|t._v("插件")|g' \
             -e 's|\.tipCloudBind=!0|.tipCloudBind=!1|g' \
-            -e 's@_s(e\.name)@_s(e.title||e.name)@g' "$tmp" > "$patched"
+            -e 's@_s(e\.name)@_s(e.title||e.name)@g' \
+            -e 's|t\.\$t(i+"5")\]\[1\*s\]|t.$t(i+"5"),t.$t(i+"6")][1*s]|g' \
+            -e 's|binding_business_name4")))]),t\._v(" "),|binding_business_name4")))]),t._v(" "),e("option",{attrs:{value:"6"}},[t._v(t._s(t.$t("common.disk-management.diskshowtable.binding_business_name6")))]),t._v(" "),|g' \
+            "$tmp" > "$patched"
 
         if gzip -9 -c < "$patched" > "$gz" 2>/dev/null && \
            { [ "$want_ub" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'yunbindstatus=2'; } && \
            { [ "$want_dir" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'plugins/app/'; } && \
            { [ "$want_title" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 't._v("插件")'; } && \
            { [ "$want_bind" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'tipCloudBind=!1'; } && \
-           { [ "$want_label" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'e.title||e.name'; }; then
+           { [ "$want_label" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'e.title||e.name'; } && \
+           { [ "$want_purpose" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 't\.\$t(i+"6")\]\[1\*s\]'; } && \
+           { [ "$want_opt" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'binding_business_name6'; }; then
             cat "$gz" > "$f"
             n=$((n + 1))
-            plugin_log "  已打补丁: $(basename "$f") (云拦截=$want_ub 目录=$want_dir 标题=$want_title 云弹框=$want_bind 卡片名=$want_label)"
+            plugin_log "  已打补丁: $(basename "$f") (云拦截=$want_ub 目录=$want_dir 标题=$want_title 云弹框=$want_bind 卡片名=$want_label 业务下拉=$want_opt 业务名表=$want_purpose)"
         else
             plugin_log "  补丁未生效(保留原文件): $(basename "$f")"
         fi
         rm -f "$tmp" "$patched" "$gz"
     done
     plugin_log "Web 前端补丁完成(修改 $n 个分包)"
+    return 0
+}
+
+# ------------------------------------------------------------------ 固件侧补丁
+# 给 iKuai 自带「系统设置→磁盘分区」加第 6 种绑定业务 = **插件存储**。
+#
+# 为什么要打补丁: 业务枚举是写死在固件里的三处 ——
+#   1) /usr/ikuai/script/disk_mgmt.sh 的 __link_setting(): purpose -> 链接路径
+#   2) 同一个文件 partition_set(): 哪些 purpose 不需要用户起名
+#   3) 磁盘分区页分包(下拉 option + 表格里的业务名数组) + www/static/i18n/*.json
+# 而 /usr/ikuai 是只读固件、每次开机还原, 所以框架每次开机都得重打一遍。
+#
+# 绑定后该分区会被挂到 /etc/disk_sys/plugin(见 __link_setting),
+# 于是插件/框架的大件数据可以直接放那块数据盘, 不再受 43.4M 系统盘(/etc/mnt)限制。
+plugin_fw_patch() {
+    local s tmp n=0 i18n f label
+    s="$(P /usr/ikuai/script/disk_mgmt.sh)"
+
+    # 1) 业务枚举: __link_setting 加 6), partition_set 的"不用起名"列表加 6
+    if [ -f "$s" ] && ! grep -q 'disk_sys/plugin' "$s" 2>/dev/null; then
+        tmp="$(mktemp)" || tmp=""
+        if [ -n "$tmp" ]; then
+            awk -v ins=1 '
+                { print }
+                /__link_replace \$uuid \/etc\/disk_sys\/dingtalk/ {
+                    if (ins) {
+                        print "\t\t;;"
+                        print "\t6)"
+                        print "\t\t__link_replace $uuid /etc/disk_sys/plugin"
+                        ins = 0
+                    }
+                }
+            ' "$s" > "$tmp" 2>/dev/null
+            sed -i 's/^\t2|3|4|5)/\t2|3|4|5|6)/' "$tmp" 2>/dev/null
+            if grep -q 'disk_sys/plugin' "$tmp" 2>/dev/null && \
+               grep -q '2|3|4|5|6)' "$tmp" 2>/dev/null; then
+                cat "$tmp" > "$s"
+                n=$((n + 1))
+                plugin_log "  已补丁 disk_mgmt.sh(绑定业务 6=插件存储 -> /etc/disk_sys/plugin)"
+            else
+                plugin_log "  disk_mgmt.sh 补丁未生效(保留原文件)"
+            fi
+            rm -f "$tmp"
+        fi
+    fi
+
+    # 2) i18n: 业务名(页面用 common.disk-management.diskshowtable.binding_business_name6)
+    i18n="$(P /usr/ikuai/www/static/i18n)"
+    for f in "$i18n"/zh-CN.json "$i18n"/zh-TW.json "$i18n"/en-US.json; do
+        [ -f "$f" ] || continue
+        grep -q 'binding_business_name6' "$f" 2>/dev/null && continue
+        case "${f##*/}" in
+            en-US.json) label="Plugin storage" ;;
+            zh-TW.json) label="插件存儲" ;;
+            *)          label="插件存储" ;;
+        esac
+        tmp="$(mktemp)" || continue
+        sed -r "s|(\\\"binding_business_name5\\\": *\\\"[^\\\"]*\\\"),?|\1,\n        \\\"binding_business_name6\\\": \\\"$label\\\"|" \
+            "$f" > "$tmp" 2>/dev/null
+        if grep -q 'binding_business_name6' "$tmp" 2>/dev/null; then
+            cat "$tmp" > "$f"
+            n=$((n + 1))
+        else
+            plugin_log "  i18n 补丁未生效(保留原文件): ${f##*/}"
+        fi
+        rm -f "$tmp"
+    done
+
+    # 3) 已经绑定过 purpose=6 的分区, 补丁生效后补一次链接与挂载
+    #    (IK_DIR_CACHE=/tmp/iktmp/cache, 由 iKuai 开机时 init() 从 sqlite 刷进来)
+    if grep -qs 'mt_purpose=6' "$(P /tmp/iktmp/cache/disk_mount)" 2>/dev/null; then
+        "$s" init >/dev/null 2>&1
+        plugin_log "  已重新应用磁盘挂载(补 purpose=6 的链接)"
+    fi
+
+    plugin_log "固件侧补丁完成(修改 $n 处)"
     return 0
 }
 

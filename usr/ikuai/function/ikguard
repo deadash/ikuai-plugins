@@ -4,13 +4,14 @@
 # 页面: 系统设置 -> 插件管理 -> ikguard (前端 /plugins/app/ikguard.html)
 #
 # 动作:
-#   show    TYPE=data,flags,plugins,eula,logs,probe  读取状态/开关/插件/条款/日志/自检结果
+#   show    TYPE=data,flags,plugins,eula,logs,probe,disk  读取状态/开关/插件/条款/日志/自检/磁盘
 #   seting  key=<配置项> value=<0|1>                 修改 /etc/mnt/boot_args 开关并立即生效
 #           (probe=1 加入定时自检, =0 移除; 其余开关见前端列表)
 #   eula    op=accept|reject                         记录《使用条款》是否已同意(插件功能前置条件)
 #   apply   -                                        重新应用后门阻断 + 审计
 #   plugin  op=scan|install|remove|list [name=...]    插件管理(install 用于安装刚上传的 zip)
 #   probe   -                                        云端连通性自检(手动立即执行一次)
+#   expand  op=set|pending|cancel|log size=<MiB>      系统盘(/etc/mnt)扩容(提交后重启执行)
 #   logclear -                                       清空审计日志(含滚动出的 .1)
 #
 # 审计取证(audit=1)是**常驻被动采集进程**(conntrack 事件 + 内核封锁日志), 不占 cron;
@@ -31,6 +32,17 @@ IK_IKPLUGIN="$BOOT_DIR/bin/ikplugin"
 IK_IKAUDIT="$BOOT_DIR/bin/ikaudit"
 IK_PROBE_OUT="$IK_LOG_DIR/last-probe.txt"
 IK_AU_PIDFILE="/tmp/.ikaudit/collect.pid"   # 被动采集器 pid 文件(由 ikaudit collect-start 写入)
+
+# 系统盘(/etc/mnt)扩容:
+#   /etc/mnt 出厂只有 43.4M, 装不下带二进制的插件; 设备上还有 15.5G 的 /etc/log。
+#   bin/ikexpand 把"目标大小"写成请求(/etc/mnt/.expand), 开机脚本
+#   scripts/09_expand_mnt.sh 在启动时用设备自带 fdisk/mke2fs/dd 完成一次扩容,
+#   期间会自动再重启一次。全过程日志: /etc/log/ikguard/expand.log
+IK_IKEXPAND="$BOOT_DIR/bin/ikexpand"
+IK_EXPAND_LOG="$IK_LOG_DIR/expand.log"
+IK_EXPAND_REQ="$IK_PLUGIN_DIR/.expand"
+# 扩容时给日志盘(/etc/log)保留的余量(MiB): 目标大小不能吃掉它已占用的空间和这个余量
+IK_EXPAND_RESERVE=256
 
 # ---------------------------------------------------------------- 工具
 
@@ -237,6 +249,98 @@ __show_probe() {
     json_append __json_result__ probe:json
 }
 
+# ---------------------------------------------------------------- 磁盘 / 扩容
+
+# 分区大小(MiB)  ikg_part_mib sda3
+ikg_part_mib() {
+    local s
+    s="$(cat "/sys/class/block/$1/size" 2>/dev/null | tr -d ' \r')"
+    case "$s" in '' | *[!0-9]*) return 1 ;; esac
+    echo $((s / 2048))
+}
+
+# 分区起始扇区  ikg_part_start sda3
+ikg_part_start() {
+    cat "/sys/class/block/$1/start" 2>/dev/null | tr -d ' \r'
+}
+
+# df 的某一列(MiB)  ikg_df_mib <挂载点> <列号>
+ikg_df_mib() {
+    df -m "$1" 2>/dev/null | tail -n1 | awk -v c="$2" '{print $c}' | tr -d ' \r'
+}
+
+# 第一个"不能动"的逻辑分区(sda6 及以后, 比如用户绑了业务的数据盘)的起始扇区; 没有则空。
+ikg_keep_start() {
+    local p s lim=""
+    for p in sda6 sda7 sda8 sda9 sda10 sda11 sda12; do
+        s="$(ikg_part_start "$p")"
+        case "$s" in '' | *[!0-9]*) continue ;; esac
+        { [ -z "$lim" ] || [ "$s" -lt "$lim" ]; } && lim="$s"
+    done
+    [ -n "$lim" ] && echo "$lim"
+}
+
+# 扩容上限(MiB)。规则与 scripts/09_expand_mnt.sh 完全一致:
+#   新的 /etc/log 要放得下它现在的内容(再加 IK_EXPAND_RESERVE 余量),
+#   而且不许动 sda6 这类保留分区 —— 所以 sda5 的可用上界是
+#   (保留分区起始 - 2049) 或 磁盘末尾。
+#   /etc/mnt=[start, start+mib*2048-1] 之后: 1MiB 对齐 -> EBR(2048) -> /etc/log
+ikg_expand_max() {
+    local start total upp used keep need_sec max_mib
+    start="$(ikg_part_start sda3)"
+    total="$(cat /sys/class/block/sda/size 2>/dev/null | tr -d ' \r')"
+    case "${start}${total}" in *[!0-9]* | '') return 1 ;; esac
+
+    upp=$((total - 1))
+    keep="$(ikg_keep_start)"
+    [ -n "$keep" ] && upp=$((keep - 2049))
+
+    used="$(ikg_df_mib /etc/log 3)"
+    case "$used" in '' | *[!0-9]*) used=0 ;; esac
+    need_sec=$(( (used + IK_EXPAND_RESERVE) * 2048 ))
+    [ "$need_sec" -lt $((256 * 2048)) ] && need_sec=$((256 * 2048))
+
+    max_mib=$(( (upp - need_sec - 2047 - start) / 2048 ))
+    [ "$max_mib" -gt 0 ] && echo "$max_mib"
+}
+
+# 待执行的扩容请求(MiB), 没有则空
+ikg_expand_pending() {
+    sed -n 's/^mnt_mib=//p' "$IK_EXPAND_REQ" 2>/dev/null | head -n1 | tr -d ' \r'
+}
+
+# MiB -> 给人看的 G(1024 进制), 页面/提示统一用 G
+ikg_g() {
+    awk -v m="${1:-0}" 'BEGIN{ g = m / 1024; if (g >= 100) printf "%.0fG", g; else printf "%.2fG", g }'
+}
+
+__show_disk() {
+    local mnt_mib log_mib tot mnt_used log_used log_avail max pend keep disk
+    mnt_mib="$(ikg_part_mib sda3)"
+    log_mib="$(ikg_part_mib sda5)"
+    tot="$(ikg_part_mib sda)"
+    mnt_used="$(ikg_df_mib /etc/mnt 3)"
+    log_used="$(ikg_df_mib /etc/log 3)"
+    log_avail="$(ikg_df_mib /etc/log 4)"
+    max="$(ikg_expand_max)"
+    pend="$(ikg_expand_pending)"
+    keep="$(ikg_keep_start)"
+    disk="{"
+    disk+="$(ikg_num mnt_mib "$mnt_mib"),"
+    disk+="$(ikg_num mnt_used "$mnt_used"),"
+    disk+="$(ikg_num log_mib "$log_mib"),"
+    disk+="$(ikg_num log_used "$log_used"),"
+    disk+="$(ikg_num log_avail "$log_avail"),"
+    disk+="$(ikg_num total_mib "$tot"),"
+    disk+="$(ikg_num max_mib "$max"),"
+    disk+="$(ikg_num keep_mib "$( [ -n "$keep" ] && echo $(( (tot * 2048 - keep) / 2048 )) || echo 0 )"),"
+    disk+="$(ikg_num pending "$pend"),"
+    disk+="$(ikg_num reserve "$IK_EXPAND_RESERVE"),"
+    disk+="$(ikg_kv expand_log "$(ikg_tail_file "$IK_EXPAND_LOG" 60)")"
+    disk+="}"
+    json_append __json_result__ disk:json
+}
+
 __show_logs() {
     local audit dns boot conn block report
     audit="$(ikg_tail_file "$(ikg_day_file audit)" 120)"
@@ -404,6 +508,66 @@ plugin()
 
     # 插件变更后同步 Web 资源与卡片
     ikg_run_script 03_enable_plugins.sh
+    return 0
+}
+
+# 系统盘(/etc/mnt)扩容: 这里只写"目标大小"请求, 真正的改盘由开机脚本
+# scripts/09_expand_mnt.sh 在启动时完成(用设备自带 fdisk/mke2fs/dd), 会自动重启一次。
+# 提交成功 -> 记审计 + 8 秒后自动重启; 失败 -> 记审计并原样把原因返回给页面。
+expand()
+{
+    local op="${op:-pending}" size="${size:-}" out rc max pend
+
+    case "$op" in
+    pending)
+        pend="$(ikg_expand_pending)"
+        if [ -n "$pend" ]; then
+            echo "待执行扩容请求: /etc/mnt -> ${pend} MiB(重启后由开机脚本执行)"
+        else
+            echo "当前没有待执行的扩容请求"
+        fi
+        ;;
+
+    log)
+        ikg_tail_file "$IK_EXPAND_LOG" 100
+        ;;
+
+    cancel)
+        rm -f "$IK_EXPAND_REQ" "$IK_PLUGIN_DIR/.expand.tries" 2>/dev/null
+        ikg_audit INFO "disk.expand" "已撤销扩容请求"
+        echo "已撤销扩容请求"
+        ;;
+
+    set)
+        case "$size" in
+        '' | *[!0-9]*) echo "请填写要扩到的系统盘大小"; return 1 ;;
+        esac
+        test -x "$IK_IKEXPAND" || { echo "缺少扩容工具: $IK_IKEXPAND"; return 1; }
+        max="$(ikg_expand_max)"
+        if [ -n "$max" ] && [ "$size" -gt "$max" ]; then
+            ikg_audit WARN "disk.expand" "拒绝扩容 $(ikg_g "$size"): 超过上限 $(ikg_g "$max")"
+            echo "超过上限: 最多 $(ikg_g "$max")(要给日志盘 /etc/log 留出它已占用的空间和 $(ikg_g "$IK_EXPAND_RESERVE") 余量, 且不能动保留分区)"
+            return 1
+        fi
+        out="$("$IK_IKEXPAND" set "$size" 2>&1)"
+        rc=$?
+        if [ "$rc" != 0 ]; then
+            ikg_audit WARN "disk.expand" "扩容请求失败($(ikg_g "$size")): $(printf '%s' "$out" | tr '\n' ' ')"
+            printf '%s\n' "$out"
+            return 1
+        fi
+        ikg_audit INFO "disk.expand" "已提交扩容请求: /etc/mnt -> $(ikg_g "$size"), 即将重启执行"
+        printf '%s\n' "$out"
+        echo "即将重启设备完成扩容: 启动过程中自动改盘, 期间会再自动重启一次(约 1~2 分钟)"
+        # 留几秒给页面显示提示, 然后重启; trap 忽略 HUP, 免得请求结束把这个子进程带走
+        (trap '' HUP; sleep 8; reboot) >/dev/null 2>&1 &
+        ;;
+
+    *)
+        echo "不支持的 op: $op"
+        return 1
+        ;;
+    esac
     return 0
 }
 

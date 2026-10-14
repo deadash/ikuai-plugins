@@ -1,0 +1,86 @@
+#!/bin/bash
+#
+# ikexpand —— 给 /etc/mnt 扩容(只写"目标大小"这个请求, 重启后由开机脚本执行)
+#
+#   ikexpand status          看当前大小 / 待执行请求 / 上次结果
+#   ikexpand set <MiB>       写入扩容请求(不立刻改盘; 重启后在开机流程里执行)
+#   ikexpand cancel          撤销待执行的请求
+#
+# 说明:
+#   * 只扩不缩。执行时会用设备自带的 fdisk / mke2fs / dd 重建 /etc/mnt 与 /etc/log
+#     两个分区(内容保留、文件系统 UUID 不变), 并**自动重启两次**才能生效。
+#     细节见 scripts/09_expand_mnt.sh 与 docs/OPERATIONS.md §1.3。
+#   * 请求写在 /etc/mnt/.expand(持久盘), 重启不丢。
+#
+set -u
+
+ROOT=/etc/mnt
+REQ="$ROOT/.expand"
+SYSFS=/sys/class/block
+
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+
+part_size() { cat "$SYSFS/$1/size" 2>/dev/null || echo 0; }
+
+cur_secs=$(part_size sda3)
+cur_mib=$((cur_secs / 2048))
+log_secs=$(part_size sda5)
+tot_secs=$(part_size sda)
+tot_mib=$((tot_secs / 2048))
+
+case "${1:-status}" in
+status)
+    echo "磁盘总容量   : ${tot_mib} MiB"
+    echo "当前 /etc/mnt: ${cur_mib} MiB"
+    echo "当前 /etc/log: $((log_secs / 2048)) MiB"
+    if [ -f "$REQ" ]; then
+        echo "待执行请求   : $(sed -n 's/^mnt_mib=//p' "$REQ" | head -1) MiB"
+        echo "  提交时间   : $(sed -n 's/^requested_at=//p' "$REQ" | head -1)"
+        echo "  重启后由开机脚本执行(会再自动重启一次生效)"
+    else
+        echo "待执行请求   : 无"
+    fi
+    [ -f "$ROOT/.expand.log" ] && {
+        echo "--- 上次执行日志(/etc/mnt/.expand.log) ---"
+        cat "$ROOT/.expand.log"
+    }
+    [ -f /etc/log/ikguard/expand.log ] && {
+        echo "--- 历史(/etc/log/ikguard/expand.log 末尾 20 行) ---"
+        tail -n 20 /etc/log/ikguard/expand.log
+    }
+    ;;
+
+set)
+    mib="${2:-}"
+    case "$mib" in ''|*[!0-9]*) usage; exit 1 ;; esac
+    [ "$tot_secs" -gt 0 ] || { echo "!! 读不到磁盘大小" >&2; exit 1; }
+    if [ "$mib" -le "$cur_mib" ]; then
+        echo "!! ${mib} MiB 不大于当前的 ${cur_mib} MiB(本工具只扩不缩)" >&2
+        exit 1
+    fi
+    # /etc/log 至少留 256MiB(够放日志/插件数据)
+    if [ $((tot_mib - mib - 1)) -lt 256 ]; then
+        echo "!! ${mib} MiB 太大: /etc/log 至少要留 256MiB(最多 $((tot_mib - 257)) MiB)" >&2
+        exit 1
+    fi
+    {
+        echo "mnt_mib=$mib"
+        echo "requested_at=$(date '+%F %T')"
+        echo "requested_by=${SRC_IP:-cli}"
+    } > "$REQ"
+    rm -f "$ROOT/.expand.tries" 2>/dev/null
+    echo
+    echo "已写入扩容请求: /etc/mnt -> ${mib} MiB (重启设备后由开机脚本执行)"
+    echo "进度与结果: ikexpand status  或 /etc/log/ikguard/expand.log"
+    ;;
+
+cancel)
+    rm -f "$REQ" "$ROOT/.expand.tries" 2>/dev/null
+    echo "已撤销扩容请求"
+    ;;
+
+*)
+    usage
+    exit 1
+    ;;
+esac

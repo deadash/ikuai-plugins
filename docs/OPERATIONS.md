@@ -27,26 +27,95 @@
 
 设备上**不需要新建分区**，固件已自带一个 15.5G 的持久日志分区，直接用它落日志即可。
 
-实测(SSH):
+实测(SSH; `/etc/mnt` 已按 §1.2 从 50M 扩到 1G):
 
 ```
 $ df -h
 Filesystem                Size      Used Available Use% Mounted on
 /dev/root               111.0M    107.8M    810.0K  99% /          <- 根分区, 每次重启还原, 只剩 ~800K
 tmpfs                     1.9G      4.3M      1.9G   0% /tmp
-/dev/sda3                43.4M      1.2M     38.7M   3% /etc/mnt    <- 持久盘, 放框架/插件
-/dev/sda5                15.5G      3.0M     14.7G   0% /etc/log    <- 持久日志分区(16G 磁盘的剩余空间)
+/dev/sda3               988.4M      1.5M    931.7M   0% /etc/mnt    <- 持久盘, 放框架/插件
+/dev/sda5                14.6G     20.4M     13.8G   0% /etc/log    <- 持久日志分区
 ```
 
 结论与约定:
 
 | 用途 | 位置 | 说明 |
 | --- | --- | --- |
-| 框架本体 / 插件包 | `/etc/mnt/.boot`、`/etc/mnt/plugins` | 38.7M 可用，持久，重启不丢 |
-| 审计日志 / DNS 抓包 / 体检报告 | `/etc/log/ikguard/` | 15.5G 可用，持久，重启不丢 |
+| 框架本体 / 插件包 | `/etc/mnt/.boot`、`/etc/mnt/plugins` | 931M 可用，持久，重启不丢 |
+| 审计日志 / DNS 抓包 / 体检报告 | `/etc/log/ikguard/` | 14.6G 可用，持久，重启不丢 |
 | 运行时软链(Web 资源、后端接口、/usr/sbin) | `/` 根分区 | 每次重启由 `scripts/03_enable_plugins.sh` 重建，**只放软链和几 KB 的页面** |
 
 根分区只剩 800K，务必不要把大文件写进 `/`（框架只往根分区放软链和 `www` 插件页面）。
+
+### 1.2 宿主机侧手工扩容(离线; 50M -> 1G 实测)
+
+> 日常在设备上执行 `ikexpand set` 重启即可(**见 §1.3**)。这一节是没有设备、需要离线
+> 动盘、或者要改布局数值时的等价手工步骤。
+
+出厂分区表里 sda3(`/etc/mnt`) 只有 50M，装不下带二进制的插件；而磁盘另外 15.9G 全给了
+`/etc/log`(sda5，位于扩展分区 sda4 内)且基本空闲。所以**直接从 sda5 挪 1G 给 sda3**：
+
+```
+                Start            End         Size           用途
+sda1             2048         104447          50M          根(只读镜像展开, 不动)
+sda2           104448         114687           5M          预留(不动)
+sda3           114688    217087 -> 2211839    50M -> 1G     /etc/mnt   ← 变大
+sda4         217088 -> 2211840   33554431     扩展分区        ← 整体后移
+sda5       219136 -> 2213888     33554431     15.9G -> 14.9G /etc/log   ← 后移并缩小
+```
+
+**必须离线做**(设备关机，在宿主机上用 `qemu-nbd` 直接操作 qcow2)；在线改分区表会失败或丢数据。
+要点：sda3 **只扩分区尾 + `resize2fs`，数据原地不动**；sda5 要给 sda3 让位只能整体后移，
+先把它的文件系统缩到最小再 dd 搬走；**两个分区的文件系统 UUID 必须保持不变**(固件/框架按 UUID 挂载)。
+
+```bash
+# 0) 宿主机: 整盘备份, 再优雅关机
+cp --sparse=always ikuai.qcow2 ikuai.qcow2.bak
+printf 'system_powerdown\n' | socat - UNIX-CONNECT:/tmp/ikuai-mon.sock   # 等 qemu 退出
+
+# 1) 离线挂上磁盘
+sudo modprobe nbd max_part=16
+sudo qemu-nbd -c /dev/nbd0 -f qcow2 ikuai.qcow2 && sudo partprobe /dev/nbd0
+
+# 2) 文件系统必须干净才能 resize; 并记录 UUID(保持挂载用)
+sudo e2fsck -f -y /dev/nbd0p3 ; sudo e2fsck -f -y /dev/nbd0p5
+sudo blkid /dev/nbd0p3 /dev/nbd0p5
+
+# 3) 文件级兜底备份
+sudo mkdir -p /mnt/ik3 /mnt/ik5
+sudo mount -o ro /dev/nbd0p3 /mnt/ik3 ; sudo mount -o ro /dev/nbd0p5 /mnt/ik5
+sudo tar -C /mnt/ik3 -czpf backup-mnt.tar.gz . ; sudo tar -C /mnt/ik5 -czpf backup-log.tar.gz .
+sudo umount /mnt/ik3 /mnt/ik5
+
+# 4) sda5 缩到最小并拷出来(实测 ~194M)
+sudo resize2fs -M /dev/nbd0p5
+B=$(sudo dumpe2fs -h /dev/nbd0p5 | awk '/^Block count:/{print $3}')
+sudo dd if=/dev/nbd0p5 of=sda5-fs.img bs=1M count=$(( B*4/1024 + 1 ))
+
+# 5) 改分区表: sda3 50M -> 1G
+sudo sfdisk --force --no-reread /dev/nbd0 <<'PT'
+label: dos
+label-id: 0xea97440f
+unit: sectors
+/dev/nbd0p1 : start=   2048, size= 102400, type=83
+/dev/nbd0p2 : start= 104448, size=  10240, type=83
+/dev/nbd0p3 : start= 114688, size=2097152, type=83
+/dev/nbd0p4 : start=2211840, size=31342592, type=5
+/dev/nbd0p5 : start=2213888, size=31340544, type=83
+PT
+sudo partprobe /dev/nbd0
+
+# 6) sda5 文件系统写回新偏移, 两个文件系统都长到分区大小
+sudo dd if=sda5-fs.img of=/dev/nbd0p5 bs=1M conv=notrunc
+sudo e2fsck -f -y /dev/nbd0p5 && sudo resize2fs /dev/nbd0p5
+sudo e2fsck -f -y /dev/nbd0p3 && sudo resize2fs /dev/nbd0p3
+sudo qemu-nbd -d /dev/nbd0
+# 起虚拟机: bash vm/run.sh
+```
+
+> 实测结果：`/etc/mnt` 988.4M、`/etc/log` 14.6G，插件与 `ikuai` 配置全部完好，重启后一切正常。
+> 以后还要扩就重复上面步骤（改 sda3/sda4/sda5 的 start/size）。
 
 ### 1.1 创建日志目录(已由框架自动完成，手工操作如下)
 
@@ -57,29 +126,89 @@ chmod 755 /etc/log/ikguard
 df -h /etc/log
 ```
 
-### 1.2 如果真的需要新分区/扩容
+### 1.3 设备端自动扩容(ikexpand, 推荐)
 
-设备使用 ext4 标准分区表(mbr)，磁盘为 `/dev/sda`：
-
-```
-sda1  50M   /        (根, 只读镜像展开, 重启还原)
-sda2   5M   (预留)
-sda3  50M   /etc/mnt (持久)
-sda4   1个扇区 (扩展分区标记)
-sda5  15.5G /etc/log (持久)
-```
-
-扩容步骤(仅在必要时，需谨慎)：
+设备上写一条"扩容请求", 重启后由开机脚本完成 —— 全程用**设备自带工具**
+(`fdisk` 改分区表 / `mke2fs` 重建文件系统 / `dd` 写盘), 不依赖宿主机、不引入自研二进制:
 
 ```bash
-fdisk -l /dev/sda                    # 查看现有分区
-fdisk /dev/sda                       # 删除并重建 sda5(起始扇区保持一致, 结束扇区扩大)
-resize2fs /dev/sda5                  # 在线扩容 ext4
-df -h /etc/log                       # 确认
+ikexpand status      # 看当前大小 / 待执行请求 / 上次结果
+ikexpand set 1024    # 目标 /etc/mnt = 1024 MiB(只扩不缩), 写入请求(不改盘)
+reboot               # 重启; 开机流程里执行扩容(会自动再重启一次)
+ikexpand status      # 结果; 过程日志 /etc/log/ikguard/expand.log
 ```
 
-> 更简单稳妥的做法是在 sda2 预留分区上 `mkfs.ext4` 后 `mount`，或者直接用 `/etc/log` —— 本框架
-> 默认就用 `/etc/log`，无需任何分区操作。
+组成: `bin/ikexpand`(写/查/撤请求) + `scripts/09_expand_mnt.sh`(开机执行器)。
+
+**也可以完全在网页上做**(推荐, 不用 SSH):
+
+1. 「系统设置 → 插件管理 → 安全防护控制台」→ **插件管理** 页顶部就是两块盘:
+   `系统盘 /etc/mnt` 与 `日志盘 /etc/log` 的容量/已用; **系统盘小于 1G 时会标红**,
+   旁边有「扩容…」按钮跳到「工具」页。
+2. **工具** 页的「系统盘(/etc/mnt)扩容」里填目标大小(**单位 G**) → 「提交扩容并重启」。
+   上限是算出来的: 磁盘总量 − 日志盘已用内容 − 256M 余量 − **保留分区**(有业务绑定的数据盘),
+   超过会被拒绝并提示, 当前值同样不允许(只扩不缩)。旁边「撤销待执行请求」可撤回。
+3. 点提交会先二次确认「**即将重启**」; 提交成功后设备自动重启, 在启动过程中改盘
+   (会再自动重启一次), 约 1~2 分钟恢复。成功与失败都会写日志:
+   `/etc/log/ikguard/expand.log`(引擎日志) 与 `/etc/log/ikguard/audit-*.log` 的 `disk.expand` 事件
+   (提交/拒绝/撤销/失败原因都记)。
+
+接口: `show TYPE=disk`(容量与待执行请求)、`expand op=set size=<MiB> | op=cancel | op=pending | op=log`。
+
+执行器第 1 次启动时做这些事:
+1. 算新布局: `/etc/mnt` = `[114688, 114688 + 目标MiB×2048)`, 扩展分区与 `/etc/log` 整体顺延;
+2. 把两个分区内容暂存到内存(`/tmp`), 请走正在用它们的进程, **真正卸载**它们
+   (不卸载的话内核回写会把刚写进去的新内容盖掉 —— 这条踩过坑);
+3. `mke2fs -d`(灌内容)`-U`(保持文件系统 UUID 不变)按新大小重建到镜像;
+   先 `e2fsck -fn` 自检 + 核对 UUID, 不过就放弃;
+4. `dd` 各自写到新偏移, 再**回读校验**;
+5. `fdisk` 写新分区表并复核 → 重启。
+
+只动属于框架自己的三处: `sda3`(/etc/mnt)、扩展区 `sda4`、扩展区里第一个逻辑分区 `sda5`(/etc/log)。
+**其它逻辑分区(`sda6` 及以后, 比如绑了业务的数据盘)只在扩展区里按原起止重建, 一个字节都不挪** ——
+它们会压缩 /etc/log 能用的上限, 所以界面上的"上限"要把它们算进去(见 §1.3 第 2 条)。
+
+顺序上**先写分区表、再写文件系统镜像**: 表写不对就把事前备份的 MBR/EBR 扇区 `dd` 回去再重启,
+此时盘上文件系统一个字节都没改, 回滚是干净的; 反过来先写镜像就没法回头。
+
+安全线: 动盘之前任何一步失败都直接放弃(分区表还是旧的, 系统照常能起, 下次开机重试);
+连续失败 3 次放弃并留日志。第 2 次启动只做收尾(清请求)并把日志并入 `expand.log`。
+
+> **为什么框架开机先把自己拷到 `/tmp/.boot` 再执行**(见 `boot.sh`): bash 是边读边执行脚本的,
+> 扩容要卸载 `/etc/mnt` —— 自己占着它既卸不掉(EBUSY)也读不下去。
+>
+> **代价**: 第 1 次启动要写 1G(mnt 镜像)+15G(log 镜像) ≈ 16G, VM 上约 100 秒。
+> 之所以不"只写非零块": busybox 的 `dd`/`cp` 没有 `conv=sparse`/`--sparse`。
+
+> 布局想改尺寸/顺序时, 直接改 `09_expand_mnt.sh` 里算 `ext_start/p5_start` 的那几行即可;
+> 没有设备时用 §1.2 的离线步骤做等价操作。
+
+### 1.4 把数据盘绑成"插件存储"(框架自加的绑定业务)
+
+「系统设置 → 磁盘分区」的**绑定业务**下拉里, 框架额外加了第 6 项 **插件存储**
+(固件原本只有 0不使用 / 1普通存储 / 2有余繁星 / 3缓存加速 / 4行为记录 / 5钉钉闪传)。
+选中它保存后, 该分区会被格式化(ext4)并挂到固定路径:
+
+```
+/etc/disk/<UUID>        <- 分区实际挂载点(disk_mgmt 自己维护)
+/etc/disk_sys/plugin    <- 业务 6 的落点(软链到上面)
+```
+
+于是插件/框架可以直接把大件数据放这块数据盘上, 不再受 43.4M 系统盘(/etc/mnt)限制。
+绑定记录在 sqlite `disk_mount` 表(`mt_purpose=6`), 分区第 2 个扇区还写了 `6` 做标记。
+**注意**: 绑了业务的分区会被扩容脚本当"保留分区"绕开(见上), 不会再被吃进 /etc/log。
+
+实现见 `lib/plugin.sh:plugin_fw_patch()` —— 业务枚举写死在固件三处, 而 `/usr/ikuai`
+每次开机还原, 所以框架每次开机重打一遍:
+
+1. `/usr/ikuai/script/disk_mgmt.sh`(`/usr/ikuai/function/disk_mgmt` 是它的软链):
+   `__link_setting()` 加 `6)` 分支 → `/etc/disk_sys/plugin`; `partition_set()` 的
+   "不需要起名"列表加 6(`2|3|4|5|6)`)
+2. 磁盘分区页分包: 下拉加 `<option value="6">`、表格里的业务名数组加第 7 项
+3. `/usr/ikuai/www/static/i18n/*.json`: 加 `binding_business_name6`
+
+补丁后若已存在 `mt_purpose=6` 的绑定, 框架会再跑一次 `disk_mgmt.sh init` 把挂载和软链补上。
+(实测: 绑定 sda6 = 6.9G 后, `/etc/disk_sys/plugin` 指向它, 重启后自动恢复。)
 
 ---
 

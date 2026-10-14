@@ -36,6 +36,11 @@
   .tool { border:1px solid var(--bd); border-radius:6px; padding:10px 12px; margin-bottom:10px; }
   .tool b { font-size:13px; }
   .tool .tip { margin:4px 0 8px; }
+  /* 插件页的"系统盘/日志盘"信息条 */
+  .diskbx { display:flex; gap:20px; align-items:center; flex-wrap:wrap; border:1px solid var(--bd); border-radius:6px; padding:8px 12px; margin:10px 0; background:var(--bg); }
+  .diskbx .di { font-size:12px; color:var(--mut); }
+  .diskbx .di b { display:block; font-size:14px; margin-top:2px; color:var(--fg); }
+  .diskbx .di b.err, .diskbx .di b.ok { font-weight:700; }
   .gate { position:fixed; inset:0; background:#f5f7fa; display:flex; align-items:center; justify-content:center; z-index:5; }
   .gate .in { width:min(520px,92vw); background:#fff; border:1px solid var(--bd); border-radius:10px; padding:26px; text-align:center; }
   .gate img { width:56px; height:56px; }
@@ -72,7 +77,7 @@
   <span class="tag">ikguard</span>
   <span style="flex:1"></span>
   <span class="msg" id="msg"></span>
-  <button onclick="load();loadLogs();">刷新</button>
+  <button onclick="load();loadLogs();loadDisk();">刷新</button>
 </div>
 
 <div class="row" id="cards"></div>
@@ -93,6 +98,17 @@
 <div class="pane" id="p-plugin">
   <div class="tip">插件包(<code>zip</code>)会上传到设备并解压安装到 <code>/etc/mnt/plugins/&lt;名称&gt;</code>；
     根分区每次重启还原，框架开机会自动重新铺开已安装插件。</div>
+
+  <!-- 系统盘/日志盘 + 扩容入口: 系统盘(/etc/mnt)小于 1G 时标红 -->
+  <div class="diskbx">
+    <div class="di">系统盘 <code>/etc/mnt</code><b id="d-mnt">-</b></div>
+    <div class="di">日志盘 <code>/etc/log</code><b id="d-log">-</b></div>
+    <span style="flex:1"></span>
+    <button onclick="loadDisk()">刷新容量</button>
+    <button class="pri" onclick="gotoExpand()">扩容…</button>
+  </div>
+  <div class="msg" id="d-note"></div>
+
   <div style="margin:10px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
     <input type="file" id="zipfile" accept=".zip">
     <button class="pri" onclick="uploadZip()">上传并安装</button>
@@ -118,6 +134,29 @@
 </div>
 
 <div class="pane" id="p-tool">
+  <div class="tool" id="exp-tool">
+    <b>系统盘(/etc/mnt)扩容</b>
+    <div class="tip">
+      插件与框架都装在 <code>/etc/mnt</code>，出厂只有 43.4M；设备上另有 <code>/etc/log</code>。
+      这里可以把 <code>/etc/mnt</code> 扩到指定大小(<b>单位 G</b>)，<code>/etc/log</code> 自动顺延。
+      <br><b>目标大小不能超过日志盘已占用的空间</b>：要给它留出已用内容 + <span id="e-res">256</span>M 余量，
+      而且<b>不能动保留分区</b>(有业务绑定的数据盘) —— 所以上限是算出来的，见下面"上限"。
+      提交后设备会<b>自动重启</b>，在启动过程中用设备自带 <code>fdisk/mke2fs/dd</code> 改盘，
+      并<b>再自动重启一次</b>完成(期间约 1~2 分钟不可用)；成功或失败都会写日志。
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <span class="tip">当前系统盘 <b id="e-cur">-</b> · 日志盘 <b id="e-log">-</b> · 上限 <b id="e-max">-</b> · 保留分区 <span id="e-keep">-</span></span>
+      <input id="e-size" type="number" min="0.5" step="0.5" style="width:100px" placeholder="G">
+      <span class="tip">G</span>
+      <button class="pri" onclick="doExpand()">提交扩容并重启</button>
+      <button onclick="doExpandCancel()">撤销待执行请求</button>
+      <span id="e-pending" class="tip"></span>
+    </div>
+    <div class="msg" id="e-msg"></div>
+    <h4>扩容日志 /etc/log/ikguard/expand.log</h4>
+    <pre id="e-logbox">-</pre>
+  </div>
+
   <div class="tool">
     <b>云端连通性自检</b>
     <div class="tip">解析爱快云端域名并尝试建立 TCP 443 连接，用来确认后门封锁是否真的生效。
@@ -173,6 +212,97 @@ function card(k, v, cls) {
   return '<div class="card"><div class="k">'+k+'</div><div class="v '+(cls||'')+'">'+v+'</div></div>';
 }
 
+/* ---------------- 系统盘/日志盘 + 扩容 ---------------- */
+var DISK = {};
+function fmtG(mib) {                       // MiB -> "G"(1024 进制, 页面统一用 G)
+  var g = (Number(mib) || 0) / 1024;
+  if (g <= 0) { return '0 G'; }
+  return (g >= 100 ? g.toFixed(0) : g.toFixed(2)).replace(/\.?0+$/, '') + ' G';
+}
+function gToMib(g) { return Math.round((Number(g) || 0) * 1024); }
+function renderDisk(k) {
+  DISK = k || {};
+  var mnt = Number(k.mnt_mib)||0, log = Number(k.log_mib)||0;
+  var max = Number(k.max_mib)||0, pend = Number(k.pending)||0;
+
+  // 插件页的两块盘
+  var e1 = document.getElementById('d-mnt');
+  e1.textContent = fmtG(mnt) + '（已用 ' + fmtG(k.mnt_used) + '）';
+  e1.className = (mnt > 0 && mnt < 1024) ? 'err' : 'ok';
+  var e2 = document.getElementById('d-log');
+  e2.textContent = fmtG(log) + '（已用 ' + fmtG(k.log_used) + ' / 可用 ' + fmtG(k.log_avail) + '）';
+  var note = document.getElementById('d-note');
+  note.className = 'msg';
+  if (mnt > 0 && mnt < 1024) {
+    note.innerHTML = '系统盘只有 ' + fmtG(mnt) + '，装插件会不够用 —— 点右边的<b>扩容…</b>可以把它扩大（上限 ' + fmtG(max) + '）。';
+  } else if (pend > 0) {
+    note.innerHTML = '已提交扩容请求：重启后 /etc/mnt → <b>' + fmtG(pend) + '</b>（待执行）';
+  } else {
+    note.textContent = '';
+  }
+
+  // 工具页
+  document.getElementById('e-cur').textContent = fmtG(mnt);
+  document.getElementById('e-log').textContent = fmtG(log) + '（已用 ' + fmtG(k.log_used) + '）';
+  document.getElementById('e-max').textContent = fmtG(max);
+  document.getElementById('e-res').textContent = String(Number(k.reserve)||256);
+  document.getElementById('e-keep').textContent =
+      (k.keep_mib > 0) ? (fmtG(k.keep_mib) + '(数据盘，扩容不动它)') : '无';
+  var inp = document.getElementById('e-size');
+  inp.max = max > 0 ? (max / 1024).toFixed(2) : '';
+  if (!inp.value) { inp.placeholder = mnt < 1024 ? '2' : String(Math.ceil(mnt * 2 / 1024)); }
+  document.getElementById('e-pending').textContent = pend > 0 ? ('待执行：→ ' + fmtG(pend)) : '';
+  document.getElementById('e-logbox').textContent = k.expand_log || '(空)';
+}
+function loadDisk() {
+  return api('show', {TYPE:'disk'}).then(function(d){ renderDisk(d.disk); })
+    .catch(function(e){ tip('容量读取失败: ' + e.message, 'msg err'); });
+}
+function gotoExpand() {
+  document.querySelectorAll('.tabs a').forEach(function(x){ x.classList.remove('on'); });
+  var t = document.querySelector('.tabs a[data-p="p-tool"]');
+  if (t) { t.classList.add('on'); }
+  document.querySelectorAll('.pane').forEach(function(x){ x.classList.remove('on'); });
+  var p = document.getElementById('p-tool');
+  if (p) { p.classList.add('on'); }
+  var i = document.getElementById('e-size');
+  if (i) { i.focus(); }
+}
+function doExpand() {
+  var inp = document.getElementById('e-size');
+  var v = gToMib(parseFloat(inp.value));            // 用户填的是 G, 转成 MiB 提交
+  var cur = Number(DISK.mnt_mib)||0, max = Number(DISK.max_mib)||0;
+  var m = document.getElementById('e-msg');
+  m.className = 'msg err';
+  if (!v || v <= 0) { m.textContent = '请填写要扩到的系统盘大小(G)'; return; }
+  if (cur > 0 && v <= cur) { m.textContent = '要大于当前的 ' + fmtG(cur) + '（本功能只扩不缩）'; return; }
+  if (max > 0 && v > max) {
+    m.textContent = '不能超过 ' + fmtG(max) + '（要给日志盘留出它已占用的空间和 ' +
+        fmtG(DISK.reserve || 256) + ' 余量，且不能动保留分区）';
+    return;
+  }
+  if (!confirm('确定把系统盘 /etc/mnt 从 ' + fmtG(cur) + ' 扩到 ' + fmtG(v) + ' 吗？\n\n' +
+      '提交后设备【即将重启】：启动过程中自动改盘，并再自动重启一次完成，期间约 1~2 分钟不可用。\n' +
+      '成功或失败都会写入 /etc/log/ikguard/expand.log 与当天审计日志。')) { return; }
+  m.className = 'msg';
+  m.textContent = '正在提交…';
+  api('expand', {op:'set', size:v}).then(function(){
+    m.className = 'msg err';
+    m.textContent = '扩容请求已提交(' + fmtG(v) + ')，设备即将重启（启动过程中自动执行）。约 1~2 分钟后重新登录，可在"工具"里看扩容日志。';
+    tip('扩容请求已提交，设备即将重启…', 'msg err');
+  }).catch(function(e){
+    m.className = 'msg err';
+    m.textContent = '提交失败：' + e.message + '（已记入审计日志）';
+  });
+}
+function doExpandCancel() {
+  if (!confirm('撤销待执行的扩容请求吗？（已生效的扩容不受影响）')) { return; }
+  api('expand', {op:'cancel'}).then(function(){
+    tip('已撤销扩容请求', 'msg ok');
+    loadDisk();
+  }).catch(function(e){ tip('撤销失败: ' + e.message, 'msg err'); });
+}
+
 /* ---------------- 使用条款(首次启用) ---------------- */
 var EULA_OK = false;
 function openEula() {
@@ -204,7 +334,7 @@ document.getElementById('gate-btn').onclick = openEula;
 
 /* ---------------- 状态/开关/插件/日志/工具 ---------------- */
 function load() {
-  return api('show', {TYPE:'data,flags,plugins,eula'}).then(function(d){
+  return api('show', {TYPE:'data,flags,plugins,eula,disk'}).then(function(d){
     var e = (d && d.eula) || {};
     if (String(e.accepted) !== '1') {
       EULA_OK = false;
@@ -246,6 +376,7 @@ function load() {
     document.getElementById('plugin-rows').innerHTML = rows || '<tr><td colspan="5" style="color:#909399">暂无已安装插件</td></tr>';
     var pend = Array.isArray(d.pending) ? d.pending : [];
     document.getElementById('pending').textContent = pend.map(function(z){return z.name;}).join(' , ') || '无';
+    renderDisk(d.disk);
     document.title = '安全防护控制台 ikguard';
   }).catch(function(e){
     document.getElementById('gate').style.display = 'flex';
