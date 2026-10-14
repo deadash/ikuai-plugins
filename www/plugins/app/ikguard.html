@@ -41,6 +41,16 @@
   .diskbx .di { font-size:12px; color:var(--mut); }
   .diskbx .di b { display:block; font-size:14px; margin-top:2px; color:var(--fg); }
   .diskbx .di b.err, .diskbx .di b.ok { font-weight:700; }
+  /* 工具页里"二选一"的两个方式 */
+  .opt { border:1px solid var(--bd); border-left:3px solid var(--pri); border-radius:6px; padding:8px 12px; margin:8px 0; }
+  .opt-h { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .opt-h .mut { margin-left:auto; }
+  .opt .tip { margin:4px 0 0; }
+  .opt .line { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .badge { background:var(--pri); color:#fff; border-radius:9px; padding:1px 8px; font-size:11px; }
+  .mut { color:var(--mut); font-size:12px; }
+  details.tool summary { cursor:pointer; color:var(--mut); font-size:12px; }
+  details.tool summary:hover { color:var(--pri); }
   .gate { position:fixed; inset:0; background:#f5f7fa; display:flex; align-items:center; justify-content:center; z-index:5; }
   .gate .in { width:min(520px,92vw); background:#fff; border:1px solid var(--bd); border-radius:10px; padding:26px; text-align:center; }
   .gate img { width:56px; height:56px; }
@@ -99,16 +109,16 @@
   <div class="tip">插件包(<code>zip</code>)会上传到设备并解压安装到 <code>/etc/mnt/plugins/&lt;名称&gt;</code>；
     根分区每次重启还原，框架开机会自动重新铺开已安装插件。</div>
 
-  <!-- 系统盘/日志盘 + 扩容入口: 系统盘(/etc/mnt)小于 1G 时标红 -->
+  <!-- 插件存在哪 + 两块盘余量: 系统盘(/etc/mnt)小于 1G 时标红 -->
   <div class="diskbx">
     <div class="di">系统盘 <code>/etc/mnt</code><b id="d-mnt">-</b></div>
     <div class="di">日志盘 <code>/etc/log</code><b id="d-log">-</b></div>
     <span style="flex:1"></span>
-    <button onclick="loadDisk()">刷新容量</button>
-    <button class="pri" onclick="gotoExpand()">扩容…</button>
+    <button onclick="loadDisk()">刷新</button>
+    <button class="pri" onclick="gotoExpand()">腾空间…</button>
   </div>
-  <div class="msg" id="d-note"></div>
   <div class="msg" id="d-store"></div>
+  <div class="msg" id="d-note"></div>
 
   <div style="margin:10px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
     <input type="file" id="zipfile" accept=".zip">
@@ -135,39 +145,60 @@
 </div>
 
 <div class="pane" id="p-tool">
-  <div class="tool" id="exp-tool">
-    <b>系统盘(/etc/mnt)扩容</b>
-    <div class="tip">
-      插件与框架都装在 <code>/etc/mnt</code>，出厂只有 43.4M；设备上另有 <code>/etc/log</code>。
-      这里可以把 <code>/etc/mnt</code> 扩到指定大小(<b>单位 G</b>)，<code>/etc/log</code> 自动顺延。
-      <br><b>目标大小不能超过日志盘已占用的空间</b>：要给它留出已用内容 + <span id="e-res">256</span>M 余量，
-      而且<b>不能动保留分区</b>(有业务绑定的数据盘) —— 所以上限是算出来的，见下面"上限"。
-      提交后设备会<b>自动重启</b>，在启动过程中用设备自带 <code>fdisk/mke2fs/dd</code> 改盘，
-      并<b>再自动重启一次</b>完成(期间约 1~2 分钟不可用)；成功或失败都会写日志。
+
+  <div class="tool">
+    <b>插件装在哪 / 怎么腾空间</b>
+    <div class="tip">下面两种方式<b>二选一</b>即可，不用都做。上面的「当前」会显示此刻实际生效的是哪个。</div>
+
+    <div class="opt">
+      <div class="opt-h">
+        <span class="badge">方式一</span><b>拿一块数据盘当插件盘</b>
+        <span class="mut">有闲置盘/分区时推荐</span>
+      </div>
+      <div class="tip">在「系统设置 → 磁盘分区」里把某块盘（或分区）的 <b>绑定业务</b> 改成
+        <b>插件存储</b> 并保存，然后重启。之后上传、安装的插件都落在那块盘上，系统盘一个字节都不占。</div>
+      <div class="line">
+        <span>当前插件存储在：<b id="e-store">-</b></span>
+        <button onclick="goDisk()">去磁盘分区</button>
+      </div>
     </div>
-    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
-      <span class="tip">当前系统盘 <b id="e-cur">-</b> · 日志盘 <b id="e-log">-</b> · 上限 <b id="e-max">-</b> · 保留分区 <span id="e-keep">-</span></span>
-      <input id="e-size" type="number" min="0.5" step="0.5" style="width:100px" placeholder="G">
-      <span class="tip">G</span>
-      <button class="pri" onclick="doExpand()">提交扩容并重启</button>
-      <button onclick="doExpandCancel()">撤销待执行请求</button>
-      <span id="e-pending" class="tip"></span>
+
+    <div class="opt">
+      <div class="opt-h">
+        <span class="badge">方式二</span><b>扩容系统盘</b>
+        <span class="mut">没有闲置盘时用</span>
+      </div>
+      <div class="tip">把 <code>/etc/mnt</code> 直接扩到指定大小（单位 <b>G</b>）。提交后设备自动重启完成，
+        期间约 1~2 分钟不可用。上限 <b id="e-max">-</b> —— 要给日志盘留出它已用的空间，也不动绑了业务的盘。</div>
+      <div class="line">
+        <span>当前：<b id="e-cur">-</b></span>
+        <input id="e-size" type="number" min="0.5" step="0.5" style="width:90px" placeholder="G">
+        <span class="tip">G</span>
+        <button class="pri" onclick="doExpand()">扩容并重启</button>
+        <button onclick="doExpandCancel()">撤销</button>
+        <span class="tip" id="e-pending"></span>
+      </div>
     </div>
+
     <div class="msg" id="e-msg"></div>
+  </div>
+
+  <details class="tool">
+    <summary>详细状态与日志</summary>
+    <div class="tip" id="e-detail" style="margin-top:8px">-</div>
     <h4>扩容日志 /etc/log/ikguard/expand.log</h4>
     <pre id="e-logbox">-</pre>
-  </div>
+  </details>
 
   <div class="tool">
     <b>云端连通性自检</b>
-    <div class="tip">解析爱快云端域名并尝试建立 TCP 443 连接，用来确认后门封锁是否真的生效。
-      自检需要设备能上外网(WAN 已拨号)；预期结果是"能解析出 IP，但连接失败"。
-      <b>此按钮立即执行一次</b>，约 20 秒；如需按期自动执行，请在"开关配置"里打开 <code>定时自检</code>
-      (开启后会写入定时任务，重启仍生效)。结果同时写入审计日志(<code>probe.*</code>)。</div>
+    <div class="tip">解析爱快云端域名并试连 TCP 443，确认后门封锁是否真的生效
+      （预期：能解析出 IP，但连不上）。点一下立即跑一次，约 20 秒；
+      要按期自动跑，在「开关配置」里打开 <code>定时自检</code>。</div>
     <button class="pri" onclick="runProbe()">立即自检一次</button>
+    <h4>最近一次结果</h4>
+    <pre id="probe-out">-</pre>
   </div>
-  <h4>最近一次自检结果</h4>
-  <pre id="probe-out">-</pre>
 </div>
 </div>
 
@@ -235,9 +266,9 @@ function renderDisk(k) {
   var note = document.getElementById('d-note');
   note.className = 'msg';
   if (mnt > 0 && mnt < 1024) {
-    note.innerHTML = '系统盘只有 ' + fmtG(mnt) + '，装插件会不够用 —— 点右边的<b>扩容…</b>可以把它扩大（上限 ' + fmtG(max) + '）。';
+    note.innerHTML = '系统盘只有 ' + fmtG(mnt) + '，装插件可能不够 —— 点右边<b>腾空间…</b>（两种方式，二选一）。';
   } else if (pend > 0) {
-    note.innerHTML = '已提交扩容请求：重启后 /etc/mnt → <b>' + fmtG(pend) + '</b>（待执行）';
+    note.innerHTML = '已提交扩容：重启后 /etc/mnt → <b>' + fmtG(pend) + '</b>（待执行）';
   } else {
     note.textContent = '';
   }
@@ -247,31 +278,43 @@ function renderDisk(k) {
   if (st) {
     if (Number(k.store_on_disk) === 1) {
       st.className = 'msg ok';
-      st.innerHTML = '插件存储：<b>数据盘</b>（可用 ' + fmtG(k.store_avail) +
-          '）—— 插件装在数据盘上，装多大都不受系统盘限制。';
+      st.innerHTML = '插件存在 <b>数据盘</b>上（可用 ' + fmtG(k.store_avail) + '），不受系统盘容量限制';
     } else {
       st.className = 'msg warn';
-      st.innerHTML = '插件存储：<b>系统盘</b>（可用 ' + fmtG(k.store_avail) +
-          '）—— 想让它挪到数据盘，去「系统设置 → 磁盘分区」把某块盘绑定成「插件存储」再重启。';
+      st.innerHTML = '插件存在 <b>系统盘</b>上（可用 ' + fmtG(k.store_avail) + '）—— 想挪到数据盘看「工具」';
     }
   }
 
-  // 工具页
+  // 工具页: 此刻插件存储在哪 + 扩容状态
+  var st2 = document.getElementById('e-store');
+  if (st2) {
+    st2.textContent = (Number(k.store_on_disk) === 1)
+        ? ('数据盘（可用 ' + fmtG(k.store_avail) + '）')
+        : ('系统盘 /etc/mnt（可用 ' + fmtG(k.store_avail) + '）');
+    st2.className = Number(k.store_on_disk) === 1 ? 'ok' : 'warn';
+  }
   document.getElementById('e-cur').textContent = fmtG(mnt);
-  document.getElementById('e-log').textContent = fmtG(log) + '（已用 ' + fmtG(k.log_used) + '）';
   document.getElementById('e-max').textContent = fmtG(max);
-  document.getElementById('e-res').textContent = String(Number(k.reserve)||256);
-  document.getElementById('e-keep').textContent =
-      (k.keep_mib > 0) ? (fmtG(k.keep_mib) + '(数据盘，扩容不动它)') : '无';
   var inp = document.getElementById('e-size');
   inp.max = max > 0 ? (max / 1024).toFixed(2) : '';
   if (!inp.value) { inp.placeholder = mnt < 1024 ? '2' : String(Math.ceil(mnt * 2 / 1024)); }
-  document.getElementById('e-pending').textContent = pend > 0 ? ('待执行：→ ' + fmtG(pend)) : '';
+  document.getElementById('e-pending').textContent = pend > 0 ? ('待执行 → ' + fmtG(pend)) : '';
+  var det = document.getElementById('e-detail');
+  if (det) {
+    det.innerHTML = '系统盘 <b>' + fmtG(mnt) + '</b>（已用 ' + fmtG(k.mnt_used) +
+        '） · 日志盘 <b>' + fmtG(log) + '</b>（已用 ' + fmtG(k.log_used) + '） · 扩容上限 <b>' +
+        fmtG(max) + '</b> · 保留分区 ' + (Number(k.keep_mib) > 0 ? fmtG(k.keep_mib) : '无') +
+        ' · 扩容时给日志盘留 ' + fmtG(k.reserve || 256);
+  }
   document.getElementById('e-logbox').textContent = k.expand_log || '(空)';
 }
 function loadDisk() {
   return api('show', {TYPE:'disk'}).then(function(d){ renderDisk(d.disk); })
     .catch(function(e){ tip('容量读取失败: ' + e.message, 'msg err'); });
+}
+function goDisk() {
+  // 跳到 iKuai 的「磁盘分区」页(新开标签, 不影响当前控制台)
+  window.open('/#/system-setting/diskpartition', '_blank');
 }
 function gotoExpand() {
   document.querySelectorAll('.tabs a').forEach(function(x){ x.classList.remove('on'); });
