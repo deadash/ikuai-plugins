@@ -126,16 +126,6 @@
       (开启后会写入定时任务，重启仍生效)。结果同时写入审计日志(<code>probe.*</code>)。</div>
     <button class="pri" onclick="runProbe()">立即自检一次</button>
   </div>
-  <div class="tool">
-    <b>被动采集（审计取证）</b>
-    <div class="tip">打开 <code>审计取证</code> 开关后会运行一个<b>常驻被动采集进程</b>，不再"每分钟跑一次"：
-      订阅内核 <code>conntrack</code> 连接事件（<code>dport=53</code> 的另存为 DNS 事件），
-      以及内核日志里的<b>封锁命中</b>事件（命中封锁链的包由 <code>-j LOG</code> 写入内核日志，不再靠读计数器）。
-      <br>不做"程序启动"判断（本内核没有 exec/fork 事件源）；不抓包，所以 DNS 只到"谁向谁查"，拿不到域名。</div>
-    <div class="tip">当前状态：<b id="collect-state">-</b></div>
-    <button onclick="collectAct('start')">启动采集器</button>
-    <button onclick="collectAct('stop')">停止采集器</button>
-  </div>
   <h4>最近一次自检结果</h4>
   <pre id="probe-out">-</pre>
 </div>
@@ -239,14 +229,6 @@ function load() {
     html += card('今日事件', '连 '+(s.n_conn||0)+' / DNS '+(s.n_dns||0)+' / 命中 '+(s.n_block||0));
     html += card('日志分区', (s.log_usage||'-'));
     document.getElementById('cards').innerHTML = html;
-    var cs = document.getElementById('collect-state');
-    if (cs) {
-      cs.textContent = (s.collect_running == 1)
-        ? '运行中（订阅 conntrack 事件，写 ' + (s.log_dir||'/etc/log/ikguard') + '/*.log）'
-        : '未运行（打开"审计取证"开关后运行；' + (s.xt_ok==1 ? '封锁命中日志可用' : '封锁命中日志不可用') + '）';
-      cs.className = (s.collect_running == 1) ? 'ok' : 'warn';
-    }
-
     var sw = '';
     FLAGS.forEach(function(it){
       var on = (String(f[it[0]]) === '1');
@@ -295,14 +277,6 @@ function setFlag(key, value) {
   api('seting', {key:key, value:String(value)}).then(function(){
     tip(key+' = '+value+' 已生效', 'msg ok'); load();
   }).catch(function(e){ tip('设置失败: '+e.message, 'msg err'); });
-}
-
-function collectAct(op) {
-  tip('正在' + (op === 'start' ? '启动' : '停止') + '采集器…');
-  api('collect', {op:op}).then(function(){
-    tip('采集器已' + (op === 'start' ? '启动' : '停止'), 'msg ok');
-    return load();
-  }).catch(function(e){ tip('操作失败: '+e.message, 'msg err'); });
 }
 
 function runProbe() {

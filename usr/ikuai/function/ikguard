@@ -407,26 +407,6 @@ plugin()
     return 0
 }
 
-# 采集器状态: 供页面显示(也可让用户手动重启采集器)
-collect()
-{
-    local op="${op:-status}"
-    case "$op" in
-        start)
-            "$IK_IKAUDIT" collect-start >/dev/null 2>&1 || { echo "采集器启动失败(检查 audit 开关与 conntrack)"; return 1; }
-            echo "被动采集器已启动"
-            ;;
-        stop)
-            "$IK_IKAUDIT" collect-stop >/dev/null 2>&1
-            echo "被动采集器已停止"
-            ;;
-        status|*)
-            echo "被动采集器: $(ikg_collect_running && echo 运行中 || echo 未运行)"
-            ;;
-    esac
-    return 0
-}
-
 # 云端连通性自检: 仅由用户点击"开始自检"触发一次(后台执行, 约 20 秒,
 # 结果写 last-probe.txt 由页面轮询)。不参与 cron, 也不在开机时执行。
 probe()

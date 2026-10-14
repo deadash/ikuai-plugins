@@ -306,7 +306,7 @@ ssh sshd@127.0.0.1 -p 10022 "
 /etc/mnt/.boot/bin/ikaudit status          # 采集器/事件源/日志/封锁状态
 /etc/mnt/.boot/bin/ikaudit tail 80         # 看审计事件
 /etc/mnt/.boot/bin/ikaudit collect-status  # 采集器是否在运行
-/etc/mnt/.boot/bin/ikaudit collect-start   # 手动启动采集器(等价于打开 audit 开关)
+/etc/mnt/.boot/bin/ikaudit collect-start   # 命令行手动启动采集器(页面只提供 audit 开关)
 /etc/mnt/.boot/bin/ikaudit collect-stop    # 停止采集器(按 pid 关闭并清 LOG 规则)
 /etc/mnt/.boot/bin/ikaudit report          # 立刻生成报告(异常返回码 1)
 /etc/mnt/.boot/bin/ikaudit probe           # 云端连通性自检(解析 + TCP 443 尝试；仅手动触发)
@@ -522,8 +522,8 @@ $ curl -s -H 'Accept-Encoding: gzip' http://127.0.0.1:18080/static/js/152.*.js.g
   * **开关配置**: `backdoor` `backdoor_hosts` `audit` `probe` `sshd` `plugins` `cron` `shell`
     修改即写入 `/etc/mnt/boot_args` 并立刻重跑对应脚本(`probe` 打开/关闭会即时重建定时任务)
   * **插件管理**: **上传 zip 安装**、扫描 `/etc/mnt/plugins/*.zip`、列出/卸载插件
-  * **审计日志**: 实时查看 report/audit/dns/proc/conn/boot 日志
-  * **工具**: 云端连通性自检(立即执行一次 + 结果回读)、被动采集器启停与状态 —— 每一项都有用途说明
+  * **审计日志**: 实时查看 report/audit/conn/dns/block/boot 日志
+  * **工具**: 云端连通性自检(立即执行一次 + 结果回读) —— 采集器不在此启停, 只由 `审计取证` 开关控制
 
 前端图标与页面都在 `www/plugins/app/`(`ikguard.{html,png}`、`terms.{html,png}`)，
 图标是 64×64 的圆角盾牌(盾牌=安全防护，文档图标=使用条款)。
