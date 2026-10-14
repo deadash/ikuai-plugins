@@ -562,8 +562,10 @@ plugin_web_patch() {
         grep -q 'tipCloudBind=!0' "$tmp" 2>/dev/null && want_bind=1
         grep -q '_s(e\.name)' "$tmp" 2>/dev/null && want_label=1
         # 磁盘分区页: 绑定业务下拉加第 6 项(插件存储) + 表格里的业务名数组加第 7 项
+        # 注意: /usr/ikuai/www/static/js 是**持久**目录(不像根分区每次还原), 所以这两条补丁
+        # 必须幂等 —— 否则每次开机都会再插一条, 下拉里就会攒出一堆"插件存储"。
         grep -q 't\.\$t(i+"5")\]\[1\*s\]' "$tmp" 2>/dev/null && want_purpose=1
-        grep -q 'binding_business_name4")))]),t\._v(" "),' "$tmp" 2>/dev/null && want_opt=1
+        grep -q -e 'binding_business_name5")))]):t\._e()' -e 'binding_business_name6' "$tmp" 2>/dev/null && want_opt=1
         if [ "$want_ub" = 0 ] && [ "$want_dir" = 0 ] && [ "$want_title" = 0 ] && \
            [ "$want_bind" = 0 ] && [ "$want_label" = 0 ] && \
            [ "$want_purpose" = 0 ] && [ "$want_opt" = 0 ]; then
@@ -576,8 +578,29 @@ plugin_web_patch() {
             -e 's|\.tipCloudBind=!0|.tipCloudBind=!1|g' \
             -e 's@_s(e\.name)@_s(e.title||e.name)@g' \
             -e 's|t\.\$t(i+"5")\]\[1\*s\]|t.$t(i+"5"),t.$t(i+"6")][1*s]|g' \
-            -e 's|binding_business_name4")))]),t\._v(" "),|binding_business_name4")))]),t._v(" "),e("option",{attrs:{value:"6"}},[t._v(t._s(t.$t("common.disk-management.diskshowtable.binding_business_name6")))]),t._v(" "),|g' \
             "$tmp" > "$patched"
+
+        # 下拉第 6 项(插件存储)用 awk 按"整串"增删: busybox sed 对带 {} 的长模式不靠谱。
+        # 顺序 = 先删掉历史插入的(可能积了好几条), 再在"钉钉闪传"那项后面插恰好一条。
+        if [ "$want_opt" = 1 ] || grep -q 'binding_business_name6' "$patched" 2>/dev/null; then
+            awk -v bad='e("option",{attrs:{value:"6"}},[t._v(t._s(t.$t("common.disk-management.diskshowtable.binding_business_name6")))]),t._v(" "),' \
+                -v anchor='binding_business_name5")))]):t._e()' \
+                -v ins=',t._v(" "),e("option",{attrs:{value:"6"}},[t._v(t._s(t.$t("common.disk-management.diskshowtable.binding_business_name6")))])' '
+                {
+                    out = ""; rest = $0
+                    while ((p = index(rest, bad)) > 0) {          # 清掉所有历史插入
+                        out = out substr(rest, 1, p - 1)
+                        rest = substr(rest, p + length(bad))
+                    }
+                    line = out rest
+                    p = index(line, anchor)                        # 在最后一项后面插一条
+                    if (p > 0 && !done) {
+                        line = substr(line, 1, p + length(anchor) - 1) ins substr(line, p + length(anchor))
+                        done = 1
+                    }
+                    print line
+                }' "$patched" > "$patched.new" && mv -f "$patched.new" "$patched"
+        fi
 
         if gzip -9 -c < "$patched" > "$gz" 2>/dev/null && \
            { [ "$want_ub" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'yunbindstatus=2'; } && \
@@ -586,7 +609,7 @@ plugin_web_patch() {
            { [ "$want_bind" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'tipCloudBind=!1'; } && \
            { [ "$want_label" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'e.title||e.name'; } && \
            { [ "$want_purpose" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 't\.\$t(i+"6")\]\[1\*s\]'; } && \
-           { [ "$want_opt" = 0 ] || zcat "$gz" 2>/dev/null | grep -q 'binding_business_name6'; }; then
+           { [ "$want_opt" = 0 ] || [ "$(zcat "$gz" 2>/dev/null | grep -o 'binding_business_name6' | wc -l)" = 1 ]; }; then
             cat "$gz" > "$f"
             n=$((n + 1))
             plugin_log "  已打补丁: $(basename "$f") (云拦截=$want_ub 目录=$want_dir 标题=$want_title 云弹框=$want_bind 卡片名=$want_label 业务下拉=$want_opt 业务名表=$want_purpose)"
