@@ -58,9 +58,8 @@ ensure_key backdoor_hosts 0
 ensure_key plugins 1
 ensure_key cron 1
 ensure_key shell 1
-ensure_key audit 1
+ensure_key audit 0    # 审计取证=被动采集器(默认关闭; 开启后运行常驻进程, 不占 cron)
 ensure_key probe 0    # 云端连通性定时自检(默认关闭; 开启后加入 crontab, 重启仍生效)
-                      # 注: DNS 抓包不持久化(重启即失效), 因此不设开关
 
 # 清理已废弃开关:
 #   remote         历史遗留的空开关(没有任何脚本读取; iKuai 云平台的"远程控制/远程维护"

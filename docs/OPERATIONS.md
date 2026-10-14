@@ -260,8 +260,8 @@ ssh sshd@127.0.0.1 -p 10022 "
 | 后门进程 | `cre/cre_client/pmd/ik_rc_client/dtalkd/dtalkc/catcherd` 均不存在 |
 | 后门程序 | `/usr/sbin/ik_rc_client` 等被替换为空壳(含 `[ikblock] disabled`) |
 | ipset | `ikuai_blk` 存在且有条目(云端 IP/网段 + 解析结果) |
-| iptables | OUTPUT/FORWARD 有 `--match-set ikuai_blk dst -j DROP`，OUTPUT 有云端端口 DROP |
-| 审计日志 | `/etc/log/ikguard/audit-<date>.log` 有 `boot.audit`、`block.hit` 等事件(`dns.cloud` 需先手动开启 DNS 抓包) |
+| iptables | OUTPUT/FORWARD 有 `--match-set ikuai_blk dst -j IKG_BLK`，OUTPUT 有云端端口跳 `IKG_BLK`；`IKG_BLK` 链里有 `-j DROP` |
+| 审计日志 | 打开 `audit` 后 `/etc/log/ikguard/audit-<date>.log` 出现 `collect.begin`、`block.hit` 等事件 |
 | Web 接口 | `POST /Action/call {"func_name":"ikguard","action":"show","param":{"TYPE":"data"}}` 返回 `Result:30000` |
 | Web 页面 | 系统设置 → 插件管理(`#/system-setting/plugin-management`)：**无"需要绑定爱快云平台"提示**，点开插件后标题显示"插件"而不是"Docker" |
 | 前端补丁 | 分包里 `plugins/docker/` 已变成 `plugins/app/`、`yunbindstatus=2` |
@@ -269,34 +269,48 @@ ssh sshd@127.0.0.1 -p 10022 "
 
 ---
 
-## 5. 审计日志(进程 / DNS / 网络 / 封锁命中)
+## 5. 审计取证 = 被动采集(不用 cron)
 
-日志目录 `/etc/log/ikguard/`（持久分区；保留 3 天 + 目录总量 300MB、单文件 10MB、DNS 日志 50MB
-封顶，由 `ikaudit watch` 每分钟采集并整理）：
+`audit=1` 时运行常驻采集器 `ikaudit collect`，事件全由内核推送：
+
+* `conntrack -E` → 连接事件(公网方向)；`dport=53` 的另存为 DNS 事件
+  (conntrack 不含报文，所以 DNS **没有域名**，只有"谁向谁查")
+* `/dev/kmsg` → **封锁命中**：封锁链首个规则是 `-j LOG --log-prefix "ikguard-blk "`，
+  命中即写内核日志（`-j LOG` 是非终止目标，记完继续走 `DROP`）
+
+设备自带的 `iptables` 就支持 `-j LOG`（实测 3.7.16：`iptables -j LOG -h` 能列出
+`--log-prefix`，加规则后内核日志确实出现命中记录），**不需要额外构件**。
+判可用性要用 `iptables -j LOG -h | grep log-prefix`，不要用 `iptables -C ... -j LOG`
+（`-C` 的 "No chain/target/match by that name" 是"规则不存在"，容易误判）。
+
+日志目录 `/etc/log/ikguard/`（持久分区；保留 3 天 + 目录总量 300MB、单文件 10MB 封顶，
+采集器每 60 秒（或事件间隙）自动维护）：
 
 | 文件 | 内容 |
 | --- | --- |
 | `boot.log` | 框架开机日志(所有脚本的 log 输出) |
-| `audit-YYYYMMDD.log` | 结构化审计事件: `proc.start` `conn.out` `dns.cloud` `cloud.ip` `cloud.port` `block.hit` `backdoor.proc` `backdoor.alive` `probe.*` |
-| `proc-YYYYMMDD.log` | 进程快照对比(新出现的进程，命中可疑名单会额外升级为 WARN) |
-| `conn-YYYYMMDD.log` | 出向连接快照对比(新增的公网连接) |
-| `dns-YYYYMMDD.log` | DNS 查询原始记录(tcpdump 逐网卡抓 `udp port 53`；**默认关闭，仅用户手动启停**) |
-| `report.txt` | 最近一次体检报告(结论: 正常/异常) |
+| `audit-YYYYMMDD.log` | 结构化事件: `collect.begin/stop` `block.hit` `cloud.leak` `probe.*` |
+| `conn-YYYYMMDD.log` | 连接事件(`[NEW]`/`[DESTROY]`) |
+| `dns-YYYYMMDD.log` | DNS 事件(`dport=53`) |
+| `block-YYYYMMDD.log` | 封锁命中原始记录(内核日志行) |
+| `report.txt` | 最近一次采集报告 |
 
-> 规模控制: 超过保留天数直接删除；单文件超过上限滚动为 `<文件>.1`(保留一代)；DNS 日志
-> 超限时先停抓包→滚动→按原状态恢复(没在抓就保持关闭)；目录总量超限时按修改时间删最老。
-> 阈值可用环境变量覆盖: `AU_KEEP_DAYS` / `AU_MAX_TOTAL` / `AU_MAX_FILE` / `AU_DNS_MAX`。
+> 设计上**明确移除**的两件事：①不做"程序启动"判断 —— 本内核
+> `CONFIG_CONNECTOR`/`CONFIG_AUDIT`/`CONFIG_KPROBES`/`CONFIG_FTRACE` 都没编，没有 exec/fork 事件源；
+> ②不抓包 —— 抓包既费磁盘又和"被动"无关。
+> 规模阈值可用环境变量覆盖: `AU_KEEP_DAYS` / `AU_MAX_TOTAL` / `AU_MAX_FILE`。
 
 常用命令:
 
 ```bash
-/etc/mnt/.boot/bin/ikaudit status      # 日志目录/占用/DNS 采集/封锁规则
-/etc/mnt/.boot/bin/ikaudit tail 80     # 看审计事件
-/etc/mnt/.boot/bin/ikaudit report      # 立刻体检(异常返回码 1)
-/etc/mnt/.boot/bin/ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试；仅手动触发)
-/etc/mnt/.boot/bin/ikaudit dns-start   # 手动启动 DNS 抓包(默认关闭)
-/etc/mnt/.boot/bin/ikaudit dns-stop    # 手动停止 DNS 抓包(按 pid 关闭并删 pid 文件)
-grep -E 'backdoor|cloud|block' /etc/log/ikguard/audit-$(date +%Y%m%d).log
+/etc/mnt/.boot/bin/ikaudit status          # 采集器/事件源/日志/封锁状态
+/etc/mnt/.boot/bin/ikaudit tail 80         # 看审计事件
+/etc/mnt/.boot/bin/ikaudit collect-status  # 采集器是否在运行
+/etc/mnt/.boot/bin/ikaudit collect-start   # 手动启动采集器(等价于打开 audit 开关)
+/etc/mnt/.boot/bin/ikaudit collect-stop    # 停止采集器(按 pid 关闭并清 LOG 规则)
+/etc/mnt/.boot/bin/ikaudit report          # 立刻生成报告(异常返回码 1)
+/etc/mnt/.boot/bin/ikaudit probe           # 云端连通性自检(解析 + TCP 443 尝试；仅手动触发)
+grep -E 'block\.hit|cloud\.leak' /etc/log/ikguard/audit-$(date +%Y%m%d).log
 ```
 
 > 说明: `probe` 会主动解析并尝试连接爱快云端域名，属于**受控自检**：
@@ -357,36 +371,34 @@ $ grep cloud /etc/log/ikguard/audit-$(date +%Y%m%d).log | tail -3
 配置完 WAN 的 iKuai 正规做法是「网络设置 → 内外网设置 → wan1 → 绑定网卡 eth1 → 动态 IP(DHCP)」，
 用官方接口一次配好并持久化的做法见 [§9](#9-让虚拟机真的连上外网--真实-lan-客户端模拟)。
 
-### 5.3 采集踩坑与修复(3 个真 bug)
+### 5.3 历史沿革：为什么从"cron 轮询"改成"被动采集"
 
-| 现象 | 原因 | 修法 |
-| --- | --- | --- |
-| 审计日志只有开机那一次的数据，`proc/conn/dns` 不再更新 | 任务只写进了 `/etc/crontabs/cron.d/`，而 iKuai 的 `crond` 只读 `/etc/crontabs/root`(它的 `crond_commit` 是 `cat cron.d/* > root`，时机不对就会被整体重写) | `au_install_cron()` / `bd_install_guard()` 把任务**直接追加进 `/etc/crontabs/root`** |
-| `dns.cloud` 事件每分钟把一整天的域名重刷一遍，体检计数失真 | 每次 tick 都全文 `grep` 当天 DNS 日志 | 用偏移量状态文件 `$AU_STATE/dns.scan.<日期>` **只扫新增内容**(日志被轮转/清空时自动归零重扫) |
-| 体检报告"云端域名解析"恒为 0 | 统计写成了 `grep -c "cloud\."`：事件名里点号在 **cloud 前面**(`dns.cloud          解析...` 后面是空格)，这个表达式永远匹配不到 | 改成 `grep -cE 'dns\.cloud|cloud\.(ip\|port)\|probe\.cloud'` |
+早期版本用 `* * * * * ikaudit watch` 每分钟轮询(/proc 进程快照、conntrack 快照 diff、
+iptables 计数器 diff、tcpdump 抓包)，踩过这些坑：
 
-修复后在真实外网环境实测：
+| 现象 | 原因 |
+| --- | --- |
+| 审计日志只有开机那一次的数据 | 任务只写进了 `/etc/crontabs/cron.d/`，而 iKuai 的 `crond` 只读 `/etc/crontabs/root` |
+| `dns.cloud` 事件每分钟重刷一整天 | 每次 tick 都全文 `grep` 当天 DNS 日志(后来改用偏移量增量扫描) |
+| 体检报告计数恒为 0 | 统计表达式写成 `grep -c "cloud\."`，而事件名里点号在 `cloud` 前面 |
+| DNS 抓包被 cron 每分钟重新拉起 | `au_watch()` 末尾无条件 `au_dns_start`，用户点"停止"最多活 1 分钟 |
+| `proc-*.log` 体积大、全是自身噪声 | 快照把框架自己的 `sed/awk/ikaudit` 子进程也记了进去 |
+
+**v0.0.4 起改为被动采集**(现在的实现)：常驻一个采集器订阅 `conntrack -E` 与 `/dev/kmsg`，
+`audit` 默认关闭、开启后不写任何 cron；程序启动判断与 tcpdump 抓包整体移除。
+一条 cron 都不再需要（除了可选的 `probe` 定时自检）。历史数据仅作参考。
 
 ```
 $ grep -nE 'ikaudit|backdoor_guard' /etc/crontabs/root
-11:* * * * * /etc/mnt/.boot/bin/backdoor_guard
-12:* * * * * /etc/mnt/.boot/bin/ikaudit watch
-13:*/10 * * * * /etc/mnt/.boot/bin/ikaudit report
+11:* * * * * /etc/mnt/.boot/bin/backdoor_guard        # 后门阻断复查(与审计无关)
+# 采集是常驻进程, 不在这里; 打开 probe 开关时会多一条:
+#   */10 * * * * /etc/mnt/.boot/bin/ikaudit probe >/dev/null 2>&1
 
-$ grep -E '云端域名解析|结论' /etc/log/ikguard/report.txt
-DNS:    云端域名解析  : 292 次(今日审计日志)
-结论: 正常(无后门进程, 无云端连接)
-
-$ iptables -nvx -L FORWARD | grep ikuai_blk
-       6      360  DROP  all  --  *  *  0.0.0.0/0  0.0.0.0/0  match-set ikuai_blk dst
+$ iptables -S IKG_BLK
+-N IKG_BLK
+-A IKG_BLK -j LOG --log-prefix "ikguard-blk "         # 采集器开启时才有
+-A IKG_BLK -j DROP
 ```
-
-> DNS 日志是多个 `tcpdump`(逐网卡)并发追加同一个文件，高并发时行可能交错；
-> **事件级的 `audit-*.log` 才是可靠证据来源**，`dns-*.log` 只当原始抓包存档看。
-
-> 上面是本框架固定写入的 **3 条**。若打开了 `probe` 开关，还会多一条
-> `*/10 * * * * /etc/mnt/.boot/bin/ikaudit probe >/dev/null 2>&1`；关闭该开关时
-> `ikaudit cronsync`(或重启)会把它从 `/etc/crontabs/root` 里删掉。DNS 抓包永远不在其中。
 
 ---
 
@@ -511,7 +523,7 @@ $ curl -s -H 'Accept-Encoding: gzip' http://127.0.0.1:18080/static/js/152.*.js.g
     修改即写入 `/etc/mnt/boot_args` 并立刻重跑对应脚本(`probe` 打开/关闭会即时重建定时任务)
   * **插件管理**: **上传 zip 安装**、扫描 `/etc/mnt/plugins/*.zip`、列出/卸载插件
   * **审计日志**: 实时查看 report/audit/dns/proc/conn/boot 日志
-  * **工具**: 云端连通性自检(立即执行一次 + 结果回读)、DNS 记录开关(不持久化) —— 每一项都有用途说明
+  * **工具**: 云端连通性自检(立即执行一次 + 结果回读)、被动采集器启停与状态 —— 每一项都有用途说明
 
 前端图标与页面都在 `www/plugins/app/`(`ikguard.{html,png}`、`terms.{html,png}`)，
 图标是 64×64 的圆角盾牌(盾牌=安全防护，文档图标=使用条款)。
@@ -668,10 +680,10 @@ $ /usr/ikuai/function/rustdemo show TYPE=data
 | `plugins` | 1 | 插件系统(含 Web 插件资源同步；首次使用需同意《使用条款》) |
 | `cron` | 1 | 铺开 `/etc/mnt/cron.d` |
 | `shell` | 1 | 链接 `/etc/mnt/shells` 下的程序/配置 |
-| `audit` | 1 | 审计取证(进程/DNS/网络/封锁命中)；=0 时不采集并**移除定时任务**、停掉 DNS 抓包 |
+| `audit` | 0 | 审计取证=**常驻被动采集器**(conntrack 事件 + 内核封锁日志)；=0 时停掉采集器并移除定时任务 |
 | `probe` | 0 | **定时**云端连通性自检: 只有开启才写入定时任务(`*/10`)，重启按该配置重建 |
 
-> DNS 抓包**没有开关**：它默认关闭、手动启停、**不持久化**(重启即失效)，也永远不写入定时任务。
+> 采集**不占 cron**：`audit=1` 开机自动拉起采集器、`=0` 停止并清零框架的定时任务；DNS 不再单独抓包，只是连接事件里 `dport=53` 的子集。
 
 **已废弃并会自动清理的两个键**(升级时 install.sh 会 `sed -i` 删除):
 

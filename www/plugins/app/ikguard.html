@@ -111,9 +111,9 @@
   </div>
   <h4>体检报告 /etc/log/ikguard/report.txt</h4><pre id="log-report">-</pre>
   <h4>审计事件 audit-*.log</h4><pre id="log-audit">-</pre>
-  <h4>DNS 查询 dns-*.log</h4><pre id="log-dns">-</pre>
-  <h4>进程快照 proc-*.log</h4><pre id="log-proc">-</pre>
   <h4>出向连接 conn-*.log</h4><pre id="log-conn">-</pre>
+  <h4>DNS 查询(仅 dport=53 事件) dns-*.log</h4><pre id="log-dns">-</pre>
+  <h4>封锁命中 block-*.log</h4><pre id="log-block">-</pre>
   <h4>开机日志 boot.log</h4><pre id="log-boot">-</pre>
 </div>
 
@@ -127,15 +127,14 @@
     <button class="pri" onclick="runProbe()">立即自检一次</button>
   </div>
   <div class="tool">
-    <b>DNS 查询记录</b>
-    <div class="tip">用 tcpdump 抓取 53 端口的 DNS 请求(自动跳过桥成员网卡，避免重复记录)，落到
-      <code>/etc/log/ikguard/dns-YYYYMMDD.log</code>，用于核对是否有云端域名被解析。
-      审计日志里的 <code>dns.cloud</code> 事件就是对它的汇总。</div>
-    <div class="tip"><b>默认关闭，且不持久化</b>：只有你点"启动"才会抓包，点"停止"即停；设备重启后自动失效，
-      不会被定时任务重新拉起。抓包日志按体积封顶(超限自动滚动)，长时间挂机也不会撑爆磁盘。</div>
-    <div class="tip">当前状态：<b id="dns-state">-</b></div>
-    <button onclick="dnsAct('start')">启动 DNS 记录</button>
-    <button onclick="dnsAct('stop')">停止 DNS 记录</button>
+    <b>被动采集（审计取证）</b>
+    <div class="tip">打开 <code>审计取证</code> 开关后会运行一个<b>常驻被动采集进程</b>，不再"每分钟跑一次"：
+      订阅内核 <code>conntrack</code> 连接事件（<code>dport=53</code> 的另存为 DNS 事件），
+      以及内核日志里的<b>封锁命中</b>事件（命中封锁链的包由 <code>-j LOG</code> 写入内核日志，不再靠读计数器）。
+      <br>不做"程序启动"判断（本内核没有 exec/fork 事件源）；不抓包，所以 DNS 只到"谁向谁查"，拿不到域名。</div>
+    <div class="tip">当前状态：<b id="collect-state">-</b></div>
+    <button onclick="collectAct('start')">启动采集器</button>
+    <button onclick="collectAct('stop')">停止采集器</button>
   </div>
   <h4>最近一次自检结果</h4>
   <pre id="probe-out">-</pre>
@@ -158,7 +157,7 @@
 var FLAGS = [
   ['backdoor','后门阻断','阻断/删除爱快云端后门与更新通道(不影响路由/DHCP/NAT)'],
   ['backdoor_hosts','后门 DNS 屏蔽','把云端域名写入 /etc/hosts 指向 0.0.0.0(可选加固)'],
-  ['audit','审计取证','记录进程启动/DNS 请求/网络连接/封锁命中'],
+  ['audit','审计取证','被动采集(常驻进程)：conntrack 连接事件 + 内核封锁命中日志；默认关闭'],
   ['probe','定时自检','按周期自动执行云端连通性自检；默认关闭，开启后写入定时任务，重启仍生效'],
   ['sshd','SSH 登录','把控制台账号的 shell 换成 bash, 便于 SSH 维护'],
   ['plugins','插件系统','开机自动铺开 /etc/mnt/plugins 下的插件'],
@@ -236,15 +235,16 @@ function load() {
     html += card('ipset 封锁', (s.ipset||0)+' 条', (s.ipset>0)?'ok':'warn');
     html += card('封锁规则', (s.rules||0)+' 条', (s.rules>0)?'ok':'warn');
     html += card('封锁命中', (s.blocked_hits||0)+' 包', (s.blocked_hits>0)?'warn':'ok');
-    html += card('DNS 记录', s.dns_running==1?'运行中':'未运行', s.dns_running==1?'ok':'warn');
+    html += card('被动采集', s.collect_running==1?'运行中':'未运行', s.collect_running==1?'ok':'warn');
+    html += card('今日事件', '连 '+(s.n_conn||0)+' / DNS '+(s.n_dns||0)+' / 命中 '+(s.n_block||0));
     html += card('日志分区', (s.log_usage||'-'));
     document.getElementById('cards').innerHTML = html;
-    var ds = document.getElementById('dns-state');
-    if (ds) {
-      ds.textContent = (s.dns_running == 1)
-        ? '运行中（正在写 ' + (s.log_dir||'/etc/log/ikguard') + '/dns-*.log）'
-        : '未运行（默认关闭；点击"启动 DNS 记录"才开始，重启即失效）';
-      ds.className = (s.dns_running == 1) ? 'ok' : 'warn';
+    var cs = document.getElementById('collect-state');
+    if (cs) {
+      cs.textContent = (s.collect_running == 1)
+        ? '运行中（订阅 conntrack 事件，写 ' + (s.log_dir||'/etc/log/ikguard') + '/*.log）'
+        : '未运行（打开"审计取证"开关后运行；' + (s.xt_ok==1 ? '封锁命中日志可用' : '封锁命中日志不可用') + '）';
+      cs.className = (s.collect_running == 1) ? 'ok' : 'warn';
     }
 
     var sw = '';
@@ -276,7 +276,7 @@ function loadLogs() {
   if (!EULA_OK) return Promise.resolve();
   return api('show', {TYPE:'logs'}).then(function(d){
     var l = d.logs || {};
-    ['report','audit','dns','proc','conn','boot'].forEach(function(k){
+    ['report','audit','conn','dns','block','boot'].forEach(function(k){
       var el = document.getElementById('log-'+k);
       if (el) { el.textContent = l[k] || '(空)'; }
     });
@@ -297,10 +297,10 @@ function setFlag(key, value) {
   }).catch(function(e){ tip('设置失败: '+e.message, 'msg err'); });
 }
 
-function dnsAct(op) {
-  tip('正在' + (op === 'start' ? '启动' : '停止') + ' DNS 记录…');
-  api('dns', {op:op}).then(function(){
-    tip('DNS 记录已' + (op === 'start' ? '启动' : '停止'), 'msg ok');
+function collectAct(op) {
+  tip('正在' + (op === 'start' ? '启动' : '停止') + '采集器…');
+  api('collect', {op:op}).then(function(){
+    tip('采集器已' + (op === 'start' ? '启动' : '停止'), 'msg ok');
     return load();
   }).catch(function(e){ tip('操作失败: '+e.message, 'msg err'); });
 }

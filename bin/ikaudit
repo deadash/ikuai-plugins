@@ -1,24 +1,20 @@
 #!/bin/bash
 #
-# ikaudit - 审计/取证命令行
+# ikaudit - 审计/取证命令行(被动采集)
 #
-#   ikaudit init            初始化日志目录并写入启动标记
-#   ikaudit proc            进程快照对比(记录新启动的进程)
-#   ikaudit conn            出向连接快照对比(记录新连接)
-#   ikaudit blocked         读取封锁规则命中计数增量
-#   ikaudit dns-start       启动 DNS 查询记录(仅本次有效, 重启即失效; 不进定时任务)
-#   ikaudit dns-stop        停止 DNS 记录
-#   ikaudit dns             汇总 DNS 日志中的云端域名命中
+#   ikaudit init            初始化日志目录
+#   ikaudit collect         前台运行被动采集器(conntrack 事件 + 内核封锁日志)
+#   ikaudit collect-start   后台启动被动采集器(写 pid 文件)
+#   ikaudit collect-stop    停止被动采集器(按 pid 关闭, 并清 LOG 规则与残留子进程)
+#   ikaudit collect-status  查看采集器状态
+#   ikaudit report          生成采集报告(异常返回码 1)
 #   ikaudit probe           云端连通性自检(解析 + TCP 连接尝试, 约 20 秒)
-#   ikaudit report          生成体检报告(异常返回码 1)
-#   ikaudit watch           cron 采集入口(proc+conn+blocked+日志维护; 不含 DNS 抓包启停)
-#   ikaudit cronsync        按开关重建定时任务(probe=1 才加入定时自检)
-#   ikaudit tail [n]        查看审计日志末尾(默认 40 行)
-#   ikaudit status          查看日志文件与采集状态
+#   ikaudit cronsync        按开关重建定时任务(只有 probe=1 才写自检 cron)
+#   ikaudit tail [n]        查看审计事件末尾(默认 40 行)
+#   ikaudit status          查看采集器/日志/封锁状态
 #
-# 开关(boot_args): probe=1 把"定时自检"写进 crontab(默认 0, 持久化: 重启按配置重建)。
-# DNS 抓包不持久化: 只当次生效, 重启即失效, 且永远不进定时任务。
-# 日志规模: 保留 AU_KEEP_DAYS 天 + 目录/单文件/DNS 日志体积封顶。
+# 开关(boot_args): audit=1 才运行被动采集器(默认 0, 持久化: 重启按配置恢复);
+#   probe=1 才把"定时自检"写进 crontab(默认 0)。采集本身**不占 cron**。
 #
 # 日志目录(持久分区): /etc/log/ikguard
 
@@ -29,7 +25,7 @@ SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 . "$SELF_DIR/../lib/backdoor.sh"
 . "$SELF_DIR/../lib/audit.sh"
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd="$1"
 [ $# -gt 0 ] && shift
@@ -37,19 +33,21 @@ cmd="$1"
 case "$cmd" in
     init)
         au_init
-        au_event INFO "audit.init" "审计启动 (日志目录 $(au_dir))"
+        au_event INFO "audit.init" "审计目录就绪 ($(au_dir))"
         ;;
-    proc)       au_proc_scan >/dev/null ;;
-    conn)       au_conn_scan >/dev/null ;;
-    blocked)    au_blocked_scan >/dev/null ;;
-    dns-start)  au_dns_start ;;
-    dns-stop)   au_dns_stop ;;
-    dns-status) au_dns_running && echo "运行中($(au_dns_pids | wc -l) 个抓包进程: $(au_dns_pids | tr '\n' ' '))" || echo "未运行" ;;
-    dns)        au_dns_check >/dev/null ;;
-    probe)      au_probe ;;
-    report)     au_report ;;
-    watch)      au_watch ;;
-    cronsync)   au_install_cron ;;
+    collect)        au_collect ;;
+    collect-start)  au_collect_start ;;
+    collect-stop)   au_collect_stop ;;
+    collect-status)
+        if au_collect_running; then
+            echo "运行中(pid $(cat "$AU_COLLECT_PIDFILE" 2>/dev/null))"
+        else
+            echo "未运行"
+        fi
+        ;;
+    report)         au_report ;;
+    probe)          au_probe ;;
+    cronsync)       au_install_cron ;;
     tail)
         n="${1:-40}"
         f="$(au_file audit)"
@@ -59,13 +57,17 @@ case "$cmd" in
     status)
         echo "日志目录 : $(au_dir)"
         echo "使用空间 : $(df -h "$(au_dir)" 2>/dev/null | tail -n1)"
+        echo "开关     : audit=$(au_flag audit 0) (1=运行被动采集器) probe=$(au_flag probe 0) (1=定时自检)"
+        echo "采集器   : $(au_collect_running && echo "运行中(pid $(cat "$AU_COLLECT_PIDFILE" 2>/dev/null))" || echo 未运行)"
+        echo "事件源   : conntrack $(pidof conntrack >/dev/null 2>&1 && echo 已订阅 || echo 未订阅)" \
+             "/ 内核LOG $(au_xt_log_ok && echo 可用 || echo 不可用)"
         echo "文件列表 :"
         ls -la "$(au_dir)" 2>/dev/null | tail -n +2
-        echo "DNS 采集 : $(au_dns_running && echo 运行中 || echo 未运行) (手动启停, 不持久化)"
-        echo "定时自检 : $(au_probe_cron_on && echo "已加入定时任务($AU_PROBE_CRON)" || echo "未加入(开关 probe=$(au_flag probe 0))")"
-        echo "封锁规则 :"
-        iptables -S 2>/dev/null | grep -E 'ikuai_blk|multiport' || echo "  (无)"
-        echo "命中包数 : $(au_blocked_hits)"
+        echo "封锁     : ipset $(ipset -L "$IPSET_NAME" 2>/dev/null | grep -c '^[0-9]') 条" \
+             "/ 规则 $(iptables -S 2>/dev/null | grep -c ikuai_blk) 条" \
+             "/ 命中 $(au_blocked_hits) 包"
+        echo "封锁链   :"
+        iptables -S "$AU_BLK_CHAIN" 2>/dev/null || echo "  (无)"
         ;;
     ""|-h|--help|help)
         usage

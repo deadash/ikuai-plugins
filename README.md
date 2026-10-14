@@ -31,7 +31,7 @@
 4. 插件, plugins (默认开启, 首次使用需在插件管理页同意《使用条款》)
 5. cron, cron, cron_test
 6. 程序安装, shell
-7. 审计取证, audit (默认开启, 日志写 /etc/log/ikguard)
+7. 审计取证, audit (默认关闭; 开启后运行常驻**被动采集**进程, 不占 cron, 日志写 /etc/log/ikguard)
 8. 定时自检, probe (默认关闭, 开启后把云端连通性自检写入定时任务, 重启仍生效)
 
 > 两个曾经存在的开关已经去掉:
@@ -150,39 +150,51 @@ bin/*                            命令行      -> /usr/sbin/
 2. 命令行: 把 zip 放到 `/etc/mnt/plugins/` 后执行 `ikplugin scan`(或直接重启)
 3. 命令行: `ikplugin install /path/xxx.zip`
 
-## 审计取证 (audit)
+## 审计取证 (audit) —— 被动采集，不用 cron
 
-`scripts/06_enable_audit.sh` 每次开机启动审计，由 `bin/ikaudit` 采集，日志写在持久分区
-`/etc/log/ikguard/`。日志规模有**时间 + 体积双限**(默认保留 3 天、目录上限 300MB、
-单文件 10MB、DNS 抓包日志 50MB)，由 cron 每分钟随采集一起整理：
+`audit=1` 时由 `scripts/06_enable_audit.sh` 拉起一个**常驻被动采集进程**(`ikaudit collect`)，
+事件全部由内核推送，**没有任何定时轮询**：
+
+| 事件源 | 拿到什么 |
+| --- | --- |
+| `conntrack -E` | 连接事件(`[NEW]`/`[DESTROY]`)；其中 `dport=53` 的另存为 DNS 事件 |
+| `/dev/kmsg` | **封锁命中**：命中封锁链的包由 `-j LOG` 写进内核日志，采集器读出来 |
+
+不做的事（设计上明确移除）：
+
+* **不判断"程序启动"** —— 本内核没编 `CONFIG_CONNECTOR`(cn_proc)/`CONFIG_AUDIT`/`CONFIG_KPROBES`/`CONFIG_FTRACE`，没有 exec/fork 事件源。
+* **不抓包做 DNS** —— DNS 只是连接事件里 `dport=53` 的子集；conntrack 不含报文，所以只能到"谁向谁查"，**拿不到域名**。
+* **封锁命中不读计数器** —— DROP 掉的包不会进 conntrack，只能靠 `-j LOG` 事件。
+
+设备的 `iptables` 自带 `-j LOG`（实测 3.7.16：`iptables -j LOG -h` 直接列出 `--log-prefix`，
+加规则后内核日志确实出现命中记录），所以框架**不分发任何额外构件**；万一某固件砍掉了它，
+可用 `.tools/build_xt_LOG.sh` 编一个补上。
+
+日志写在持久分区 `/etc/log/ikguard/`（时间 + 体积双限：保留 3 天、目录 300MB、单文件 10MB）：
 
 | 文件 | 内容 |
 | --- | --- |
 | `boot.log` | 框架开机日志 |
-| `audit-YYYYMMDD.log` | 结构化事件: `proc.start` `conn.out` `dns.cloud` `cloud.ip` `cloud.port` `block.hit` `backdoor.proc` `backdoor.alive` `probe.*` |
-| `proc-YYYYMMDD.log` | 进程快照对比(新启动的进程) |
-| `conn-YYYYMMDD.log` | 出向连接快照对比(新增公网连接) |
-| `dns-YYYYMMDD.log` | DNS 查询记录(tcpdump 逐网卡抓 `udp port 53`)；**默认关闭，手动启停且不持久化(重启即失效)** |
-| `report.txt` | 最近一次体检报告(结论: 正常/异常) |
+| `audit-YYYYMMDD.log` | 结构化事件: `collect.begin/stop` `block.hit` `cloud.leak` `probe.*` … |
+| `conn-YYYYMMDD.log` | 连接事件(公网方向) |
+| `dns-YYYYMMDD.log` | DNS 事件(`dport=53`) |
+| `block-YYYYMMDD.log` | 封锁命中原始记录 |
+| `report.txt` | 最近一次采集报告 |
 
 ```
-ikaudit status      # 日志目录/占用/DNS 采集/封锁规则
-ikaudit tail 80     # 最近的审计事件
-ikaudit report      # 立刻体检(发现后门进程/云端连接时返回码 1)
-ikaudit probe       # 云端连通性自检(解析 + TCP 443 尝试；立即执行一次)
-ikaudit dns-start   # 手动启动 DNS 抓包(默认关闭, 重启即失效)
-ikaudit dns-stop    # 手动停止 DNS 抓包
-ikaudit cronsync    # 按开关重建定时任务(probe=1 才加入定时自检)
+ikaudit status          # 采集器/事件源/日志/封锁状态
+ikaudit tail 80         # 最近的审计事件
+ikaudit collect-start   # 后台启动被动采集器(也可用控制台开关)
+ikaudit collect-stop    # 停止采集器(按 pid 关闭并清 LOG 规则)
+ikaudit collect-status  # 采集器是否在运行
+ikaudit report          # 立刻生成报告(异常返回码 1)
+ikaudit probe           # 云端连通性自检(解析 + TCP 443 尝试；立即执行一次)
+ikaudit cronsync        # 重建定时任务(只有 probe=1 才写自检 cron)
 ```
 
-采集由 cron 驱动(`/etc/crontabs/cron.d/ikguard_audit` 每分钟、`ikguard_report` 每 10 分钟)，
-并用 iKuai 的 `crond_commit` 立即提交到 `/etc/crontabs/root`，不必重启。
-
-> **DNS 抓包与 cron 无关，且不持久化**：默认关闭，只有用户点了"启动 DNS 记录"才抓；点"停止"即停，
-> 设备重启后自动失效，不会被定时任务重新拉起(启动写 pid 文件，停止按 pid 关闭并删除)。
-> `ikaudit watch` 只做采集与日志维护，不启停抓包。
-> **定时自检是开关(`probe`)**：默认关闭(不写入定时任务)，开启后才加入 crontab，重启按配置重建 —— 开了就继续定时跑，没开就既不执行也不进定时任务。
-> **审计总开关 `audit`**：=0 时不采集，并把 `watch`/`report`/`probe` 全部从定时任务里移除(含 `cron.d` 副本)、停掉 DNS 抓包；=1 时才写入。即"没开的功能绝不留在定时任务里"。
+> **采集不占 cron**：`audit` 是持久化开关，=1 时开机自动拉起采集器、=0 时停掉并清掉框架的定时任务；
+> 控制台开关即时生效，重启按配置恢复。
+> **定时自检(`probe`)仍走 cron**：默认关闭，开启后才写 `*/10 ikaudit probe`，重启按配置重建。
 
 ## 网页插件 (Web)
 

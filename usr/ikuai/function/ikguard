@@ -10,9 +10,11 @@
 #   eula    op=accept|reject                         记录《使用条款》是否已同意(插件功能前置条件)
 #   apply   -                                        重新应用后门阻断 + 审计
 #   plugin  op=scan|install|remove|list [name=...]    插件管理(install 用于安装刚上传的 zip)
-#   dns     op=start|stop                            DNS 查询记录(默认关闭, 手动启停, 不持久化)
 #   probe   -                                        云端连通性自检(手动立即执行一次)
 #   logclear -                                       清空审计日志(含滚动出的 .1)
+#
+# 审计取证(audit=1)是**常驻被动采集进程**(conntrack 事件 + 内核封锁日志), 不占 cron;
+# DNS 只是连接事件里 dport=53 的子集, 不再单独抓包/单独开关。
 #
 # 说明: 本文件通过 /usr/ikuai/function/ikguard 软链被 func_api.sh 分发,
 #       stdout 必须是合法 JSON(show) 或错误信息(失败时), 日志写文件不要污染 stdout。
@@ -28,7 +30,7 @@ IK_EULA_VER="v1.0"
 IK_IKPLUGIN="$BOOT_DIR/bin/ikplugin"
 IK_IKAUDIT="$BOOT_DIR/bin/ikaudit"
 IK_PROBE_OUT="$IK_LOG_DIR/last-probe.txt"
-IK_AU_PIDFILE="/tmp/.ikaudit/dns.pids"      # DNS 抓包 pid 文件(由 ikaudit dns-start 写入)
+IK_AU_PIDFILE="/tmp/.ikaudit/collect.pid"   # 被动采集器 pid 文件(由 ikaudit collect-start 写入)
 
 # ---------------------------------------------------------------- 工具
 
@@ -78,15 +80,30 @@ ikg_blocked_hits() {
         awk '/ikuai_blk|multiport/{s+=$1} END{print s+0}'
 }
 
-# DNS 抓包是否在运行(与 ikaudit 一致: 只认 pid 文件; 默认关闭, 用户手动启停)
-ikg_dns_running() {
-    local pid
-    test -f "$IK_AU_PIDFILE" || return 1
-    while read -r pid _; do
-        [ -n "$pid" ] || continue
-        kill -0 "$pid" 2>/dev/null && return 0
-    done < "$IK_AU_PIDFILE"
-    return 1
+# 被动采集器是否在运行(与 ikaudit 一致: 只认 pid 文件)
+ikg_collect_running() {
+    local pid=""
+    test -f "$IK_AU_PIDFILE" && read -r pid < "$IK_AU_PIDFILE"
+    [ -n "$pid" ] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+# 内核封锁日志(-j LOG)是否可用 —— 用于"封锁命中"事件化
+ikg_xt_ok() {
+    iptables -j LOG -h 2>&1 | grep -q 'log-prefix'
+}
+
+# 今日某类事件条数(按事件名统计, 避免把旧格式内容算进来)
+ikg_count() {
+    local f pat="$2"
+    f="$(ikg_day_file "$1")"
+    [ -f "$f" ] || { printf '0'; return 0; }
+    if [ -n "$pat" ]; then
+        grep -cE "$pat" "$f" 2>/dev/null || printf '0'
+    else
+        grep -c . "$f" 2>/dev/null || printf '0'
+    fi
 }
 
 # 审计事件(与 lib/audit.sh 相同格式, 便于同一份日志里检索)
@@ -130,7 +147,11 @@ __show_data() {
     status+="$(ikg_kv backdoor_alive "$procs"),"
     status+="$(ikg_num ipset "$(ipset -L ikuai_blk 2>/dev/null | grep -c '^[0-9]')"),"
     status+="$(ikg_num rules "$(iptables -S 2>/dev/null | grep -c ikuai_blk)"),"
-    status+="$(ikg_num dns_running "$(ikg_dns_running && echo 1 || echo 0)"),"
+    status+="$(ikg_num collect_running "$(ikg_collect_running && echo 1 || echo 0)"),"
+    status+="$(ikg_num xt_ok "$(ikg_xt_ok && echo 1 || echo 0)"),"
+    status+="$(ikg_num n_conn "$(ikg_count conn 'conn\.(NEW|DESTROY)')"),"
+    status+="$(ikg_num n_dns "$(ikg_count dns 'dns\.query')"),"
+    status+="$(ikg_num n_block "$(ikg_count block 'block\.hit')"),"
     status+="$(ikg_num blocked_hits "$(ikg_blocked_hits)"),"
     status+="$(ikg_num eula "$(ikg_eula_accepted && echo 1 || echo 0)"),"
     status+="$(ikg_kv log_dir "$IK_LOG_DIR"),"
@@ -217,19 +238,19 @@ __show_probe() {
 }
 
 __show_logs() {
-    local audit dns boot proc conn report
+    local audit dns boot conn block report
     audit="$(ikg_tail_file "$(ikg_day_file audit)" 120)"
     dns="$(ikg_tail_file "$(ikg_day_file dns)" 80)"
     boot="$(ikg_tail_file "$IK_LOG_DIR/boot.log" 80)"
-    proc="$(ikg_tail_file "$(ikg_day_file proc)" 60)"
     conn="$(ikg_tail_file "$(ikg_day_file conn)" 60)"
+    block="$(ikg_tail_file "$(ikg_day_file block)" 60)"
     report="$(ikg_tail_file "$IK_LOG_DIR/report.txt" 40)"
     local logs="{"
     logs+="$(ikg_kv audit "$audit"),"
-    logs+="$(ikg_kv dns "$dns"),"
-    logs+="$(ikg_kv boot "$boot"),"
-    logs+="$(ikg_kv proc "$proc"),"
     logs+="$(ikg_kv conn "$conn"),"
+    logs+="$(ikg_kv dns "$dns"),"
+    logs+="$(ikg_kv block "$block"),"
+    logs+="$(ikg_kv boot "$boot"),"
     logs+="$(ikg_kv report "$report")"
     logs+="}"
     json_append __json_result__ logs:json
@@ -386,21 +407,22 @@ plugin()
     return 0
 }
 
-dns()
+# 采集器状态: 供页面显示(也可让用户手动重启采集器)
+collect()
 {
-    # 只由用户点击触发; 启停的审计事件由 ikaudit 自己写入(dns.start/dns.stop),
-    # 这里不再重复记一条, 避免同一动作写两条事件。
-    local op="${op:-start}"
+    local op="${op:-status}"
     case "$op" in
         start)
-            "$IK_IKAUDIT" dns-start >/dev/null 2>&1 || { echo "启动失败: tcpdump 不可用或没有可用网卡"; return 1; }
-            echo "DNS 记录已启动(仅本次有效，重启后自动失效)"
+            "$IK_IKAUDIT" collect-start >/dev/null 2>&1 || { echo "采集器启动失败(检查 audit 开关与 conntrack)"; return 1; }
+            echo "被动采集器已启动"
             ;;
         stop)
-            "$IK_IKAUDIT" dns-stop >/dev/null 2>&1 || { echo "停止失败"; return 1; }
-            echo "DNS 记录已停止"
+            "$IK_IKAUDIT" collect-stop >/dev/null 2>&1
+            echo "被动采集器已停止"
             ;;
-        *)  echo "不支持的 op: $op"; return 1 ;;
+        status|*)
+            echo "被动采集器: $(ikg_collect_running && echo 运行中 || echo 未运行)"
+            ;;
     esac
     return 0
 }
@@ -422,14 +444,13 @@ probe()
 
 logclear()
 {
-    # 当天日志 + 滚动出来的 .1 + DNS 扫描偏移状态一起清, 避免留下半截历史
+    # 当天日志 + 滚动出来的 .1 一起清, 避免留下半截历史
     local k
     mkdir -p "$IK_LOG_DIR" 2>/dev/null
-    for k in audit dns proc conn; do
+    for k in audit conn dns block; do
         : > "$IK_LOG_DIR/$k-$(date +%Y%m%d).log" 2>/dev/null
         rm -f "$IK_LOG_DIR/$k-"*.log.1 2>/dev/null
     done
-    rm -f /tmp/.ikaudit/dns.scan.* 2>/dev/null
     Syslog "[ikguard] 审计日志已清空"
     echo "审计日志已清空"
     return 0

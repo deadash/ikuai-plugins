@@ -44,6 +44,10 @@ BD_PORTS="1853 2016 2221 2502 6000 9443 15602 1863 32015 32017 8086 6444 21422"
 
 IPSET_NAME="ikuai_blk"
 
+# 封锁链: 命中它的包 = 被封锁。用独立链是为了让"封锁命中"能被 -j LOG 记录
+# (LOG 是非终止目标, 记完继续走 DROP), 且不受 backdoor_guard 每分钟重建规则顺序影响。
+BD_BLK_CHAIN="IKG_BLK"
+
 # 用户扩展文件(可选, 一行一条)
 BD_EXT_DOMAINS="/etc/mnt/ikblock.domains"
 BD_EXT_NETS="/etc/mnt/ikblock.nets"
@@ -291,16 +295,21 @@ bd_block_network() {
 
     bd_resolve_domains
 
-    # 目的地址在封锁集合内 -> DROP
-    iptables -C OUTPUT -m set --match-set "$IPSET_NAME" dst -j DROP 2>/dev/null || \
-        iptables -I OUTPUT 1 -m set --match-set "$IPSET_NAME" dst -j DROP 2>/dev/null
-    iptables -C FORWARD -m set --match-set "$IPSET_NAME" dst -j DROP 2>/dev/null || \
-        iptables -I FORWARD 1 -m set --match-set "$IPSET_NAME" dst -j DROP 2>/dev/null
+    # 封锁链: 默认只有 DROP; 采集器开启时会往链首插一条 LOG(命中即写内核日志)
+    iptables -N "$BD_BLK_CHAIN" 2>/dev/null
+    iptables -C "$BD_BLK_CHAIN" -j DROP 2>/dev/null || \
+        iptables -A "$BD_BLK_CHAIN" -j DROP 2>/dev/null
 
-    # 云端专用端口 -> DROP
+    # 目的地址在封锁集合内 -> 跳封锁链
+    iptables -C OUTPUT -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null || \
+        iptables -I OUTPUT 1 -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null
+    iptables -C FORWARD -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null || \
+        iptables -I FORWARD 1 -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null
+
+    # 云端专用端口 -> 跳封锁链
     ports=$(echo "$BD_PORTS" | tr ' ' ',')
-    iptables -C OUTPUT -p tcp -m multiport --dports "$ports" -j DROP 2>/dev/null || \
-        iptables -I OUTPUT 2 -p tcp -m multiport --dports "$ports" -j DROP 2>/dev/null
+    iptables -C OUTPUT -p tcp -m multiport --dports "$ports" -j "$BD_BLK_CHAIN" 2>/dev/null || \
+        iptables -I OUTPUT 2 -p tcp -m multiport --dports "$ports" -j "$BD_BLK_CHAIN" 2>/dev/null
 }
 
 # DNS 层兜底: 把云端域名指向 0.0.0.0
