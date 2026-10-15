@@ -2,84 +2,60 @@
 #
 # 后门 & 云端更新通道 禁用库
 #
-# 设计原则:
+# 设计原则(目标设备固定: iKuai 3.7.16 x64, 二进制不变):
 #   1) 只针对"与爱快云端通信"的进程/通道，不动路由、DHCP、NAT、QoS 等本地功能
-#   2) 三重保险: 进程层(不启动+杀灭) + 文件层(改写宿主脚本) + 网络层(出口封锁)
-#   3) 幂等: 可重复执行。开机由 plugins 钩子执行一次，另由 cron 每分钟复查
+#   2) 两层阻断: 进程层(空壳+杀灭) + 文件层(改写宿主脚本); 网络层只用 /etc/hosts 封域名
+#      —— 不碰 ipset/iptables: 防火墙会被系统重建、规则丢失后无从察觉, 且影响转发
+#   3) 幂等: 可重复执行。**只在开机执行一次**(boot.sh -> scripts/02), 不装任何定时器:
+#      空壳启动即记一笔日志然后退出、被禁用的宿主脚本启动即 exit 0, 每分钟复查纯属空转
+#   4) **空壳即监控**: 任何代码路径尝试启动被禁组件, /etc/log/ikguard/stub.log 都会记下
+#      "时间 + 组件名 + 拉起者的 cmdline" —— 没有新记录 = 没有启动尝试(零代价的启动监控)
 #
-# 依赖: 由 common.sh 提供 P()/log()/is_enabled()，调用前需先 source
+# 名单依据 2026-10-15 在 3.7.16 真机上逐项核实, 不存在的一律不写(不做兼容其它设备的兜底):
+#   进程/二进制: /usr/sbin/{ik_rc_client,cre,pmd,dtalkd,dtalkc}
+#   启动点(全部是脚本, 已逐一改写):
+#     rc                          cre / cre_client / ik_rc_client / pmd / submit.lua / update_hosts.sh
+#     utils/monitor_process.sh    守护重拉 pmd / ik_rc_client / cre / cre_client + ikaudit_update.sh
+#     utils/update_hosts.sh       会 killall pmd && pmd(云端取址)
+#     utils/submit.lua            云端指令通道(submit3)
+#     dingtalk.sh -> DTalkInside/monidtalk.sh   dtalkd(钉钉云管)
+#     catcherd.sh                 抓包上报(rc 里的启动行固件自己已注释)
+#     ikaudit_update.sh           audit.ikuai8.com / routers.ikuai8.com:6444 的 .so/二进制下载器
+#
+# 依赖: 由 common.sh 提供 P()/log()，调用前需先 source
 
 BD_MARK="ikblock"
 
-# 需要杀灭/禁止的进程名(精确匹配)
-BD_PROCS="ik_rc_client cre cre_client pmd dtalkd dtalkc catcherd"
+# 需要杀灭/禁止的进程名(精确匹配; 仅本设备实际存在的 5 个)
+BD_PROCS="ik_rc_client cre pmd dtalkd dtalkc"
 
-# 需要按命令行关键字杀灭的进程(仅限已被"文件层"改写的云端通道脚本,
-# 因为改写只影响新启动的实例, 正在运行的旧实例需要显式杀掉)
+# 按命令行关键字杀灭的脚本实例(只在开机清一次"补丁前已启动"的旧实例;
+# 之后这些脚本已被禁用, 新实例启动即自灭, 不需要再扫)
 BD_KILL_PATTERNS="utils/update_hosts.sh utils/submit.lua \
-DTalkInside/monidtalk.sh script/dingtalk.sh script/catcherd.sh"
+DTalkInside/monidtalk.sh script/dingtalk.sh script/catcherd.sh ikaudit_update.sh"
 
-# 需要被替换成空壳的程序(官方后门/上报客户端)
-BD_STUBS="/usr/sbin/ik_rc_client /usr/sbin/cre /usr/sbin/pmd /usr/sbin/dtalkd \
-/usr/sbin/dtalkc /usr/bin/cre_client /tmp/ikpkg/cre/cre /tmp/ikpkg/pmd/pmd"
+# 需要被替换成空壳的程序(本设备实际存在的 5 个云端客户端)
+BD_STUBS="/usr/sbin/ik_rc_client /usr/sbin/cre /usr/sbin/pmd /usr/sbin/dtalkd /usr/sbin/dtalkc"
 
-# 需要删除的软链接(云端地址表/运行时包)
-BD_LINKS="/etc/cre.d/cre_host /etc/pmd.d/pmd_host /usr/bin/cre_client"
-
-# 需要封锁的云端域名
+# 需要封锁的云端域名(写入 /etc/hosts 指向 0.0.0.0)
 BD_DOMAINS="302.ikuai8.com download.ikuai8.com pkgmanager.ikuai8.com dpi.ikuai8.com \
 audit.ikuai8.com routers.ikuai8.com coll.ikuai8.com dis.ikuai8.com datacollect.ikuai8.com \
 ctrl1.ikuai8.com ctrl2.ikuai8.com as1.ikuai8.com as2.ikuai8.com youyu.api.ikuai8.com \
 genuine.ikuai8.com iapi.ikuai8.com yun.ikuai8.com portal.ikuai8.com local.ikuai8.com \
 2021.ikuai8.com bm.ikuai8.com report.ikuai8.com www.ikuai8.com ikuai8.com"
 
-# 已知云端 IP / 网段(动态解析失败时的兜底)
-BD_NETS="59.110.6.135/32 59.110.171.18/32 47.94.237.123/32 123.57.179.21/32 \
-123.57.14.224/32 120.55.220.4/32 120.55.220.55/32 121.43.10.93/32 47.114.236.50/32 \
-47.98.0.183/32 47.96.32.142/32 59.82.122.79/32 121.199.107.25/32 47.114.208.4/32 \
-59.110.6.0/24 59.110.171.0/24"
-
-# 云端专用端口
-BD_PORTS="1853 2016 2221 2502 6000 9443 15602 1863 32015 32017 8086 6444 21422"
-
-IPSET_NAME="ikuai_blk"
-
-# 封锁链: 命中它的包 = 被封锁。用独立链是为了让"封锁命中"能被 -j LOG 记录
-# (LOG 是非终止目标, 记完继续走 DROP), 且不受 backdoor_guard 每分钟重建规则顺序影响。
-BD_BLK_CHAIN="IKG_BLK"
-
-# 用户扩展文件(可选, 一行一条)
+# 用户扩展域名文件(可选, 一行一条, 追加进 hosts)
 BD_EXT_DOMAINS="/etc/mnt/ikblock.domains"
-BD_EXT_NETS="/etc/mnt/ikblock.nets"
 
-BD_RESOLVE_STAMP="/tmp/.ikblock_resolve"
+# 空壳/被禁脚本共用的"启动尝试"监控日志(持久分区, 重启不丢)
+BD_WATCH_LOG="/etc/log/ikguard/stub.log"
 
 bd_log() { log "[backdoor] $*"; }
 
 # ---------------------------------------------------------------- 进程层
 
-# 按命令行关键字杀灭进程(避开自身/SSH 会话/交互式 shell)
-bd_kill_pattern() {
-    local pat dir pid cmd
-    for pat in $BD_KILL_PATTERNS; do
-        for dir in /proc/[0-9]*; do
-            pid="${dir#/proc/}"
-            case "$pid" in "$$"|"$PPID") continue ;; esac
-            cmd="$( { tr '\0' ' ' < "$dir/cmdline"; } 2>/dev/null )"
-            [ -n "$cmd" ] || continue
-            case "$cmd" in *"$pat"*) ;; *) continue ;; esac
-            # 排除 ssh 会话与 shell -c 形式(避免误杀维护命令自身)
-            case "$cmd" in *sshd*|*dropbear*) continue ;; esac
-            case "$cmd" in *" -c "*) continue ;; esac
-            bd_log "kill($pat) pid=$pid cmd=$cmd"
-            kill -9 "$pid" 2>/dev/null
-        done
-    done
-    return 0
-}
-
-# 杀灭后门进程
-bd_kill() {
+# 按进程名杀灭(便宜: 每个名字一次 pidof/killall/pkill)
+bd_kill_procs() {
     local p
     for p in $BD_PROCS; do
         if pidof "$p" >/dev/null 2>&1; then
@@ -88,10 +64,41 @@ bd_kill() {
             pkill -9 -x "$p" 2>/dev/null
         fi
     done
+    return 0
+}
+
+# 一次遍历 /proc, 按命令行关键字杀灭脚本实例(每个进程只读一次 cmdline, 匹配全部关键字;
+# 排除自身/SSH 会话/交互式 shell, 避免误杀维护命令)
+bd_kill_pattern() {
+    local dir pid cmd pat
+    for dir in /proc/[0-9]*; do
+        pid="${dir#/proc/}"
+        case "$pid" in "$$"|"$PPID") continue ;; esac
+        cmd="$( { tr '\0' ' ' < "$dir/cmdline"; } 2>/dev/null )"
+        [ -n "$cmd" ] || continue
+        case "$cmd" in *sshd*|*dropbear*) continue ;; esac
+        case "$cmd" in *" -c "*) continue ;; esac
+        for pat in $BD_KILL_PATTERNS; do
+            case "$cmd" in
+                *"$pat"*)
+                    bd_log "kill($pat) pid=$pid cmd=$cmd"
+                    kill -9 "$pid" 2>/dev/null
+                    break
+                    ;;
+            esac
+        done
+    done
+    return 0
+}
+
+# 杀灭后门进程(只在开机的 bd_apply 里用: 名字匹配 + 一次 /proc 命令行清扫)
+bd_kill() {
+    bd_kill_procs
     bd_kill_pattern
 }
 
-# 用空壳替换程序(使其启动后立即退出)
+# 用空壳替换程序: 启动即记一笔"谁想启动我"(零代价启动监控), 睡 1 秒防被守护进程
+# 紧密循环重拉, 然后退出
 bd_stub() {
     local f path
     for f in $BD_STUBS; do
@@ -100,23 +107,17 @@ bd_stub() {
         # 已是空壳则跳过
         grep -q "\[$BD_MARK\]" "$path" 2>/dev/null && continue
         rm -f "$path"
-        {
-            printf '#!/bin/sh\n'
-            printf '# [%s] disabled\n' "$BD_MARK"
-            printf 'sleep 1\n'
-            printf 'exit 0\n'
-        } > "$path"
+        cat > "$path" <<EOF
+#!/bin/sh
+# [$BD_MARK] disabled —— 空壳: 记一笔"谁想启动我"后立即退出
+n=\${0##*/}
+{ printf "[%s] [ikblock] %s 被启动(已拦截) ppid=%s\n" "\$(date "+%F %T")" "\$n" "\$PPID"; \
+  tr "\0" " " < "/proc/\$PPID/cmdline" 2>/dev/null; printf "\n"; } >> $(P "$BD_WATCH_LOG") 2>/dev/null
+sleep 1
+exit 0
+EOF
         chmod +x "$path"
         bd_log "空壳替换: $f"
-    done
-}
-
-# 删除云端地址表软链接
-bd_unlink() {
-    local f path
-    for f in $BD_LINKS; do
-        path="$(P "$f")"
-        { test -e "$path" || test -L "$path"; } && { rm -f "$path"; bd_log "删除链接: $f"; }
     done
 }
 
@@ -135,14 +136,18 @@ bd_sed() {
     fi
 }
 
-# 让整个脚本在 shebang 之后立即退出
+# 让整个脚本在 shebang 之后立即退出(启动尝试会先记进监控日志)
 bd_neuter_script() {
-    local f="$1" p
-    f="$1"; p="$(P "$f")"
+    local f="$1" p blk
+    p="$(P "$f")"
     test -f "$p" || return 0
     grep -q "\[$BD_MARK\]" "$p" 2>/dev/null && return 0
-    awk -v mark="$BD_MARK" 'NR==1{print; print "# ["mark"] 已禁用"; print "exit 0"; next}{print}' \
-        "$p" > "$p.tmp" && mv "$p.tmp" "$p"
+    blk='# [ikblock] 已禁用: 记一笔启动尝试后立即退出
+n=${0##*/}
+{ printf "[%s] [ikblock] %s 被启动(已禁用拦截) ppid=%s\n" "$(date "+%F %T")" "$n" "$PPID"; tr "\0" " " < "/proc/$PPID/cmdline" 2>/dev/null; printf "\n"; } >> /etc/log/ikguard/stub.log 2>/dev/null
+exit 0'
+    awk -v blk="$blk" 'NR==1{print; print blk; next}{print}' "$p" > "$p.tmp" \
+        && mv "$p.tmp" "$p"
     chmod +x "$p"
     bd_log "已禁用脚本: $f"
 }
@@ -186,7 +191,7 @@ bd_patch_rc() {
     bd_sed "$p" "s|^\([[:space:]]*\)cre[[:space:]]*>/dev/null[[:space:]]*2>&1|\1# [$BD_MARK] cre|"
 }
 
-# monitor_process.sh: 进程守护会重新拉起后门
+# monitor_process.sh: 进程守护会重新拉起后门(还会用 start-stop-daemon 拉起云端下载器)
 bd_patch_monitor() {
     local f="/usr/ikuai/script/utils/monitor_process.sh" p
     p="$(P "$f")"
@@ -197,6 +202,8 @@ bd_patch_monitor() {
     bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*ik_rc_client[[:space:]]|\1# [$BD_MARK] cgroup_exec ik_rc_client |"
     bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*cre[[:space:]]|\1# [$BD_MARK] cgroup_exec cre |"
     bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*cre_client[[:space:]]|\1# [$BD_MARK] cgroup_exec cre_client |"
+    # 云端审计组件下载器(audit.ikuai8.com / routers.ikuai8.com:6444), 常驻 while 循环
+    bd_sed "$p" "s|^\([[:space:]]*\)start-stop-daemon[[:space:]][[:space:]]*-S[[:space:]]*-x[[:space:]]*.*ikaudit_update.sh|\1# [$BD_MARK] start-stop-daemon ikaudit_update.sh |"
 }
 
 # collection.sh: 远控连通性判断会误关多线IPv6，必须跳过(否则影响功能)
@@ -230,9 +237,10 @@ bd_disable_action() {
     bd_sed "$p" "s|^${name}()|${name}_disabled() # [$BD_MARK] 已禁用|"
 }
 
-# 更新通道: 取址脚本 / submit3 指令通道 / 云端自动升级
+# 更新通道: 取址脚本 / submit3 指令通道 / 云端自动升级 / 云端审计组件下载器
 bd_patch_updates() {
     bd_neuter_script "/usr/ikuai/script/utils/update_hosts.sh"
+    bd_neuter_script "/usr/ikuai/script/ikaudit_update.sh"
     # submit.lua 是 Lua 脚本: 注释用 -- , 语句用合法的 do return M end
     bd_insert_after "/usr/ikuai/script/utils/submit.lua" \
         "^function M:boot" "禁用云端指令通道(submit3)" "do return M end" "--"
@@ -249,129 +257,71 @@ bd_patch_system() {
     bd_patch_updates
 }
 
-# ---------------------------------------------------------------- 网络层
+# ---------------------------------------------------------------- 域名封锁
 
-# 解析域名并加入 ipset(带节流, 避免每分钟大量DNS查询)
-# 注意: 只有在确实解析成功时才更新节流时间戳, 否则开机时 WAN 还没起来
-#       (解析全失败)会导致之后 10 分钟内都不再重试, 域名封锁形同虚设。
-bd_resolve_domains() {
-    local now last=0 d ip extra="" n=0
-    now=$(date +%s)
-    test -f "$BD_RESOLVE_STAMP" && last=$(cat "$BD_RESOLVE_STAMP" 2>/dev/null)
-    case "$last" in ''|*[!0-9]*) last=0 ;; esac
-    test $((now - last)) -lt 600 && return 0
-
-    test -f "$(P "$BD_EXT_DOMAINS")" && extra=$(cat "$(P "$BD_EXT_DOMAINS")" 2>/dev/null)
-
-    for d in $BD_DOMAINS $extra; do
-        ip="$(dns_lookup_ip "$d")" || continue
-        case "$ip" in 127.*|0.0.0.0|"") continue ;; esac
-        ipset add "$IPSET_NAME" "$ip" -exist 2>/dev/null && n=$((n + 1))
-    done
-
-    if [ "$n" -gt 0 ]; then
-        echo "$now" > "$BD_RESOLVE_STAMP" 2>/dev/null
-        bd_log "按域名解析补充封锁地址: $n 个"
-    else
-        bd_log "域名解析未成功(无外网/DNS不可用), 稍后重试"
-    fi
-}
-
-# 出口封锁: 域名解析结果 + 已知网段 + 云端专用端口
-bd_block_network() {
-    local n ports extra=""
-    ipset create "$IPSET_NAME" hash:net -exist 2>/dev/null || {
-        bd_log "ipset 不可用，跳过网络层封锁"
-        return 0
-    }
-
-    for n in $BD_NETS; do
-        ipset add "$IPSET_NAME" "$n" -exist 2>/dev/null
-    done
-    test -f "$(P "$BD_EXT_NETS")" && extra=$(cat "$(P "$BD_EXT_NETS")" 2>/dev/null)
-    for n in $extra; do
-        ipset add "$IPSET_NAME" "$n" -exist 2>/dev/null
-    done
-
-    bd_resolve_domains
-
-    # 封锁链: 默认只有 DROP; 采集器开启时会往链首插一条 LOG(命中即写内核日志)
-    iptables -N "$BD_BLK_CHAIN" 2>/dev/null
-    iptables -C "$BD_BLK_CHAIN" -j DROP 2>/dev/null || \
-        iptables -A "$BD_BLK_CHAIN" -j DROP 2>/dev/null
-
-    # 目的地址在封锁集合内 -> 跳封锁链
-    iptables -C OUTPUT -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null || \
-        iptables -I OUTPUT 1 -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null
-    iptables -C FORWARD -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null || \
-        iptables -I FORWARD 1 -m set --match-set "$IPSET_NAME" dst -j "$BD_BLK_CHAIN" 2>/dev/null
-
-    # 云端专用端口 -> 跳封锁链
-    ports=$(echo "$BD_PORTS" | tr ' ' ',')
-    iptables -C OUTPUT -p tcp -m multiport --dports "$ports" -j "$BD_BLK_CHAIN" 2>/dev/null || \
-        iptables -I OUTPUT 2 -p tcp -m multiport --dports "$ports" -j "$BD_BLK_CHAIN" 2>/dev/null
-}
-
-# DNS 层兜底: 把云端域名指向 0.0.0.0
-# 默认关闭(boot_args: backdoor_hosts=0)，因为写 hosts 可能影响本地门户页面等
-# 本地功能；网络层已足够，这里作为可选加固。
+# 把云端域名写入 /etc/hosts 指向 0.0.0.0 —— 唯一的网络层手段。
+# 只影响本机自己的域名解析(零进程、零防火墙规则); 局域网客户端的 DNS 查询
+# 不经过本机 hosts, 不受影响。/etc/hosts 每次开机随根分区还原, 所以每次开机重写。
 bd_block_hosts() {
     local p d
-    test "$(get_flag backdoor_hosts 0)" = "1" || return 0
-
     p="$(P "/etc/hosts")"
     test -f "$p" || return 0
     grep -q "\[$BD_MARK\]" "$p" 2>/dev/null && return 0
     {
         echo "# [$BD_MARK] begin 屏蔽爱快云端域名"
         for d in $BD_DOMAINS; do echo "0.0.0.0 $d"; done
+        test -f "$(P "$BD_EXT_DOMAINS")" && \
+            while IFS= read -r d; do
+                case "$d" in ''|\#*) continue ;; esac
+                echo "0.0.0.0 $d"
+            done < "$(P "$BD_EXT_DOMAINS")"
         echo "# [$BD_MARK] end"
     } >> "$p"
-    bd_log "已写入 hosts 屏蔽: $p"
+    bd_log "已写入 hosts 域名封锁: $p"
 }
 
 # ---------------------------------------------------------------- 对外接口
 
-# 完整应用一次(开机调用)
+# 完整应用一次(开机调用; 需要"重新应用"时手动执行 bin/backdoor_guard 或 Web 页"重新应用")
 bd_apply() {
     bd_log "开始禁用后门/更新通道"
     bd_kill
     bd_stub
-    bd_unlink
     bd_patch_system
-    bd_block_network
     bd_block_hosts
-    # 文件层改完后再次杀灭: 进程守护(monitor_process.sh)可能又拉起了旧实例
-    bd_kill
     bd_log "完成"
 }
 
-# 轻量复查(cron 每分钟调用): 只处理会被系统重建的部分
-bd_guard() {
-    bd_kill
-    bd_stub
-    bd_block_network
-}
-
-# 安装每分钟守卫 cron(防止系统重建防火墙后失效)
-bd_install_guard() {
-    local cron_dir guard
+# 清掉历史遗留的"每分钟守卫"定时任务(旧版本装的), 并保证之后不会再装。
+# 升级到本版本后第一次开机就会执行; 幂等, 没有遗留时什么都不做。
+bd_remove_guard() {
+    local cron_dir root guard tmp kept=0
     cron_dir="$(P "/etc/crontabs/cron.d")"
+    root="$(P "/etc/crontabs/root")"
     guard="$(P "/etc/mnt/.boot/bin/backdoor_guard")"
-    mkdir -p "$cron_dir" 2>/dev/null
-    chmod +x "$guard" 2>/dev/null
-    printf '* * * * * %s\n' "$guard" > "$cron_dir/ikblock_guard"
-    # iKuai 的 crond 只读 /etc/crontabs/root(cron.d 会被 crond_commit 整体重写),
-    # 必须直接追加进 root, 否则"每分钟守卫"不会跑。
-    root="$(P /etc/crontabs/root)"
-    if [ -f "$root" ]; then
-        grep -q "$guard" "$root" 2>/dev/null || printf '* * * * * %s\n' "$guard" >> "$root"
-    else
-        mkdir -p "$(dirname "$root")" 2>/dev/null
-        printf '* * * * * %s\n' "$guard" > "$root"
+
+    test -f "$cron_dir/ikblock_guard" && kept=1
+    rm -f "$cron_dir/ikblock_guard" 2>/dev/null
+
+    if [ -f "$root" ] && grep -q "backdoor_guard" "$root" 2>/dev/null; then
+        # 只删守卫行(按完整路径或脚本名匹配), 其它 cron 行(iKuai 自带任务)原样保留
+        tmp="$root.ikblock.tmp"
+        if grep -v -e "$guard" -e "backdoor_guard" "$root" > "$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$root" 2>/dev/null          # 还有其它行: 换掉
+        elif [ $? -eq 1 ]; then
+            rm -f "$tmp" 2>/dev/null                  # 文件里只剩守卫行: 清空(而不是留下)
+            : > "$root" 2>/dev/null
+        else
+            rm -f "$tmp" 2>/dev/null                  # grep 本身出错: 原样保留, 下次开机再试
+        fi
+        kept=1
     fi
-    bd_log "已安装守卫任务: $root (+$cron_dir/ikblock_guard)"
-    if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then
-        ( . "$(P /usr/ikuai/include/crond.sh)"; crond_commit >/dev/null 2>&1 )
+
+    if [ "$kept" = 1 ]; then
+        bd_log "已移除历史遗留的每分钟守卫(本版本改为开机一次性应用, 不装定时器)"
+        if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then
+            ( . "$(P /usr/ikuai/include/crond.sh)"; crond_commit >/dev/null 2>&1 )
+        fi
     fi
+    return 0
 }

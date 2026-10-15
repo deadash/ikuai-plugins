@@ -7,20 +7,18 @@
 #        audit=1 开机自动拉起、=0 停止; 默认关闭(install.sh 写入 audit=0)
 #   2) 事件全部来自内核推送, 没有任何定时轮询:
 #        conntrack -E   连接事件([NEW]/[DESTROY]); dport=53 的另存为 DNS 事件
-#        /dev/kmsg      封锁命中(命中 DROP 的包由 -j LOG 写进内核日志)
-#   3) **不做"程序启动"判断** —— 本内核没有 exec/fork 事件源
-#      (CONFIG_CONNECTOR / CONFIG_AUDIT / CONFIG_KPROBES / CONFIG_FTRACE 均未编译)
-#   4) **不做 DNS 抓包** —— DNS 只是连接事件里 dport=53 的子集(conntrack 拿不到域名)
+#   3) 封锁只走 /etc/hosts + 空壳(见 lib/backdoor.sh), 不碰 iptables —— 所以没有
+#      "封锁命中"事件源; 被禁组件的启动尝试由空壳自己记入 stub.log(零代价的启动监控)
 #
 # 日志(持久分区 /etc/log, 重启不丢):
 #   boot.log            框架日志
 #   audit-YYYYMMDD.log  结构化事件
 #   conn-YYYYMMDD.log   连接事件
 #   dns-YYYYMMDD.log    DNS(dport=53)事件
-#   block-YYYYMMDD.log  封锁命中(原始内核日志行)
+#   stub.log            被禁组件的启动尝试(空壳记录, 见 lib/backdoor.sh)
 #   report.txt          最近一次报告
 #
-# 依赖: common.sh 的 P()/log()/get_flag()，backdoor.sh 的 BD_PORTS/BD_NETS/IPSET_NAME
+# 依赖: common.sh 的 P()/log()/get_flag()
 
 AU_DIR="${AU_DIR:-/etc/log/ikguard}"
 AU_KEEP_DAYS="${AU_KEEP_DAYS:-3}"           # 时间周期: 日志保留天数
@@ -29,15 +27,6 @@ AU_MAX_FILE="${AU_MAX_FILE:-10485760}"      # 大小限制: 单个日志文件(�
 AU_STATE="/tmp/.ikaudit"
 AU_REPORT="report.txt"
 AU_COLLECT_PIDFILE="$AU_STATE/collect.pid"
-AU_BLK_CHAIN="${AU_BLK_CHAIN:-${BD_BLK_CHAIN:-IKG_BLK}}"   # backdoor.sh 的封锁链: 命中日志挂这里
-AU_LOG_TAG="${AU_LOG_TAG:-ikguard-blk}"         # 内核日志里的标记(匹配用)
-AU_LOG_PREFIX="${AU_LOG_PREFIX:-$AU_LOG_TAG }"  # iptables -j LOG 的前缀
-AU_PROBE_CRON="${AU_PROBE_CRON:-*/10}"      # 定时自检的 cron 周期
-
-# 兜底名单(backdoor.sh 未加载时使用)
-: "${BD_PORTS:=1853 2016 2221 2502 6000 9443 15602 1863 32015 32017 8086 6444 21422}"
-: "${BD_NETS:=59.110.6.0/24 59.110.171.0/24 47.94.237.123/32}"
-: "${IPSET_NAME:=ikuai_blk}"
 
 au_log() { log "[audit] $*"; }
 
@@ -103,28 +92,6 @@ au_is_private() {
     return 1
 }
 
-# IP 是否落在云端网段名单(BD_NETS)里
-au_ip_in_nets() {
-    local ip="$1" n
-    for n in $BD_NETS; do
-        case "$n" in
-            *"/32") [ "$ip" = "${n%/32}" ] && return 0 ;;
-            *"/24") [ "${ip%.*}" = "${n%.*}" ] && return 0 ;;
-            *)      [ "$ip" = "$n" ] && return 0 ;;
-        esac
-    done
-    return 1
-}
-
-# 端口是否属于云端专用端口
-au_port_in_list() {
-    local p="$1" x
-    for x in $BD_PORTS; do
-        [ "$p" = "$x" ] && return 0
-    done
-    return 1
-}
-
 # pid 是否真的在运行(排除僵尸)
 au_pid_running() {
     local s
@@ -166,37 +133,10 @@ au_rotate() {
         rm -f "$old" 2>/dev/null
     done
 
-    for f in audit conn dns block; do
+    for f in audit conn dns; do
         au_cap_file "$(au_file "$f")" "$AU_MAX_FILE"
     done
     au_cap_file "$(au_dir)/boot.log" "$AU_MAX_FILE"
-    return 0
-}
-
-# ---------------------------------------------------------------- 封锁命中日志
-
-# iptables 是否支持 -j LOG(设备 3.7.16 实测自带该目标, 无需外部扩展)
-# 若哪天固件砍掉了, 可用 .tools/build_xt_LOG.sh 编一个补到 /usr/lib/iptables/
-au_xt_log_ok() {
-    iptables -j LOG -h 2>&1 | grep -q 'log-prefix'
-}
-
-# 在封锁链首位插入 LOG(非终止: 记完继续 DROP) -> 命中即写内核日志
-au_log_rule_on() {
-    au_xt_log_ok || {
-        au_event WARN "block.nolog" "iptables 不支持 -j LOG, 封锁命中无法事件化"
-        return 1
-    }
-    iptables -N "$AU_BLK_CHAIN" 2>/dev/null
-    iptables -C "$AU_BLK_CHAIN" -j LOG --log-prefix "$AU_LOG_PREFIX" 2>/dev/null && return 0
-    iptables -I "$AU_BLK_CHAIN" 1 -j LOG --log-prefix "$AU_LOG_PREFIX" 2>/dev/null
-    return 0
-}
-
-au_log_rule_off() {
-    while iptables -C "$AU_BLK_CHAIN" -j LOG --log-prefix "$AU_LOG_PREFIX" 2>/dev/null; do
-        iptables -D "$AU_BLK_CHAIN" -j LOG --log-prefix "$AU_LOG_PREFIX" 2>/dev/null || break
-    done
     return 0
 }
 
@@ -237,37 +177,6 @@ au_ct_event() {
     if [ "$dport" = "53" ]; then
         au_emit dns INFO "dns.query" "$proto $src:$sport -> $dst:$dport"
     fi
-
-    # 出现"云端网段/专用端口"的**已建立**连接 = 封锁可能失效(被拦的包根本进不了 conntrack)
-    if [ "$ev" = NEW ]; then
-        au_port_in_list "$dport" && \
-            au_event WARN "cloud.leak" "出向连到云端专用端口且未被拦截: $proto $src:$sport -> $dst:$dport"
-        au_ip_in_nets "$dst" && \
-            au_event WARN "cloud.leak" "出向连到云端网段且未被拦截: $proto $src:$sport -> $dst:$dport"
-    fi
-    return 0
-}
-
-# 内核日志行: "6,618,49727577,-;ikguard-blk: IN= OUT=wan1 SRC=.. DST=.. PROTO=TCP DPT=443"
-au_kmsg_event() {
-    local line="$1" seq msg src dst proto dpt
-    seq="${line#*,}"; seq="${seq%%,*}"
-    case "$seq" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$seq" -le "${AU_KMSG_SEQ:-0}" ] && return 0     # 启动前的旧记录不重放
-
-    msg="${line#*;}"
-    # 内核不一定原样带上前缀后的空格, 用 tag 匹配更稳(如 "ikguard-blk: IN=..." )
-    case "$msg" in *"$AU_LOG_TAG"*) ;; *) return 0 ;; esac
-
-    src="${msg#*SRC=}";   src="${src%% *}"
-    dst="${msg#*DST=}";   dst="${dst%% *}"
-    proto="${msg#*PROTO=}"; proto="${proto%% *}"
-    case "$msg" in *DPT=*) dpt="${msg#*DPT=}"; dpt="${dpt%% *}" ;; *) dpt="-" ;; esac
-    [ -n "$src$dst" ] || { src="-"; dst="-"; }
-    [ -n "$proto" ] || proto="-"
-
-    au_emit block INFO "block.hit" "$proto $src -> $dst:$dpt"
-    au_event WARN "block.hit" "封锁命中: $proto $src -> $dst:$dpt"
     return 0
 }
 
@@ -282,27 +191,6 @@ au_collect_running() {
 au_ct_spawn() {
     ( trap '' HUP; exec conntrack -E -o timestamp ) > "$AU_FIFO" 2>/dev/null &
     AU_CT_PID=$!
-}
-
-au_km_spawn() {
-    ( trap '' HUP; exec cat /dev/kmsg ) > "$AU_FIFO" 2>/dev/null &
-    AU_KM_PID=$!
-}
-
-# 当前 /dev/kmsg 的最大 seq —— 避免重放"上一次采集"留下的旧命中。
-# 注意: 不能用 `head -c N /dev/kmsg`, 环形缓冲不足 N 字节时它会永久阻塞(/dev/kmsg 不会 EOF)。
-au_kmsg_seq_now() {
-    local tmp="$AU_STATE/kmsg.probe" p n
-    au_init
-    : > "$tmp" 2>/dev/null
-    cat /dev/kmsg > "$tmp" 2>/dev/null &
-    p=$!
-    sleep 2
-    kill "$p" 2>/dev/null
-    n="$(tail -n1 "$tmp" 2>/dev/null | cut -d, -f2)"
-    rm -f "$tmp" 2>/dev/null
-    case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    printf '%s' "$n"
 }
 
 # 别的采集器实例(排除自身) —— 防止重复订阅。
@@ -327,17 +215,15 @@ au_collect_others() {
     return 0
 }
 
-# 每 60 秒(无事件时)做一次维护: 日志规模 + 子进程存活
+# 每 60 秒(无事件时)做一次维护: 日志规模 + 事件流存活
 au_collect_maintain() {
     au_rotate
     au_pid_running "$AU_CT_PID" || { au_event WARN "collect.ct" "conntrack 事件流已断开, 重启"; au_ct_spawn; }
-    au_pid_running "$AU_KM_PID" || { au_event WARN "collect.kmsg" "内核日志读取已断开, 重启"; au_km_spawn; }
     return 0
 }
 
 au_collect_cleanup() {
-    au_log_rule_off
-    kill "$AU_CT_PID" "$AU_KM_PID" 2>/dev/null
+    kill "$AU_CT_PID" 2>/dev/null
     [ -n "${AU_FIFO:-}" ] && rm -f "$AU_FIFO" 2>/dev/null
     return 0
 }
@@ -362,14 +248,9 @@ au_collect() {
     rm -f "$AU_FIFO" 2>/dev/null
     mkfifo "$AU_FIFO" 2>/dev/null
 
-    au_log_rule_on
-    au_event INFO "collect.begin" "被动采集启动(conntrack 事件 + 内核封锁日志)"
-
-    # /dev/kmsg: 记下当前最大 seq, 跳过启动前的旧记录
-    AU_KMSG_SEQ="$(au_kmsg_seq_now)"
+    au_event INFO "collect.begin" "被动采集启动(conntrack 事件)"
 
     au_ct_spawn
-    au_km_spawn
 
     trap 'au_collect_cleanup' INT TERM EXIT
     exec 9<> "$AU_FIFO"
@@ -378,7 +259,6 @@ au_collect() {
         if read -r -t 60 -u 9 line; then
             case "$line" in
                 *'[NEW]'*|*'[DESTROY]'*|*'[UPDATE]'*) au_ct_event "$line" ;;
-                *"$AU_LOG_TAG"*)                      au_kmsg_event "$line" ;;
             esac
         else
             au_collect_maintain
@@ -425,118 +305,48 @@ au_collect_stop() {
     fi
     rm -f "$AU_COLLECT_PIDFILE"
 
-    # 兜底: 主进程被 -9 时 trap 不会执行, 这里清残留的采集器/子进程/FIFO 与 LOG 规则
+    # 兜底: 主进程被 -9 时 trap 不会执行, 这里清残留的事件流子进程与 FIFO
     for p in /proc/[0-9]*/cmdline; do
         [ -r "$p" ] || continue
         c="$( { tr '\0' ' ' < "$p"; } 2>/dev/null )"
         case "$c" in
-            *"conntrack -E"*|*"cat /dev/kmsg"*|*"ikaudit collect "*)
+            *"conntrack -E"*|*"ikaudit collect "*)
                 kill -9 "${p#/proc/}" 2>/dev/null
                 kill -9 "$(echo "${p#/proc/}" | cut -d/ -f1)" 2>/dev/null
                 ;;
         esac
     done
-    au_log_rule_off
     rm -f "$AU_STATE"/collect.*.fifo 2>/dev/null
     au_event INFO "collect.stop" "被动采集器已停止"
     return 0
 }
 
-# ---------------------------------------------------------------- 主动探测(手动)
-
-au_tcp_probe() {
-    local ip="$1" port="$2" pid
-    ( exec 3<>"/dev/tcp/$ip/$port" ) 2>/dev/null &
-    pid=$!
-    ( sleep 3; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-    if wait "$pid" 2>/dev/null; then
-        return 0
-    fi
-    return 1
-}
-
-# 云端连通性自检(手动触发; probe=1 时才由 cron 定时执行)
-au_probe() {
-    local d ip blocked=0 resolved=0 reachable=0
-    au_init
-    printf '=== 云端连通性自检 %s ===\n' "$(au_stamp)"
-    printf '说明: 解析成功但 TCP 连接失败 = 封锁生效; 若能连通则说明封锁失效。\n\n'
-    au_event INFO "probe.begin" "开始云端连通性自检"
-
-    for d in 302.ikuai8.com pkgmanager.ikuai8.com download.ikuai8.com; do
-        ip="$(dns_lookup_ip "$d")"
-        if [ -z "$ip" ]; then
-            printf '  %-24s 未解析到地址(设备无外网 / DNS 不可达)\n' "$d"
-            au_event INFO "probe.dns" "域名=$d 未解析到地址(环境无外网/DNS 不可达)"
-            continue
-        fi
-        resolved=$((resolved + 1))
-        if au_tcp_probe "$ip" 443; then
-            reachable=$((reachable + 1))
-            printf '  %-24s -> %-16s TCP 443 可连通 [异常! 封锁可能失效]\n' "$d" "$ip"
-            au_event WARN "probe.tcp" "!!! 可连通云端 $ip:443 (封锁可能失效)"
-        else
-            blocked=$((blocked + 1))
-            printf '  %-24s -> %-16s TCP 443 连接失败 [正常, 已被阻断]\n' "$d" "$ip"
-            au_event INFO "probe.tcp" "连接云端 $ip:443 失败(封锁生效/无外网)"
-        fi
-    done
-
-    printf '\n汇总: 解析成功 %s 个, 连接被阻断 %s 个, 可连通 %s 个\n' "$resolved" "$blocked" "$reachable"
-    if [ "$reachable" -gt 0 ]; then
-        printf '结论: 异常, 存在可连通的云端地址, 请检查 ipset/iptables 封锁规则\n'
-    elif [ "$resolved" -gt 0 ]; then
-        printf '结论: 正常, 云端域名可解析但连接全部被阻断\n'
-    else
-        printf '结论: 无法判断(设备当前没有可用外网, 请先把 WAN 配置好)\n'
-    fi
-    printf 'resolved=%s blocked=%s reachable=%s\n' "$resolved" "$blocked" "$reachable"
-    return 0
-}
-
 # ---------------------------------------------------------------- 报告
-
-# 封锁规则累计命中包数
-au_blocked_hits() {
-    { iptables -nvx -L OUTPUT 2>/dev/null; iptables -nvx -L FORWARD 2>/dev/null; } | \
-        awk '/ikuai_blk|multiport/{s+=$1} END{print s+0}'
-    return 0
-}
 
 # 生成报告(返回 0=正常 1=异常)
 au_report() {
-    local audit_on collect_on xt_ok n_conn n_dns n_block ipset rules hits verdict=0
+    local audit_on collect_on n_conn n_dns verdict=0
     au_init
     au_rotate
 
     audit_on="$(au_flag audit 0)"
     au_collect_running && collect_on=1 || collect_on=0
-    au_xt_log_ok && xt_ok=1 || xt_ok=0
     n_conn="$(au_count "$(au_file conn)" 'conn\.(NEW|DESTROY)')"
     n_dns="$(au_count "$(au_file dns)" 'dns\.query')"
-    n_block="$(au_count "$(au_file block)" 'block\.hit')"
-    ipset="$(ipset -L "$IPSET_NAME" 2>/dev/null | grep -c '^[0-9]')"
-    rules="$(iptables -S 2>/dev/null | grep -c ikuai_blk)"
-    hits="$(au_blocked_hits)"
-    case "$ipset" in ''|*[!0-9]*) ipset=0 ;; esac
-    case "$rules" in ''|*[!0-9]*) rules=0 ;; esac
 
     if [ "$audit_on" = "1" ] && [ "$collect_on" = 0 ]; then verdict=1; fi
-    [ "$ipset" -gt 0 ] || verdict=1
-    [ "$rules" -ge 2 ] || verdict=1
 
     {
         echo "ikguard 被动采集报告 $(au_stamp)"
         echo "-------------------------------------------------"
         echo "采集器   : $([ "$collect_on" = 1 ] && echo 运行中 || echo 未运行)   (开关 audit=$audit_on, 默认关闭)"
         echo "事件源   : conntrack 事件流 $([ "$collect_on" = 1 ] && echo 已订阅 || echo 未订阅)"
-        echo "           内核封锁日志 $([ "$xt_ok" = 1 ] && echo 可用 || echo '不可用(iptables 无 -j LOG)')"
-        echo "今日事件 : 连接 $n_conn 条 / DNS(dport=53) $n_dns 条 / 封锁命中 $n_block 条"
-        echo "封锁     : ipset $IPSET_NAME $ipset 条 / 规则 $rules 条 / 命中包数 $hits 包"
+        echo "今日事件 : 连接 $n_conn 条 / DNS(dport=53) $n_dns 条"
+        echo "启动监控 : stub.log(空壳记录被禁组件的启动尝试, 见 lib/backdoor.sh)"
         echo "日志     : $(au_dir) 保留 $AU_KEEP_DAYS 天 / 单文件上限 $AU_MAX_FILE 字节"
         echo "-------------------------------------------------"
         if [ "$verdict" = 1 ]; then
-            echo "结论: 异常(采集器未按开关运行, 或封锁规则/ipset 缺失)"
+            echo "结论: 异常(采集器未按开关运行)"
         else
             echo "结论: 正常"
         fi
@@ -546,44 +356,19 @@ au_report() {
     return "$verdict"
 }
 
-# ---------------------------------------------------------------- 定时任务(仅可选自检)
+# ---------------------------------------------------------------- 历史遗留清理
 
-au_probe_cron_on() { test "$(au_flag probe 0)" = "1"; }
-
-# 移除本框架写入的定时任务
+# 移除旧版本写入的 ikaudit 定时任务(本版本不写任何 cron, 只做清理)
+# 按 "bin/ikaudit" 匹配: 真机遗留行是 /etc/mnt/.boot/bin/ikaudit ...,
+# 不会误伤 /usr/ikuai/script/ikaudit_update.sh(不含 bin/ikaudit)
 au_remove_cron() {
-    local cron_dir root bin
+    local cron_dir root
     cron_dir="$(P /etc/crontabs/cron.d)"
     root="$(P /etc/crontabs/root)"
-    bin="$(P /etc/mnt/.boot/bin/ikaudit)"
     if [ -f "$root" ]; then
-        grep -v "$bin" "$root" > "$root.ikguard.tmp" 2>/dev/null || :
+        grep -v "bin/ikaudit" "$root" > "$root.ikguard.tmp" 2>/dev/null || :
         mv -f "$root.ikguard.tmp" "$root" 2>/dev/null
     fi
     rm -f "$cron_dir/ikguard_audit" "$cron_dir/ikguard_report" "$cron_dir/ikguard_probe" 2>/dev/null
-    return 0
-}
-
-# 重建定时任务: 采集是常驻进程, **不写任何 cron**;
-# 只有 probe=1(定时自检)才写一条。
-au_install_cron() {
-    local root bin probe_state
-    root="$(P /etc/crontabs/root)"
-    bin="$(P /etc/mnt/.boot/bin/ikaudit)"
-    mkdir -p "$(dirname "$root")" 2>/dev/null
-    au_remove_cron
-
-    if au_probe_cron_on; then
-        printf '%s * * * * %s probe >/dev/null 2>&1\n' "$AU_PROBE_CRON" "$bin" >> "$root"
-        printf '%s * * * * %s probe >/dev/null 2>&1\n' "$AU_PROBE_CRON" "$bin" > "$(P /etc/crontabs/cron.d/ikguard_probe)"
-        probe_state="$AU_PROBE_CRON"
-    else
-        probe_state="未启用(probe=0)"
-    fi
-    au_event INFO "cron.install" "定时任务已重建(采集为常驻进程, 不占 cron; 定时自检 $probe_state)"
-
-    if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then
-        ( . "$(P /usr/ikuai/include/crond.sh)"; crond_commit >/dev/null 2>&1 )
-    fi
     return 0
 }

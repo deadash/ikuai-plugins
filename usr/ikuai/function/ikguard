@@ -4,18 +4,17 @@
 # 页面: 系统设置 -> 插件管理 -> ikguard (前端 /plugins/app/ikguard.html)
 #
 # 动作:
-#   show    TYPE=data,flags,plugins,eula,logs,probe,disk  读取状态/开关/插件/条款/日志/自检/磁盘
+#   show    TYPE=data,flags,plugins,eula,logs,check,disk  读取状态/开关/插件/条款/日志/自检/磁盘
 #   seting  key=<配置项> value=<0|1>                 修改 /etc/mnt/boot_args 开关并立即生效
-#           (probe=1 加入定时自检, =0 移除; 其余开关见前端列表)
 #   eula    op=accept|reject                         记录《使用条款》是否已同意(插件功能前置条件)
 #   apply   -                                        重新应用后门阻断 + 审计
 #   plugin  op=scan|install|remove|list [name=...]    插件管理(install 用于安装刚上传的 zip)
-#   probe   -                                        云端连通性自检(手动立即执行一次)
+#   check   -                                        封锁自检: 空壳/hosts/进程/启动监控(即时完成)
 #   expand  op=set|pending|cancel|log size=<MiB>      系统盘(/etc/mnt)扩容(提交后重启执行)
 #   logclear -                                       清空审计日志(含滚动出的 .1)
 #
-# 审计取证(audit=1)是**常驻被动采集进程**(conntrack 事件 + 内核封锁日志), 不占 cron;
-# DNS 只是连接事件里 dport=53 的子集, 不再单独抓包/单独开关。
+# 审计取证(audit=1)是**常驻被动采集进程**(conntrack 连接事件), 不占 cron。
+# 被禁组件的启动尝试监控在 /etc/log/ikguard/stub.log(空壳记录, 见 lib/backdoor.sh)。
 #
 # 说明: 本文件通过 /usr/ikuai/function/ikguard 软链被 func_api.sh 分发,
 #       stdout 必须是合法 JSON(show) 或错误信息(失败时), 日志写文件不要污染 stdout。
@@ -30,7 +29,9 @@ IK_EULA_TEXT="$BOOT_DIR/www/eula.txt"
 IK_EULA_VER="v1.0"
 IK_IKPLUGIN="$BOOT_DIR/bin/ikplugin"
 IK_IKAUDIT="$BOOT_DIR/bin/ikaudit"
-IK_PROBE_OUT="$IK_LOG_DIR/last-probe.txt"
+IK_CHECK_OUT="$IK_LOG_DIR/last-check.txt"
+IK_STUB_LOG="$IK_LOG_DIR/stub.log"           # 空壳记录的"启动尝试"监控日志
+IK_HOSTS="/etc/hosts"                        # 域名封锁(0.0.0.0)所在文件
 IK_AU_PIDFILE="/tmp/.ikaudit/collect.pid"   # 被动采集器 pid 文件(由 ikaudit collect-start 写入)
 
 # 系统盘(/etc/mnt)扩容:
@@ -77,19 +78,13 @@ ikg_day_file() {
     printf '%s' "$f"
 }
 
-# 后门进程存活情况(空格分隔)
+# 后门进程存活情况(空格分隔; 名单与 lib/backdoor.sh 的 BD_PROCS 一致)
 ikg_backdoor_alive() {
     local out="" p
-    for p in ik_rc_client cre cre_client pmd dtalkd dtalkc catcherd; do
+    for p in ik_rc_client cre pmd dtalkd dtalkc; do
         pidof "$p" >/dev/null 2>&1 && out="$out $p"
     done
     printf '%s' "${out# }"
-}
-
-# 封锁规则命中包数
-ikg_blocked_hits() {
-    { iptables -nvx -L OUTPUT 2>/dev/null; iptables -nvx -L FORWARD 2>/dev/null; } | \
-        awk '/ikuai_blk|multiport/{s+=$1} END{print s+0}'
 }
 
 # 被动采集器是否在运行(与 ikaudit 一致: 只认 pid 文件)
@@ -99,11 +94,6 @@ ikg_collect_running() {
     [ -n "$pid" ] || return 1
     [ -d "/proc/$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null
-}
-
-# 内核封锁日志(-j LOG)是否可用 —— 用于"封锁命中"事件化
-ikg_xt_ok() {
-    iptables -j LOG -h 2>&1 | grep -q 'log-prefix'
 }
 
 # 今日某类事件条数(按事件名统计, 避免把旧格式内容算进来)
@@ -148,23 +138,22 @@ ikg_eula_text() {
 # ---------------------------------------------------------------- show
 
 __show_data() {
-    local status ver procs usage
+    local status ver procs usage hosts
     ver="$(sed -n 's/^version=//p' "$BOOT_DIR/Release" 2>/dev/null | head -n1)"
     procs="$(ikg_backdoor_alive)"
     usage="$(df -h "$IK_LOG_DIR" 2>/dev/null | tail -n1 | awk '{printf "%s 总 / %s 可用 / %s 已用", $2, $4, $5}')"
+    hosts="$(grep -c '\[ikblock\]' "$IK_HOSTS" 2>/dev/null)"
+    case "$hosts" in ''|*[!0-9]*) hosts=0 ;; esac
 
     status="{"
     status+="$(ikg_kv version "$ver"),"
     status+="$(ikg_kv plugins_ok "$(cat /etc/plugins_ok 2>/dev/null)"),"
     status+="$(ikg_kv backdoor_alive "$procs"),"
-    status+="$(ikg_num ipset "$(ipset -L ikuai_blk 2>/dev/null | grep -c '^[0-9]')"),"
-    status+="$(ikg_num rules "$(iptables -S 2>/dev/null | grep -c ikuai_blk)"),"
+    status+="$(ikg_num hosts_entries "$hosts"),"
+    status+="$(ikg_num stub_hits "$(wc -l < "$IK_STUB_LOG" 2>/dev/null || echo 0)"),"
     status+="$(ikg_num collect_running "$(ikg_collect_running && echo 1 || echo 0)"),"
-    status+="$(ikg_num xt_ok "$(ikg_xt_ok && echo 1 || echo 0)"),"
     status+="$(ikg_num n_conn "$(ikg_count conn 'conn\.(NEW|DESTROY)')"),"
     status+="$(ikg_num n_dns "$(ikg_count dns 'dns\.query')"),"
-    status+="$(ikg_num n_block "$(ikg_count block 'block\.hit')"),"
-    status+="$(ikg_num blocked_hits "$(ikg_blocked_hits)"),"
     status+="$(ikg_num eula "$(ikg_eula_accepted && echo 1 || echo 0)"),"
     status+="$(ikg_kv log_dir "$IK_LOG_DIR"),"
     status+="$(ikg_kv log_usage "$usage")"
@@ -237,16 +226,14 @@ __show_eula() {
     json_append __json_result__ eula:json
 }
 
-__show_probe() {
-    local running=0 text
-    pgrep -f "ikaudit probe" >/dev/null 2>&1 && running=1
-    text="$(ikg_tail_file "$IK_PROBE_OUT" 60)"
-    local probe="{"
-    probe+="$(ikg_num running "$running"),"
-    probe+="$(ikg_kv file "$IK_PROBE_OUT"),"
-    probe+="$(ikg_kv text "$text")"
-    probe+="}"
-    json_append __json_result__ probe:json
+__show_check() {
+    local text
+    text="$(ikg_tail_file "$IK_CHECK_OUT" 80)"
+    local check="{"
+    check+="$(ikg_kv file "$IK_CHECK_OUT"),"
+    check+="$(ikg_kv text "$text")"
+    check+="}"
+    json_append __json_result__ check:json
 }
 
 # ---------------------------------------------------------------- 磁盘 / 扩容
@@ -348,18 +335,18 @@ __show_disk() {
 }
 
 __show_logs() {
-    local audit dns boot conn block report
+    local audit dns boot conn stub report
     audit="$(ikg_tail_file "$(ikg_day_file audit)" 120)"
     dns="$(ikg_tail_file "$(ikg_day_file dns)" 80)"
     boot="$(ikg_tail_file "$IK_LOG_DIR/boot.log" 80)"
     conn="$(ikg_tail_file "$(ikg_day_file conn)" 60)"
-    block="$(ikg_tail_file "$(ikg_day_file block)" 60)"
+    stub="$(ikg_tail_file "$IK_STUB_LOG" 60)"
     report="$(ikg_tail_file "$IK_LOG_DIR/report.txt" 40)"
     local logs="{"
     logs+="$(ikg_kv audit "$audit"),"
     logs+="$(ikg_kv conn "$conn"),"
     logs+="$(ikg_kv dns "$dns"),"
-    logs+="$(ikg_kv block "$block"),"
+    logs+="$(ikg_kv stub "$stub"),"
     logs+="$(ikg_kv boot "$boot"),"
     logs+="$(ikg_kv report "$report")"
     logs+="}"
@@ -381,10 +368,6 @@ __apply_for() {
         cron)      ikg_run_script 04_enable_cron.sh ;;
         shell)     ikg_run_script 05_enable_shell.sh ;;
         audit)     ikg_run_script 06_enable_audit.sh ;;
-        probe)
-            # 定时自检: 重建定时任务(probe=1 才加入 crontab, =0 则移除)
-            "$IK_IKAUDIT" cronsync >/dev/null 2>&1
-            ;;
     esac
     return 0
 }
@@ -395,12 +378,10 @@ seting()
     case "$key" in
         ssh|sshd)        k="sshd" ;;
         backdoor)        k="backdoor" ;;
-        backdoor_hosts)  k="backdoor_hosts" ;;
         plugins)         k="plugins" ;;
         cron)            k="cron" ;;
         shell)           k="shell" ;;
         audit)           k="audit" ;;
-        probe)           k="probe" ;;
         *)               echo "不支持的配置项: $key" ; return 1 ;;
     esac
 
@@ -577,18 +558,42 @@ expand()
     return 0
 }
 
-# 云端连通性自检: 仅由用户点击"开始自检"触发一次(后台执行, 约 20 秒,
-# 结果写 last-probe.txt 由页面轮询)。不参与 cron, 也不在开机时执行。
-probe()
+# 封锁自检: 即时完成(几十次 fork), 检查四件事:
+#   1) 5 个云端客户端是否都被换成了空壳
+#   2) /etc/hosts 里的云端域名封锁条目数
+#   3) 是否还有后门进程存活
+#   4) stub.log 里最近的"启动尝试"(应该为空 —— 有记录=发现了新的启动点)
+# 结果同时写 last-check.txt 供页面回看。不参与 cron, 也不在开机时执行。
+check()
 {
-    mkdir -p "$IK_LOG_DIR" 2>/dev/null
-    if pgrep -f "ikaudit probe" >/dev/null 2>&1; then
-        echo "自检正在进行中，请稍候刷新"
-        return 0
+    local out="" f alive hosts n
+    alive="$(ikg_backdoor_alive)"
+    hosts="$(grep -c '0\.0\.0\.0' "$IK_HOSTS" 2>/dev/null)"
+    case "$hosts" in ''|*[!0-9]*) hosts=0 ;; esac
+
+    out="=== 封锁自检 $(date '+%Y-%m-%d %H:%M:%S') ==="
+    out+=$'\n1) 空壳替换:'
+    for f in /usr/sbin/ik_rc_client /usr/sbin/cre /usr/sbin/pmd /usr/sbin/dtalkd /usr/sbin/dtalkc; do
+        if grep -q '\[ikblock\]' "$f" 2>/dev/null; then
+            out+=$'\n     [OK] '"$f"
+        else
+            out+=$'\n     [!!] '"$f"' 未替换为空壳'
+        fi
+    done
+    out+=$'\n2) hosts 域名封锁: '"$hosts"' 条(0.0.0.0)'
+    out+=$'\n3) 后门进程: '"${alive:-无}"
+    out+=$'\n4) 启动尝试监控 stub.log:'
+    if [ -s "$IK_STUB_LOG" ]; then
+        out+=$'\n'"$(tail -n 10 "$IK_STUB_LOG" 2>/dev/null)"
+        out+=$'\n     [!!] 有组件尝试启动被禁后门 —— 上面是时间与拉起者, 需要排查'
+    else
+        out+=$'\n     [OK] 暂无任何启动尝试'
     fi
-    # 忽略 SIGHUP: 请求结束后父进程退出不能把自检带下去
-    ( trap '' HUP; "$IK_IKAUDIT" probe > "$IK_PROBE_OUT" 2>&1 ) &
-    echo "云端连通性自检已开始，约 20 秒后查看结果"
+
+    mkdir -p "$IK_LOG_DIR" 2>/dev/null
+    printf '%s\n' "$out" > "$IK_CHECK_OUT" 2>/dev/null
+    ikg_audit INFO "check" "封锁自检: 进程=${alive:-无} hosts=$hosts 条 stub记录=$([ -s "$IK_STUB_LOG" ] && echo 有 || echo 无)"
+    printf '%s\n' "$out"
     return 0
 }
 
@@ -597,7 +602,7 @@ logclear()
     # 当天日志 + 滚动出来的 .1 一起清, 避免留下半截历史
     local k
     mkdir -p "$IK_LOG_DIR" 2>/dev/null
-    for k in audit conn dns block; do
+    for k in audit conn dns; do
         : > "$IK_LOG_DIR/$k-$(date +%Y%m%d).log" 2>/dev/null
         rm -f "$IK_LOG_DIR/$k-"*.log.1 2>/dev/null
     done

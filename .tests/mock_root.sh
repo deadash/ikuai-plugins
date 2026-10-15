@@ -16,7 +16,14 @@ R="$(cd "$(dirname "$R")" && pwd)/$(basename "$R")"
 rm -rf "$R"
 mkdir -p "$R"
 
-mkdir -p "$R"/etc/mnt "$R"/etc/crontabs/cron.d "$R"/etc/cre.d "$R"/etc/pmd.d "$R"/etc/http_lua
+mkdir -p "$R"/etc/mnt "$R"/etc/crontabs/cron.d "$R"/etc/http_lua "$R"/usr/ikuai/script
+
+# 模拟"从旧版本(装过每分钟守卫)升级上来"的现场: 新版开机要清掉这些遗留,
+# 同时不能误删 iKuai 自带的 cron 行
+printf '* * * * * /etc/mnt/.boot/bin/backdoor_guard\n' > "$R/etc/crontabs/root"
+printf '*/5 * * * * /usr/ikuai/script/iktimer refresh\n' >> "$R/etc/crontabs/root"
+printf '*/10 * * * * /etc/mnt/.boot/bin/ikaudit probe >/dev/null 2>&1\n' >> "$R/etc/crontabs/root"
+printf '* * * * * /etc/mnt/.boot/bin/backdoor_guard\n' > "$R/etc/crontabs/cron.d/ikblock_guard"
 mkdir -p "$R"/usr/ikuai/script/utils "$R"/usr/DTalkInside "$R"/usr/sbin "$R"/usr/bin
 mkdir -p "$R"/usr/local/etc "$R"/var/log "$R"/tmp/ikpkg/cre "$R"/tmp/ikpkg/pmd
 
@@ -91,9 +98,28 @@ mkdir -p "$R"/usr/local/etc "$R"/var/log "$R"/tmp/ikpkg/cre "$R"/tmp/ikpkg/pmd
     printf '\t\tif ! __get_process_status openresty ;then\n'
     printf '\t\t\topenresty\n'
     printf '\t\tfi\n'
+    printf '\n'
+    printf '\t\t## 云端审计组件下载器(audit.ikuai8.com), 真机 monitor_process.sh 里就长这样\n'
+    printf '\t\tif [ ! -e /tmp/ikaudit_update.lock ];then\n'
+    printf '\t\t\tstart-stop-daemon -S -x /usr/ikuai/script/ikaudit_update.sh -b >/dev/null 2>&1\n'
+    printf '\t\tfi\n'
     printf '\tdone\n'
     printf '}\n'
 } > "$R/usr/ikuai/script/utils/monitor_process.sh"
+
+# ------------------------------------------------- ikaudit_update.sh(云端 .so/二进制下载器)
+cat > "$R/usr/ikuai/script/ikaudit_update.sh" <<'EOF'
+#!/bin/bash
+
+REST_VER="v2"
+AUDIT_HOST="https://audit.ikuai8.com/api"
+PUBLISHER_BIN_URL="https://routers.ikuai8.com:6444/audit/publisher/"
+
+while true; do
+	plugin_update
+	sleep 30
+done
+EOF
 
 # ------------------------------------------------- collection.sh
 cat > "$R/usr/ikuai/script/utils/collection.sh" <<'EOF'
@@ -207,22 +233,16 @@ update_file()
 }
 EOF
 
-# ------------------------------------------------- 程序/软链接
+# ------------------------------------------------- 程序(与 3.7.16 真机一致: 全是 /usr/sbin 下的实体文件;
+#                                                     真机没有 /tmp/ikpkg、/usr/bin/cre_client、地址表目录)
 printf '#!/bin/sh\necho real ik_rc_client\n' > "$R/usr/sbin/ik_rc_client"
-printf '#!/bin/sh\necho real cre\n'         > "$R/tmp/ikpkg/cre/cre"
-printf '#!/bin/sh\necho real pmd\n'         > "$R/tmp/ikpkg/pmd/pmd"
-ln -sf ../../tmp/ikpkg/cre/cre "$R/usr/sbin/cre"
-ln -sf ../../tmp/ikpkg/pmd/pmd "$R/usr/sbin/pmd"
-printf '#!/bin/sh\necho real dtalkd\n'      > "$R/usr/sbin/dtalkd"
-printf '#!/bin/sh\necho real cre_client\n'  > "$R/usr/bin/cre_client"
+printf '#!/bin/sh\necho real cre\n'          > "$R/usr/sbin/cre"
+printf '#!/bin/sh\necho real pmd\n'          > "$R/usr/sbin/pmd"
+printf '#!/bin/sh\necho real dtalkd\n'       > "$R/usr/sbin/dtalkd"
+printf '#!/bin/sh\necho real dtalkc\n'       > "$R/usr/sbin/dtalkc"
 
-printf 'dis.ikuai8.com:1853\n' > "$R/tmp/cre_host"
-ln -sf ../../tmp/cre_host "$R/etc/cre.d/cre_host"
-printf 'pkgmanager.ikuai8.com:15602\n' > "$R/tmp/pmd_host"
-ln -sf ../../tmp/pmd_host "$R/etc/pmd.d/pmd_host"
-
-chmod +x "$R/usr/sbin/ik_rc_client" "$R/usr/sbin/dtalkd" "$R/usr/bin/cre_client" \
-         "$R/tmp/ikpkg/cre/cre" "$R/tmp/ikpkg/pmd/pmd"
+chmod +x "$R/usr/sbin/ik_rc_client" "$R/usr/sbin/cre" "$R/usr/sbin/pmd" \
+         "$R/usr/sbin/dtalkd" "$R/usr/sbin/dtalkc"
 
 # ------------------------------------------------- 其它
 : > "$R/etc/hosts"

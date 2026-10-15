@@ -27,7 +27,8 @@ assert_not_grep()  { grep -q -- "$2" "$1" 2>/dev/null && bad "$3" || ok "$3"; }
 assert_exists()    { [ -e "$1" ] && ok "$2" || bad "$2"; }
 assert_noexist()   { [ -e "$1" ] && bad "$2" || ok "$2"; }
 assert_notlink()   { [ -L "$1" ] && bad "$2" || ok "$2"; }
-assert_shim()      { grep -qF -- "$2" "$SHIM_LOG" 2>/dev/null && ok "$3" || bad "$3"; }
+assert_shim()      { grep -qF -- "$1" "$SHIM_LOG" 2>/dev/null && ok "$3" || bad "$3"; }
+assert_not_shim()  { grep -qF -- "$1" "$SHIM_LOG" 2>/dev/null && bad "$2" || ok "$2"; }
 
 run_boot() {
     IK_SYSROOT="$MOCK" bash "$MOCK/etc/mnt/.boot/install.sh" >/dev/null 2>&1
@@ -40,11 +41,9 @@ bash "$TESTS_DIR/mock_root.sh" "$MOCK" >/dev/null || { echo "生成失败"; exit
 assert_exists "$MOCK/etc/mnt/.boot/install.sh" "boot.sh 已部署为 .boot/install.sh"
 assert_exists "$MOCK/etc/mnt/boot_args" "boot_args 已初始化"
 assert_grep "$MOCK/etc/mnt/boot_args" "^backdoor=1" "backdoor 开关默认开启"
-assert_grep "$MOCK/etc/mnt/boot_args" "^backdoor_hosts=0" "hosts 屏蔽默认关闭"
+assert_not_grep "$MOCK/etc/mnt/boot_args" "backdoor_hosts" "域名封锁已并入 backdoor(无独立开关)"
 
 section "1. 执行开机引导(模拟官方 plugins.sh 调用)"
-# 打开 hosts 屏蔽以便覆盖该分支(真机默认关闭)
-sed -i 's/^backdoor_hosts=.*/backdoor_hosts=1/' "$MOCK/etc/mnt/boot_args"
 run_boot
 assert_exists "$MOCK/var/log/ikuai-boot.log" "产生启动日志"
 
@@ -81,31 +80,42 @@ assert_not_grep "$MOCK/usr/ikuai/script/utils/submit.lua" "^\s*#"              "
 assert_grep     "$MOCK/usr/ikuai/script/upgrade.sh" "update_auto_disabled"      "upgrade.sh: 云端自动升级动作已改名禁用"
 assert_grep     "$MOCK/usr/ikuai/script/upgrade.sh" "# \[ikblock\]"            "upgrade.sh: 已标记"
 
-section "4. 进程层: 空壳替换与软链接清理"
+section "4. 进程层: 空壳替换(空壳=启动监控)"
 assert_grep     "$MOCK/usr/sbin/ik_rc_client" "ikblock"      "ik_rc_client 已换成空壳"
 assert_not_grep "$MOCK/usr/sbin/ik_rc_client" "real ik_rc_client" "ik_rc_client 原程序已移除"
 assert_grep     "$MOCK/usr/sbin/cre" "ikblock"               "cre 已换成空壳"
-assert_notlink  "$MOCK/usr/sbin/cre"                          "cre 软链接已断开"
 assert_grep     "$MOCK/usr/sbin/pmd" "ikblock"               "pmd 已换成空壳"
-assert_grep     "$MOCK/tmp/ikpkg/cre/cre" "ikblock"          "运行时包 cre 也被中和"
-assert_noexist  "$MOCK/etc/cre.d/cre_host"                   "云端地址表 cre_host 已删除"
-assert_noexist  "$MOCK/etc/pmd.d/pmd_host"                   "云端地址表 pmd_host 已删除"
+assert_grep     "$MOCK/usr/sbin/dtalkd" "ikblock"            "dtalkd 已换成空壳"
+assert_grep     "$MOCK/usr/sbin/dtalkc" "ikblock"            "dtalkc 已换成空壳"
+assert_grep     "$MOCK/usr/sbin/cre" "stub.log"              "空壳带启动监控(记录到 stub.log)"
+assert_grep     "$MOCK/usr/DTalkInside/monidtalk.sh" "stub.log" "被禁脚本同样记录启动尝试"
 assert_shim     "killall" "ik_rc_client"                     "尝试杀灭 ik_rc_client"
 
-section "5. 网络层: 出口封锁"
-assert_shim     "ipset create ikuai_blk" "ipset"             "创建封锁集合 ikuai_blk"
-assert_shim     "iptables -I OUTPUT 1 -m set" "iptables"     "OUTPUT 按集合 DROP"
-assert_shim     "iptables -I FORWARD 1 -m set" "iptables"    "FORWARD 按集合 DROP"
-assert_shim     "multiport --dports" "iptables"              "云端专用端口 DROP"
-assert_shim     "59.110.6.135/32" "ipset"                    "已加入已知云端 IP"
-assert_shim     "203.0.113.10" "ipset"                       "域名解析结果已加入集合"
+section "4b. 云端审计组件下载器(ikaudit_update.sh)"
+assert_grep     "$MOCK/usr/ikuai/script/ikaudit_update.sh" "exit 0" "ikaudit_update.sh 已禁用(启动即退)"
+assert_grep     "$MOCK/usr/ikuai/script/utils/monitor_process.sh" "# \[ikblock\] start-stop-daemon ikaudit_update.sh" "monitor: 不再拉起 ikaudit_update.sh"
+
+section "5. 域名封锁(/etc/hosts, 不碰防火墙)"
+assert_not_shim "ipset"                                      "不碰 ipset(旧版网络层已删)"
+assert_not_shim "iptables"                                   "不碰 iptables(旧版网络层已删)"
+# 不再做域名解析: 旧版每 10 分钟对 24 个云端域名各起一次 nslookup(单轮 60~120s, 长于
+# 60s 的 cron 周期, 叠加节流竞态 -> 2~6 个守卫并发), 是 30%~65% CPU 尖峰的根因
+assert_not_shim "nslookup"                                   "引导期间不做域名解析(不做 nslookup)"
 assert_grep     "$MOCK/etc/hosts" "0.0.0.0 302.ikuai8.com"   "hosts 屏蔽云端域名"
+assert_grep     "$MOCK/etc/hosts" "\[ikblock\]"              "hosts 屏蔽带标记(幂等依据)"
 
-section "6. 持久化守卫(cron 每分钟复查)"
-assert_exists  "$MOCK/etc/crontabs/cron.d/ikblock_guard"     "守卫 cron 已安装"
-assert_grep    "$MOCK/etc/crontabs/cron.d/ikblock_guard" "backdoor_guard" "守卫指向 backdoor_guard"
+section "6. 定时任务: 不装守卫, 且清掉旧版遗留"
+assert_noexist  "$MOCK/etc/crontabs/cron.d/ikblock_guard"    "未安装每分钟守卫 cron"
+assert_not_grep "$MOCK/etc/crontabs/root" "backdoor_guard"   "旧版守卫行已从 crontab 清除"
+assert_not_grep "$MOCK/etc/crontabs/root" "ikaudit probe"    "旧版自检 cron 行已清除"
+assert_grep     "$MOCK/etc/crontabs/root" "iktimer"          "iKuai 自带的 cron 行未被误删"
 
-section "7. 复查动作(guard)可用"
+# 边界: crontab 里只剩守卫一行时也要清干净(不能"怕清空"而留下)
+printf '* * * * * /etc/mnt/.boot/bin/backdoor_guard\n' > "$MOCK/etc/crontabs/root"
+run_boot
+assert_not_grep "$MOCK/etc/crontabs/root" "backdoor_guard"   "只剩守卫行时也能清掉(边界)"
+
+section "7. 手动重应用入口(backdoor_guard -> bd_apply)"
 IK_SYSROOT="$MOCK" bash "$MOCK/etc/mnt/.boot/bin/backdoor_guard" >/dev/null 2>&1
 ok "backdoor_guard 执行成功(退出码 0)"
 

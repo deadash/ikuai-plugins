@@ -1,7 +1,14 @@
 #!/bin/bash
 #
-# backdoor_guard - 后门/更新通道守卫
-# 由 cron 每分钟调用: 防止系统重建防火墙后封锁失效、或后门进程被重新拉起
+# backdoor_guard - 手动重新应用一次后门/更新通道阻断(**不装 cron**)
+#
+# 为什么不挂定时器: 开机时 scripts/02_disable_backdoor.sh 已完整应用一次, 而
+#   空壳客户端启动即记一笔日志然后退出、被禁用的宿主脚本启动即 exit 0 —— 每分钟再全量
+#   复查属于纯空转; 旧版的守卫还带"每 10 分钟给 24 个云端域名各做一次 nslookup",
+#   单轮 60~120s 长于 60s 的 cron 周期, 叠加节流竞态会把 2 vCPU 设备打出 30%~65% 的
+#   CPU 尖峰(相关代码已整体删除)。
+# 什么时候用它: 改了 /etc/hosts 或升级固件之后手动补一次; 平时看启动尝试监控:
+#   /etc/log/ikguard/stub.log(没有新记录 = 没有任何组件尝试启动被禁的后门)。
 
 # 通过 /usr/sbin/<name> 软链调用时 $0 是软链路径, 必须解析出真实路径
 SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
@@ -11,5 +18,5 @@ SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
 is_enabled "backdoor" || exit 0
 
-bd_guard
+bd_apply
 exit 0

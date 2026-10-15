@@ -58,17 +58,19 @@
 各配置名称如下
 
 1. ssh, sshd
-2. 后门禁用, backdoor (默认开启)
-3. 后门DNS屏蔽, backdoor_hosts (默认关闭, 写 /etc/hosts 屏蔽云端域名)
-4. 插件, plugins (默认开启, 首次使用需在插件管理页同意《使用条款》)
-5. cron, cron, cron_test
-6. 程序安装, shell
-7. 审计取证, audit (默认关闭; 开启后运行常驻**被动采集**进程, 不占 cron, 日志写 /etc/log/ikguard)
-8. 定时自检, probe (默认关闭, 开启后把云端连通性自检写入定时任务, 重启仍生效)
+2. 后门禁用, backdoor (默认开启; 云端域名封锁已并入本开关, 不单独开关)
+3. 插件, plugins (默认开启, 首次使用需在插件管理页同意《使用条款》)
+4. cron, cron, cron_test
+5. 程序安装, shell
+6. 审计取证, audit (默认关闭; 开启后运行常驻**被动采集**进程, 不占 cron, 日志写 /etc/log/ikguard)
 
-> 两个曾经存在的开关已经去掉:
-> `remote`(历史遗留的空开关, iKuai 云的"远程控制/远程维护"已由 backdoor 层覆盖)、
-> `plugins_verify`(插件强校验, 现在插件包不再要求签名)。升级时会自动从 boot_args 里清掉。
+> 四个曾经存在的开关已经去掉, 升级时会自动从 boot_args 里清掉:
+> * `remote` —— 历史遗留的空开关(没有任何脚本读取), iKuai 云的"远程控制/远程维护"
+>   已由 backdoor 层覆盖
+> * `plugins_verify` —— 插件强校验(插件包现在不再要求签名)
+> * `backdoor_hosts` —— 域名封锁已并入 backdoor(不再单独开关)
+> * `probe` —— 定时云端连通性自检(封锁不走 iptables, DNS+TCP 探测已无意义;
+>   自检改为 Web 页"封锁自检"即时执行)
 
 ## 配置 cron
 
@@ -88,27 +90,36 @@
 
 ## 后门禁用 (backdoor)
 
-`scripts/02_disable_backdoor.sh` 每次开机执行 `lib/backdoor.sh`，三层阻断:
+`scripts/02_disable_backdoor.sh` 每次开机执行 `lib/backdoor.sh`。封锁以**最小代价**为原则
+(不碰防火墙、不装定时器、无常驻进程)，名单按 3.7.16 真机逐项核实：
 
-1. **进程层**: 杀灭并用空壳替换 `ik_rc_client` / `cre` / `cre_client` / `pmd` /
-   `dtalkd` / `dtalkc` / `catcherd`，删除云端地址表软链接
-2. **文件层**: 改写宿主脚本，使其不再被拉起:
-   - `usr/ikuai/script/rc`: 注释 `ik_rc_client` / `pmd` / `cre` / `cre_client` 启动项、
+1. **进程层**: 杀灭并用空壳替换 5 个云端客户端 `ik_rc_client` / `cre` / `pmd` / `dtalkd` /
+   `dtalkc`。空壳被启动时先往 `/etc/log/ikguard/stub.log` 记一笔"时间 + 拉起者 cmdline"
+   再退出 —— **空壳即启动监控**，没有新记录 = 没有任何启动尝试。
+2. **文件层**: 改写全部启动点，使其不再被拉起:
+   - `usr/ikuai/script/rc`: 注释 `cre` / `ik_rc_client` / `pmd` / `cre_client` 启动项、
      不再启动 `submit.lua`(云端指令通道) 与 `update_hosts.sh`(云端取址)
-   - `usr/ikuai/script/utils/monitor_process.sh`: 不再守护上述进程
+   - `usr/ikuai/script/utils/monitor_process.sh`: 不再守护上述进程，也不再拉起云端审计
+     组件下载器 `ikaudit_update.sh`(连 audit.ikuai8.com / routers.ikuai8.com:6444，
+     该脚本本身一并禁用 —— v0.0.6 新增覆盖)
+   - `usr/ikuai/script/utils/update_hosts.sh`: 禁用(它内部会 `killall pmd && pmd`)
    - `usr/ikuai/script/utils/collection.sh`: 跳过远控连通性判断(否则 24h 后自关多线IPv6)
    - `usr/ikuai/script/dingtalk.sh` + `usr/DTalkInside/monidtalk.sh`: 停用 dtalk 云管
    - `usr/ikuai/script/catcherd.sh`: 停用抓包上报
    - `usr/ikuai/script/utils/submit.lua` / `usr/ikuai/script/upgrade.sh`: 禁用云端指令与自动升级
-3. **网络层**: `ipset ikuai_blk` + `iptables OUTPUT/FORWARD` 封锁全部爱快云端域名/IP
-   与云端专用端口(1853/2016/2221/2502/6000/9443/15602/1863/32015/32017/8086/6444/21422)
+3. **域名封锁**: 云端域名(24 个 + 可选扩展)写入 `/etc/hosts` 指向 `0.0.0.0`。
+   只影响本机自己的解析，零进程、零防火墙规则；**不做 IP/网段封锁、不碰 ipset/iptables**。
 
-由于根分区每次重启还原，`scripts/02` 会安装一个每分钟的 cron 守卫
-(`/etc/crontabs/cron.d/ikblock_guard` -> `bin/backdoor_guard`)，在系统重建 iptables
-后自动补回封锁、并再次清理被拉起的后门进程。
+由于根分区每次重启还原，`scripts/02` **每次开机完整应用一次**，并顺手清掉旧版本留下的
+"每分钟守卫"cron。本版本**不装任何定时器**：空壳与被禁脚本启动即自灭，每分钟复查属于空转。
+旧版"每分钟守卫 + 每 10 分钟给 24 个云端域名各做一次 nslookup(单轮 60~120s，长于 60s 的
+cron 周期，叠加节流竞态)"实测会把 2 vCPU 设备打出 30%~65% 的 CPU 尖峰，连同 ipset/iptables
+网络层已整体移除。
 
-可选的额外域名/IP 可通过 `/etc/mnt/ikblock.domains`、`/etc/mnt/ikblock.nets`
-(一行一条) 追加。
+需要重新应用时手动跑一次 `/etc/mnt/.boot/bin/backdoor_guard`，或用 Web 页的"重新应用"；
+看启动尝试: `tail /etc/log/ikguard/stub.log`(空 = 干净)。
+
+可选的额外域名可通过 `/etc/mnt/ikblock.domains`(一行一条) 追加，开机时并入 hosts 封锁。
 
 > 说明: 保留 `plugins.sh` 钩子是必需的——它是本框架的启动入口（本地校验，不联网）。
 > 云端驱动的升级通道已全部切断；本地手动上传固件/插件的能力按需保留。
@@ -236,43 +247,36 @@ bin/*                            命令行      -> /usr/sbin/
 | 事件源 | 拿到什么 |
 | --- | --- |
 | `conntrack -E` | 连接事件(`[NEW]`/`[DESTROY]`)；其中 `dport=53` 的另存为 DNS 事件 |
-| `/dev/kmsg` | **封锁命中**：命中封锁链的包由 `-j LOG` 写进内核日志，采集器读出来 |
+| 空壳客户端 | **启动尝试**：被禁组件被任何代码路径拉起时，空壳自己往 `stub.log` 记一笔(时间 + 拉起者) |
 
 不做的事（设计上明确移除）：
 
-* **不判断"程序启动"** —— 本内核没编 `CONFIG_CONNECTOR`(cn_proc)/`CONFIG_AUDIT`/`CONFIG_KPROBES`/`CONFIG_FTRACE`，没有 exec/fork 事件源。
+* **不判断"程序启动"** —— 本内核没编 `CONFIG_CONNECTOR`(cn_proc)/`CONFIG_AUDIT`/`CONFIG_KPROBES`/`CONFIG_FTRACE`，没有 exec/fork 事件源；启动点监控改由空壳完成（见上表）。
 * **不抓包做 DNS** —— DNS 只是连接事件里 `dport=53` 的子集；conntrack 不含报文，所以只能到"谁向谁查"，**拿不到域名**。
-* **封锁命中不读计数器** —— DROP 掉的包不会进 conntrack，只能靠 `-j LOG` 事件。
-
-设备的 `iptables` 自带 `-j LOG`（实测 3.7.16：`iptables -j LOG -h` 直接列出 `--log-prefix`，
-加规则后内核日志确实出现命中记录），所以框架**不分发任何额外构件**；万一某固件砍掉了它，
-可用 `.tools/build_xt_LOG.sh` 编一个补上。
+* **不碰 iptables** —— 封锁只在 `/etc/hosts`（+ 空壳），没有规则可命中，因此**没有"封锁命中"事件源**。
 
 日志写在持久分区 `/etc/log/ikguard/`（时间 + 体积双限：保留 3 天、目录 300MB、单文件 10MB）：
 
 | 文件 | 内容 |
 | --- | --- |
 | `boot.log` | 框架开机日志 |
-| `audit-YYYYMMDD.log` | 结构化事件: `collect.begin/stop` `block.hit` `cloud.leak` `probe.*` … |
+| `audit-YYYYMMDD.log` | 结构化事件: `collect.begin/stop` `check` … |
 | `conn-YYYYMMDD.log` | 连接事件(公网方向) |
 | `dns-YYYYMMDD.log` | DNS 事件(`dport=53`) |
-| `block-YYYYMMDD.log` | 封锁命中原始记录 |
+| `stub.log` | 被禁组件的启动尝试(空壳记录；正常为空 = 没有任何启动尝试) |
 | `report.txt` | 最近一次采集报告 |
 
 ```
-ikaudit status          # 采集器/事件源/日志/封锁状态
+ikaudit status          # 采集器/事件源/日志状态(含启动尝试次数)
 ikaudit tail 80         # 最近的审计事件
 ikaudit collect-start   # 后台启动被动采集器(也可用控制台开关)
-ikaudit collect-stop    # 停止采集器(按 pid 关闭并清 LOG 规则)
+ikaudit collect-stop    # 停止采集器(按 pid 关闭并清残留子进程)
 ikaudit collect-status  # 采集器是否在运行
 ikaudit report          # 立刻生成报告(异常返回码 1)
-ikaudit probe           # 云端连通性自检(解析 + TCP 443 尝试；立即执行一次)
-ikaudit cronsync        # 重建定时任务(只有 probe=1 才写自检 cron)
 ```
 
-> **采集不占 cron**：`audit` 是持久化开关，=1 时开机自动拉起采集器、=0 时停掉并清掉框架的定时任务；
-> 控制台开关即时生效，重启按配置恢复。
-> **定时自检(`probe`)仍走 cron**：默认关闭，开启后才写 `*/10 ikaudit probe`，重启按配置重建。
+> **本框架不写任何 cron**：`audit` 是持久化开关，=1 时开机自动拉起采集器、=0 时停掉；
+> 旧版本写入的框架定时任务(`bin/ikaudit` 行、`backdoor_guard` 每分钟守卫)在开机时被清除。
 
 ## 网页插件 (Web)
 
@@ -287,8 +291,8 @@ ikaudit cronsync        # 重建定时任务(只有 probe=1 才写自检 cron)
 
 ![ikguard 控制台](docs/images/ikguard-console.png)
 
-> 点开卡片就是插件自己的页面: 概览(框架版本 / 签名校验 / 后门进程 / ipset 封锁 / 封锁规则 /
-> 封锁命中 / DNS 记录 / 日志分区) + 开关配置(后门阻断、后门 DNS 屏蔽、审计取证、SSH 登录…),
+> 点开卡片就是插件自己的页面: 概览(框架版本 / 签名校验 / 后门进程 / hosts 封锁条数 /
+> 启动尝试次数 / 被动采集 / 日志分区) + 开关配置(后门阻断、审计取证、SSH 登录…),
 > 改完立即生效并写入 `/etc/mnt/boot_args`。
 
 iKuai 的「系统设置 → 插件管理」是数据驱动的: 官方 `plugins.sh` 的 `show()` 会遍历
@@ -336,9 +340,10 @@ bash .tests/run_tests.sh
 ```
 
 它会在 `.tests/.mock` 生成一个"模拟系统根目录"(含 rc / monitor_process.sh /
-collection.sh 等目标文件片段)，部署框架并执行开机引导，然后断言后门是否被正确阻断、
-插件系统是否可用。所有会改动系统的命令(iptables/ipset/killall/pidof 等)在测试中
-都用 `.tests/shims/` 下的替身记录，不会影响本机。
+collection.sh / ikaudit_update.sh 等目标文件片段, 对齐 3.7.16 真机实况)，部署框架并执行
+开机引导，然后断言后门是否被正确阻断、插件系统是否可用。所有会改动系统的命令
+(killall / pidof 等)在测试中都用 `.tests/shims/` 下的替身记录，不会影响本机；
+`iptables` / `ipset` / `nslookup` 的替身用来断言**新版一次都不碰它们**。
 
 ## 重要: 修改后必须重新签名
 

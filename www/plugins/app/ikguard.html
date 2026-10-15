@@ -140,7 +140,7 @@
   <h4>审计事件 audit-*.log</h4><pre id="log-audit">-</pre>
   <h4>出向连接 conn-*.log</h4><pre id="log-conn">-</pre>
   <h4>DNS 查询(仅 dport=53 事件) dns-*.log</h4><pre id="log-dns">-</pre>
-  <h4>封锁命中 block-*.log</h4><pre id="log-block">-</pre>
+  <h4>启动尝试监控 stub.log(空壳记录, 正常应为空)</h4><pre id="log-stub">-</pre>
   <h4>开机日志 boot.log</h4><pre id="log-boot">-</pre>
 </div>
 
@@ -191,13 +191,13 @@
   </details>
 
   <div class="tool">
-    <b>云端连通性自检</b>
-    <div class="tip">解析爱快云端域名并试连 TCP 443，确认后门封锁是否真的生效
-      （预期：能解析出 IP，但连不上）。点一下立即跑一次，约 20 秒；
-      要按期自动跑，在「开关配置」里打开 <code>定时自检</code>。</div>
-    <button class="pri" onclick="runProbe()">立即自检一次</button>
+    <b>封锁自检</b>
+    <div class="tip">即时检查四件事：云端客户端是否都是空壳、/etc/hosts 封了多少域名、
+      是否还有后门进程存活、stub.log 有没有新的"启动尝试"（有记录 = 发现了新的启动点，
+      里面会写明时间和拉起者）。点一下立即出结果。</div>
+    <button class="pri" onclick="runCheck()">立即自检一次</button>
     <h4>最近一次结果</h4>
-    <pre id="probe-out">-</pre>
+    <pre id="check-out">-</pre>
   </div>
 </div>
 </div>
@@ -216,10 +216,8 @@
 
 <script>
 var FLAGS = [
-  ['backdoor','后门阻断','阻断/删除爱快云端后门与更新通道(不影响路由/DHCP/NAT)'],
-  ['backdoor_hosts','后门 DNS 屏蔽','把云端域名写入 /etc/hosts 指向 0.0.0.0(可选加固)'],
-  ['audit','审计取证','被动采集(常驻进程)：conntrack 连接事件 + 内核封锁命中日志；默认关闭'],
-  ['probe','定时自检','按周期自动执行云端连通性自检；默认关闭，开启后写入定时任务，重启仍生效'],
+  ['backdoor','后门阻断','空壳替换 + 改写启动脚本 + /etc/hosts 封云端域名(不碰防火墙, 不影响路由/DHCP/NAT)'],
+  ['audit','审计取证','被动采集(常驻进程)：conntrack 连接事件；默认关闭'],
   ['sshd','SSH 登录','把控制台账号的 shell 换成 bash, 便于 SSH 维护'],
   ['plugins','插件系统','开机自动铺开 /etc/mnt/plugins 下的插件'],
   ['cron','定时任务','铺开 /etc/mnt/cron.d 下的 crontab'],
@@ -410,11 +408,10 @@ function load() {
     html += card('框架版本', s.version || '-');
     html += card('签名校验', s.plugins_ok==='1' ? '通过' : '未通过', s.plugins_ok==='1'?'ok':'err');
     html += card('后门进程', alive ? alive : '无', alive ? 'err':'ok');
-    html += card('ipset 封锁', (s.ipset||0)+' 条', (s.ipset>0)?'ok':'warn');
-    html += card('封锁规则', (s.rules||0)+' 条', (s.rules>0)?'ok':'warn');
-    html += card('封锁命中', (s.blocked_hits||0)+' 包', (s.blocked_hits>0)?'warn':'ok');
+    html += card('hosts 封锁', (s.hosts_entries||0)+' 条', (s.hosts_entries>0)?'ok':'warn');
+    html += card('启动尝试', (s.stub_hits||0)+' 次', (s.stub_hits>0)?'err':'ok');
     html += card('被动采集', s.collect_running==1?'运行中':'未运行', s.collect_running==1?'ok':'warn');
-    html += card('今日事件', '连 '+(s.n_conn||0)+' / DNS '+(s.n_dns||0)+' / 命中 '+(s.n_block||0));
+    html += card('今日事件', '连 '+(s.n_conn||0)+' / DNS '+(s.n_dns||0));
     html += card('日志分区', (s.log_usage||'-'));
     document.getElementById('cards').innerHTML = html;
     var sw = '';
@@ -447,18 +444,18 @@ function loadLogs() {
   if (!EULA_OK) return Promise.resolve();
   return api('show', {TYPE:'logs'}).then(function(d){
     var l = d.logs || {};
-    ['report','audit','conn','dns','block','boot'].forEach(function(k){
+    ['report','audit','conn','dns','stub','boot'].forEach(function(k){
       var el = document.getElementById('log-'+k);
       if (el) { el.textContent = l[k] || '(空)'; }
     });
   }).catch(function(e){ tip('日志加载失败: '+e.message, 'msg err'); });
 }
 
-function loadProbe() {
+function loadCheck() {
   if (!EULA_OK) return;
-  api('show', {TYPE:'probe'}).then(function(d){
-    var p = (d && d.probe) || {};
-    document.getElementById('probe-out').textContent = (p.running == 1 ? '[自检进行中…]\n' : '') + (p.text || '(还没有执行过自检)');
+  api('show', {TYPE:'check'}).then(function(d){
+    var p = (d && d.check) || {};
+    document.getElementById('check-out').textContent = p.text || '(还没有执行过自检)';
   }).catch(function(){});
 }
 
@@ -468,13 +465,11 @@ function setFlag(key, value) {
   }).catch(function(e){ tip('设置失败: '+e.message, 'msg err'); });
 }
 
-function runProbe() {
-  api('probe').then(function(){
-    tip('自检已开始，约 20 秒后自动刷新结果', 'msg ok');
-    loadProbe();
-    setTimeout(loadProbe, 8000);
-    setTimeout(loadProbe, 22000);
-  }).catch(function(e){ tip('自检启动失败: '+e.message, 'msg err'); });
+function runCheck() {
+  api('check').then(function(){
+    tip('封锁自检完成', 'msg ok');
+    loadCheck();
+  }).catch(function(e){ tip('自检失败: '+e.message, 'msg err'); });
 }
 
 /* 上传并安装: 先 POST /Action/upload 落盘到 /tmp/iktmp/import/, 再调 ikguard plugin op=install */
@@ -504,7 +499,6 @@ function act(action, param) {
   api(action, param).then(function(){
     tip('操作成功', 'msg ok');
     load(); loadLogs();
-    if (action === 'probe') { setTimeout(loadProbe, 8000); }
   }).catch(function(e){ tip('操作失败: ' + e.message, 'msg err'); });
 }
 
@@ -515,13 +509,14 @@ document.querySelectorAll('.tabs a').forEach(function(a){
     a.classList.add('on');
     document.getElementById(a.dataset.p).classList.add('on');
     if (a.dataset.p === 'p-log') loadLogs();
-    if (a.dataset.p === 'p-tool') loadProbe();
+    if (a.dataset.p === 'p-tool') loadCheck();
   };
 });
 
 load();
-loadProbe();
-setInterval(function(){ if (!document.hidden && EULA_OK) load(); }, 15000);
+/* 概览数据(版本/hosts 条数/启动尝试/日志占用)变化很慢, 60s 拉一次足够。
+   每次 show 要在设备上跑十几个 fork(df / 多次 grep 统计日志), 不宜更频繁。 */
+setInterval(function(){ if (!document.hidden && EULA_OK) load(); }, 60000);
 </script>
 </body>
 </html>

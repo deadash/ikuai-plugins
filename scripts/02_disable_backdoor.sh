@@ -12,10 +12,12 @@ SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 # 检查功能是否开启
 is_enabled "backdoor" || { log "[backdoor] 未启用(backdoor=0), 跳过"; exit 0; }
 
-# 一次性完整禁用
+# 一次性完整禁用: 杀旧实例 + 空壳(即启动监控) + 改写宿主脚本 + hosts 封域名
 bd_apply
 
-# 安装每分钟守卫(系统重建 iptables 后自动补回封锁)
-bd_install_guard
+# 清掉旧版本装的"每分钟守卫"定时任务(本版本不装任何定时器:
+# 空壳自灭 + 被禁脚本自退, 每分钟复查纯属空转, 且旧版守卫里的域名解析
+# 会把 2 vCPU 设备打出 CPU 尖峰)。之后需要重应用时手动跑 bin/backdoor_guard。
+bd_remove_guard
 
 exit 0

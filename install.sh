@@ -54,18 +54,18 @@ ensure_key() {
 
 ensure_key sshd 1
 ensure_key backdoor 1
-ensure_key backdoor_hosts 0
 ensure_key plugins 1
 ensure_key cron 1
 ensure_key shell 1
 ensure_key audit 0    # 审计取证=被动采集器(默认关闭; 开启后运行常驻进程, 不占 cron)
-ensure_key probe 0    # 云端连通性定时自检(默认关闭; 开启后加入 crontab, 重启仍生效)
 
 # 清理已废弃开关:
 #   remote         历史遗留的空开关(没有任何脚本读取; iKuai 云平台的"远程控制/远程维护"
-#                  已由后门阻断层覆盖: ik_rc_client 空壳 + monitor_process 不再守护 + 网络封锁)
+#                  已由后门阻断层覆盖: ik_rc_client 空壳 + monitor_process 不再守护 + hosts 封域名)
 #   plugins_verify 插件强校验(插件包不再要求签名)
-sed -i '/^remote=/d;/^plugins_verify=/d' "$BOOT_ARGS" 2>/dev/null
+#   backdoor_hosts 域名封锁已并入 backdoor(不再单独开关)
+#   probe          云端连通性自检已移除(封锁不走 iptables, 旧的 DNS+TCP 探测已无意义)
+sed -i '/^remote=/d;/^plugins_verify=/d;/^backdoor_hosts=/d;/^probe=/d' "$BOOT_ARGS" 2>/dev/null
 
 echo "已部署到 $BOOT_PATH"
 echo "开关文件: $BOOT_ARGS"

@@ -27,28 +27,6 @@ log() {
     return 0
 }
 
-# 域名解析: 依次尝试公共 DNS, 取第一个 A 记录
-# 说明: busybox nslookup 的输出是 "Name: xxx" + "Address N: ip" 形式,
-#       必须按 Name: 之后的行取地址, 否则会把 DNS 服务器地址当成解析结果
-dns_lookup_ip() {
-    local d="$1" s out ip
-    # busybox nslookup 只支持 `nslookup <host> [server]`, 没有 -type 参数
-    for s in ${DNS_PROBE_SERVERS:-114.114.114.114 223.5.5.5} ""; do
-        if [ -n "$s" ]; then
-            out="$(nslookup "$d" "$s" 2>/dev/null)"
-        else
-            out="$(nslookup "$d" 2>/dev/null)"
-        fi
-        ip="$(printf '%s\n' "$out" | awk '/^Name:/{f=1;next} f&&/^Address/{print $NF}' | \
-              grep -E '^[0-9]+(\.[0-9]+){3}$' | grep -v '^127\.' | head -n1)"
-        if [ -n "$ip" ]; then
-            printf '%s' "$ip"
-            return 0
-        fi
-    done
-    return 1
-}
-
 # 读取 boot_args 中的值(缺省返回 $2)
 get_flag() {
     local key="$1" def="$2" v

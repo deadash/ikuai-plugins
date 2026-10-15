@@ -386,8 +386,8 @@ ssh sshd@127.0.0.1 -p 10022 "
   cat /etc/plugins_ok;                       # 1 = 验签通过且框架已执行
   tail -40 /etc/log/ikguard/boot.log;         # 开机日志
   ps | grep -E 'cre|pmd|ik_rc_client|dtalk|catcher';  # 期望: 空
-  ipset -L ikuai_blk | head;                  # 封锁集合条目
-  iptables -S OUTPUT FORWARD | grep ikuai_blk;# 封锁规则
+  grep -c '0.0.0.0' /etc/hosts;               # hosts 域名封锁条目(>0)
+  cat /etc/log/ikguard/stub.log 2>/dev/null;  # 启动尝试监控(期望: 空/不存在)
   cat /etc/log/ikguard/report.txt;            # 体检结论(正常/异常)
 "
 ```
@@ -399,12 +399,12 @@ ssh sshd@127.0.0.1 -p 10022 "
 | 检查项 | 期望 |
 | --- | --- |
 | `/etc/plugins_ok` | `1` |
-| `boot.log` 末尾 | `[backdoor] 完成`、`[plugin] Web 插件资源已同步`(DNS 抓包默认关闭，不在开机启动) |
-| 后门进程 | `cre/cre_client/pmd/ik_rc_client/dtalkd/dtalkc/catcherd` 均不存在 |
-| 后门程序 | `/usr/sbin/ik_rc_client` 等被替换为空壳(含 `[ikblock] disabled`) |
-| ipset | `ikuai_blk` 存在且有条目(云端 IP/网段 + 解析结果) |
-| iptables | OUTPUT/FORWARD 有 `--match-set ikuai_blk dst -j IKG_BLK`，OUTPUT 有云端端口跳 `IKG_BLK`；`IKG_BLK` 链里有 `-j DROP` |
-| 审计日志 | 打开 `audit` 后 `/etc/log/ikguard/audit-<date>.log` 出现 `collect.begin`、`block.hit` 等事件 |
+| `boot.log` 末尾 | `[backdoor] 完成`、`[plugin] Web 插件资源已同步` |
+| 后门进程 | `cre/pmd/ik_rc_client/dtalkd/dtalkc` 均不存在 |
+| 后门程序 | `/usr/sbin/ik_rc_client` 等被替换为空壳(含 `[ikblock] disabled` + stub.log 监控) |
+| hosts 封锁 | `/etc/hosts` 有 `# [ikblock] begin` 段，云端域名指向 `0.0.0.0` |
+| 启动监控 | `/etc/log/ikguard/stub.log` 不存在或为空(有任何记录 = 发现了新的启动点) |
+| 审计日志 | 打开 `audit` 后 `/etc/log/ikguard/audit-<date>.log` 出现 `collect.begin` 等事件 |
 | Web 接口 | `POST /Action/call {"func_name":"ikguard","action":"show","param":{"TYPE":"data"}}` 返回 `Result:30000` |
 | Web 页面 | 系统设置 → 插件管理(`#/system-setting/plugin-management`)：**无"需要绑定爱快云平台"提示**，点开插件后标题显示"插件"而不是"Docker" |
 | 前端补丁 | 分包里 `plugins/docker/` 已变成 `plugins/app/`、`yunbindstatus=2` |
@@ -418,13 +418,9 @@ ssh sshd@127.0.0.1 -p 10022 "
 
 * `conntrack -E` → 连接事件(公网方向)；`dport=53` 的另存为 DNS 事件
   (conntrack 不含报文，所以 DNS **没有域名**，只有"谁向谁查")
-* `/dev/kmsg` → **封锁命中**：封锁链首个规则是 `-j LOG --log-prefix "ikguard-blk "`，
-  命中即写内核日志（`-j LOG` 是非终止目标，记完继续走 `DROP`）
 
-设备自带的 `iptables` 就支持 `-j LOG`（实测 3.7.16：`iptables -j LOG -h` 能列出
-`--log-prefix`，加规则后内核日志确实出现命中记录），**不需要额外构件**。
-判可用性要用 `iptables -j LOG -h | grep log-prefix`，不要用 `iptables -C ... -j LOG`
-（`-C` 的 "No chain/target/match by that name" 是"规则不存在"，容易误判）。
+封锁不走 iptables(域名封锁在 /etc/hosts)，所以没有"封锁命中"事件源；
+**组件启动尝试的监控由空壳自己完成** -> `stub.log`(见 §5.1)，同样零轮询。
 
 日志目录 `/etc/log/ikguard/`（持久分区；保留 3 天 + 目录总量 300MB、单文件 10MB 封顶，
 采集器每 60 秒（或事件间隙）自动维护）：
@@ -432,84 +428,65 @@ ssh sshd@127.0.0.1 -p 10022 "
 | 文件 | 内容 |
 | --- | --- |
 | `boot.log` | 框架开机日志(所有脚本的 log 输出) |
-| `audit-YYYYMMDD.log` | 结构化事件: `collect.begin/stop` `block.hit` `cloud.leak` `probe.*` |
+| `audit-YYYYMMDD.log` | 结构化事件: `collect.begin/stop` 等 |
 | `conn-YYYYMMDD.log` | 连接事件(`[NEW]`/`[DESTROY]`) |
 | `dns-YYYYMMDD.log` | DNS 事件(`dport=53`) |
-| `block-YYYYMMDD.log` | 封锁命中原始记录(内核日志行) |
+| `stub.log` | **启动尝试监控**: 空壳/被禁脚本记录"谁想启动我"(时间 + 拉起者 cmdline) |
 | `report.txt` | 最近一次采集报告 |
 
-> 设计上**明确移除**的两件事：①不做"程序启动"判断 —— 本内核
+> 设计上**明确移除**的三件事：①不做"程序启动"轮询判断 —— 本内核
 > `CONFIG_CONNECTOR`/`CONFIG_AUDIT`/`CONFIG_KPROBES`/`CONFIG_FTRACE` 都没编，没有 exec/fork 事件源；
-> ②不抓包 —— 抓包既费磁盘又和"被动"无关。
+> ②不抓包 —— 抓包既费磁盘又和"被动"无关；③不记"封锁命中" —— 封锁只走 hosts+空壳，没有 DROP 规则。
+> 启动尝试监控改由空壳承担：只有真的发生启动时才写一行，平时零代价。
 > 规模阈值可用环境变量覆盖: `AU_KEEP_DAYS` / `AU_MAX_TOTAL` / `AU_MAX_FILE`。
 
 常用命令:
 
 ```bash
-/etc/mnt/.boot/bin/ikaudit status          # 采集器/事件源/日志/封锁状态
+/etc/mnt/.boot/bin/ikaudit status          # 采集器/事件源/日志/启动监控状态
 /etc/mnt/.boot/bin/ikaudit tail 80         # 看审计事件
 /etc/mnt/.boot/bin/ikaudit collect-status  # 采集器是否在运行
 /etc/mnt/.boot/bin/ikaudit collect-start   # 命令行手动启动采集器(页面只提供 audit 开关)
-/etc/mnt/.boot/bin/ikaudit collect-stop    # 停止采集器(按 pid 关闭并清 LOG 规则)
+/etc/mnt/.boot/bin/ikaudit collect-stop    # 停止采集器(按 pid 关闭并清残留)
 /etc/mnt/.boot/bin/ikaudit report          # 立刻生成报告(异常返回码 1)
-/etc/mnt/.boot/bin/ikaudit probe           # 云端连通性自检(解析 + TCP 443 尝试；仅手动触发)
-grep -E 'block\.hit|cloud\.leak' /etc/log/ikguard/audit-$(date +%Y%m%d).log
 ```
 
-> 说明: `probe` 会主动解析并尝试连接爱快云端域名，属于**受控自检**：
-> 若封锁生效，表现为"能解析出 IP，但 TCP 连接失败"，并写入审计日志；
-> 若出现 `probe.tcp ... 可连通云端` 即为异常，需要检查 ipset/iptables。
+### 5.1 域名封锁(/etc/hosts) 与 启动监控
 
-### 5.1 域名 → ipset 的补充解析
+**封锁 = 域名封锁，不做 IP/网段封锁，不碰 ipset/iptables**（v0.0.6 起）：
 
-`lib/backdoor.sh:bd_resolve_domains()` 会把云端域名解析出来的 IP 追加进 `ikuai_blk`
-(节流 10 分钟)，因此 `ipset` 条目数会随着解析成功而增长；实测:
+* 云端域名(24 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写入 `/etc/hosts` 指向 `0.0.0.0`；
+* 只影响**本机自己**的域名解析，局域网客户端的 DNS 查询不经过本机 hosts，不受影响；
+* 零进程、零防火墙规则、每开机重写一次(`/etc/hosts` 随根分区还原)。
 
-```
-$ /etc/mnt/.boot/bin/backdoor_guard
-[backdoor] 按域名解析补充封锁地址: 23 个
-$ ipset -L ikuai_blk | grep -c '^[0-9]'
-28
-```
+历史包袱：旧版曾用 `bd_resolve_domains()` 每 10 分钟把域名解析结果灌进 ipset —— 每域名
+一次 `nslookup`(单次 2.5~5.1s)，24 个域名一轮 60~120s，长于 60s 的 cron 周期，叠加节流
+竞态后 2~6 个守卫并发，把 2 vCPU 设备打出 27%~65% 的 CPU 尖峰。已连同 ipset/iptables
+网络层整体删除。
 
-> 只有在**确实解析成功**时才更新时间戳。否则开机时 WAN 尚未拨号成功(解析全失败)，
-> 会白白占用 10 分钟节流窗口，导致域名封锁在这段时间内形同虚设。
-> 另: busybox `nslookup` 不支持 `-type=`，且带 server 时输出形如
-> `Name: xx` / `Address 1: ip`，解析 IP 必须取 `Name:` 之后的行
-> (见 `lib/common.sh:dns_lookup_ip()`)，否则会把 DNS 服务器地址当成解析结果。
+**启动监控(零代价)**：被禁的 5 个客户端被换成空壳、6 个启动脚本被禁用 —— 它们一旦被
+任何代码路径启动，都会先往 `/etc/log/ikguard/stub.log` 写一行
+`[时间] [ikblock] <组件> 被启动(已拦截) ppid=<pid>` + 拉起者的 cmdline，然后立即退出。
+文件为空 = 没有任何启动尝试；有记录 = 发现了文件层没覆盖的新启动点（记录里就是拉起者）。
 
-### 5.2 没有外网时怎么验证封锁
+### 5.2 怎么验证封锁生效
 
-家里/测试环境常常 WAN 还没配置，此时"没有云端连接"并不能证明封锁有效。
-可以在宿主机侧给 WAN 网卡临时配个地址（仅测试用，不改 iKuai 配置）:
+封锁 = 空壳 + 启动点改写 + hosts 域名封锁，验证也围绕这三件事(无需外网)：
 
 ```bash
-# QEMU user-net: 网关 10.0.2.2 / DNS 10.0.2.3
-ssh sshd@127.0.0.1 -p 10022 "ifconfig eth1 10.0.2.15 netmask 255.255.255.0 up; route add default gw 10.0.2.2"
-ssh sshd@127.0.0.1 -p 10022 "/etc/mnt/.boot/bin/backdoor_guard"      # 解析并补封锁
-ssh sshd@127.0.0.1 -p 10022 "/etc/mnt/.boot/bin/ikaudit probe"       # 期望 blocked=3
+ssh sshd@127.0.0.1 -p 10022 "
+  grep -c '0.0.0.0' /etc/hosts;                       # 期望: >= 24(云端域名全在)
+  grep -c 'ikblock' /usr/sbin/ik_rc_client /usr/sbin/cre /usr/sbin/pmd /usr/sbin/dtalkd /usr/sbin/dtalkc;
+                                                      # 期望: 每个都是 1(空壳)
+  ps | grep -E 'cre|pmd|ik_rc_client|dtalk';          # 期望: 空
+  cat /etc/log/ikguard/stub.log 2>/dev/null;          # 期望: 空(没有任何启动尝试)
+  grep ikaudit_update /usr/ikuai/script/utils/monitor_process.sh;  # 期望: 已注释
+"
 ```
 
-实测输出:
-
-```
-probe.dns  域名=302.ikuai8.com 解析到 58.221.58.100
-probe.tcp  连接云端 58.221.58.100:443 失败(封锁生效/无外网)
-probe.dns  域名=pkgmanager.ikuai8.com 解析到 123.57.179.21
-probe.tcp  连接云端 123.57.179.21:443 失败(封锁生效/无外网)
-resolved=3 blocked=3
-```
-
-再配合计数变化与 DNS 抓包记录，就能形成完整证据链:
-
-```
-$ iptables -nvx -L OUTPUT | grep ikuai_blk
-    2  120  DROP  all  --  *  *  0.0.0.0/0  0.0.0.0/0  match-set ikuai_blk dst   # 命中包数增长
-$ grep -i 'ikuai8.com' /etc/log/ikguard/dns-$(date +%Y%m%d).log | tail -3
-... 10.0.2.15.46924 > 114.114.114.114.53: 4+ A? 302.ikuai8.com. (32)
-$ grep cloud /etc/log/ikguard/audit-$(date +%Y%m%d).log | tail -3
-2026-10-13 19:01:01 INFO  dns.cloud   解析查询命中云端域名: 302.ikuai8.com
-```
+也可以在 Web 页"工具 → 封锁自检"一键跑同样四项(即时出结果)。
+本机解析验证: `nslookup www.ikuai8.com 127.0.0.1` 走 iKuai 自带 DNS 不受 hosts 影响，
+属正常；本机程序用 getaddrinfo 解析才会命中 hosts 的 `0.0.0.0`。
 
 配置完 WAN 的 iKuai 正规做法是「网络设置 → 内外网设置 → wan1 → 绑定网卡 eth1 → 动态 IP(DHCP)」，
 用官方接口一次配好并持久化的做法见 [§9](#9-让虚拟机真的连上外网--真实-lan-客户端模拟)。
@@ -527,20 +504,15 @@ iptables 计数器 diff、tcpdump 抓包)，踩过这些坑：
 | DNS 抓包被 cron 每分钟重新拉起 | `au_watch()` 末尾无条件 `au_dns_start`，用户点"停止"最多活 1 分钟 |
 | `proc-*.log` 体积大、全是自身噪声 | 快照把框架自己的 `sed/awk/ikaudit` 子进程也记了进去 |
 
-**v0.0.4 起改为被动采集**(现在的实现)：常驻一个采集器订阅 `conntrack -E` 与 `/dev/kmsg`，
-`audit` 默认关闭、开启后不写任何 cron；程序启动判断与 tcpdump 抓包整体移除。
-一条 cron 都不再需要（除了可选的 `probe` 定时自检）。历史数据仅作参考。
+**v0.0.4 起改为被动采集**：常驻一个采集器订阅 `conntrack -E`，`audit` 默认关闭、
+开启后不写任何 cron；程序启动判断与 tcpdump 抓包整体移除。
+**v0.0.6 起**：后门守卫的每分钟 cron 与域名解析整体删除(§5.1，CPU 尖峰根因)、
+内核 LOG 封锁命中事件源随 iptables 网络层一并删除、`probe` 定时自检移除 ——
+**现在框架不写任何 cron，一条都不需要**。历史数据仅作参考。
 
 ```
 $ grep -nE 'ikaudit|backdoor_guard' /etc/crontabs/root
-11:* * * * * /etc/mnt/.boot/bin/backdoor_guard        # 后门阻断复查(与审计无关)
-# 采集是常驻进程, 不在这里; 打开 probe 开关时会多一条:
-#   */10 * * * * /etc/mnt/.boot/bin/ikaudit probe >/dev/null 2>&1
-
-$ iptables -S IKG_BLK
--N IKG_BLK
--A IKG_BLK -j LOG --log-prefix "ikguard-blk "         # 采集器开启时才有
--A IKG_BLK -j DROP
+# (空) 框架不写任何 cron: 守卫只在开机做一次, 采集是常驻进程, 启动监控在空壳里
 ```
 
 ---
@@ -658,15 +630,15 @@ $ curl -s -H 'Accept-Encoding: gzip' http://127.0.0.1:18080/static/js/152.*.js.g
 * 页面: 系统设置 → 插件管理 → `ikguard` 卡片
   (等价直达: `http://<宿主IP>:8081/plugins/app/ikguard.html`)
 * 后端: `func_name=ikguard`，动作
-  `show`(TYPE=`data/flags/plugins/pending/eula/logs/probe`) / `seting` / `eula` /
-  `apply` / `plugin` / `dns` / `probe` / `logclear`
+  `show`(TYPE=`data/flags/plugins/pending/eula/logs/check`) / `seting` / `eula` /
+  `apply` / `plugin` / `check` / `logclear`
 * 页面功能:
-  * **概览**: 框架版本、签名校验、后门进程、ipset 条目、封锁规则/命中数、DNS 采集状态、日志占用
-  * **开关配置**: `backdoor` `backdoor_hosts` `audit` `probe` `sshd` `plugins` `cron` `shell`
-    修改即写入 `/etc/mnt/boot_args` 并立刻重跑对应脚本(`probe` 打开/关闭会即时重建定时任务)
+  * **概览**: 框架版本、签名校验、后门进程、hosts 封锁条数、启动尝试次数、采集状态、日志占用
+  * **开关配置**: `backdoor` `audit` `sshd` `plugins` `cron` `shell`
+    修改即写入 `/etc/mnt/boot_args` 并立刻重跑对应脚本
   * **插件管理**: **上传 zip 安装**、扫描 `/etc/mnt/plugins/*.zip`、列出/卸载插件
-  * **审计日志**: 实时查看 report/audit/conn/dns/block/boot 日志
-  * **工具**: 云端连通性自检(立即执行一次 + 结果回读) —— 采集器不在此启停, 只由 `审计取证` 开关控制
+  * **审计日志**: 实时查看 report/audit/conn/dns/stub/boot 日志
+  * **工具**: 封锁自检(即时: 空壳/hosts/进程/stub.log 四项) —— 采集器不在此启停, 只由 `审计取证` 开关控制
 
 前端图标与页面都在 `www/plugins/app/`(`ikguard.{html,png}`、`terms.{html,png}`)，
 图标是 64×64 的圆角盾牌(盾牌=安全防护，文档图标=使用条款)。
@@ -867,22 +839,23 @@ $ grep boot /etc/log/ikguard/bnfix.log | tail -1
 | 键 | 默认 | 作用 |
 | --- | --- | --- |
 | `sshd` | 1 | 控制台账号 shell 换成 bash，可 SSH 登录 |
-| `backdoor` | 1 | 后门/更新通道阻断(进程+文件+网络三层) |
-| `backdoor_hosts` | 0 | 额外把云端域名写入 `/etc/hosts` 指向 0.0.0.0 |
+| `backdoor` | 1 | 后门/更新通道阻断(空壳+改写启动点+hosts 封域名；不碰防火墙、不装定时器) |
 | `plugins` | 1 | 插件系统(含 Web 插件资源同步；首次使用需同意《使用条款》) |
 | `cron` | 1 | 铺开 `/etc/mnt/cron.d` |
 | `shell` | 1 | 链接 `/etc/mnt/shells` 下的程序/配置 |
-| `audit` | 0 | 审计取证=**常驻被动采集器**(conntrack 事件 + 内核封锁日志)；=0 时停掉采集器并移除定时任务 |
-| `probe` | 0 | **定时**云端连通性自检: 只有开启才写入定时任务(`*/10`)，重启按该配置重建 |
+| `audit` | 0 | 审计取证=**常驻被动采集器**(conntrack 连接事件)；=0 时停掉采集器并清理遗留定时任务 |
 
-> 采集**不占 cron**：`audit=1` 开机自动拉起采集器、`=0` 停止并清零框架的定时任务；DNS 不再单独抓包，只是连接事件里 `dport=53` 的子集。
+> 采集**不占 cron**：`audit=1` 开机自动拉起采集器、`=0` 停止；DNS 不单独抓包，只是连接事件里 `dport=53` 的子集。
+> 框架自身不写任何定时任务。
 
-**已废弃并会自动清理的两个键**(升级时 install.sh 会 `sed -i` 删除):
+**已废弃并会自动清理的键**(升级时 install.sh 会 `sed -i` 删除):
 
 | 键 | 原意 | 现状 |
 | --- | --- | --- |
-| `remote` | iKuai 云"远程控制/远程维护"开关 | 历史遗留的空开关：**没有任何脚本读取它**。真正的云端远程控制已由后门阻断层覆盖 —— `ik_rc_client`/`cre`/`pmd` 被换成空壳、`monitor_process.sh` 不再守护、云端域名/IP/端口被 DROP。所以"默认关闭"= 该通道本来就不可用 |
+| `remote` | iKuai 云"远程控制/远程维护"开关 | 历史遗留的空开关：**没有任何脚本读取它**。真正的云端远程控制已由后门阻断层覆盖 —— `ik_rc_client`/`cre`/`pmd` 被换成空壳、`monitor_process.sh` 不再守护、云端域名被 hosts 指向 0.0.0.0。所以"默认关闭"= 该通道本来就不可用 |
 | `plugins_verify` | 插件包强制签名校验 | 已去掉：插件包不再要求签名(带 `MANIFEST.MF` 只校验摘要，带签名+公钥才额外验签) |
+| `backdoor_hosts` | 单独的 hosts 域名封锁开关 | v0.0.6 起域名封锁是后门阻断的组成部分，不再单独开关 |
+| `probe` | 云端连通性定时自检 | v0.0.6 起随 iptables 网络层一并移除(DNS+TCP 探测对 hosts 封锁无意义)；自检改由 Web 页"封锁自检"即时执行 |
 
 命令行修改(等价于 Web 页面开关)：
 
@@ -899,8 +872,9 @@ sed -i 's/^backdoor=.*/backdoor=0/' /etc/mnt/boot_args     # 关闭
   `openssl dgst -sha256 -verify <公钥> -signature /etc/mnt/.boot/SIGNATURE.RSA /etc/mnt/.boot/MANIFEST.MF`
 * **签名不匹配**: 说明改动过的文件没有重新签名 → 回滚该文件或重新 `sign.sh` + `build.sh` 再升级。
 * **回滚到上一版**: 升级前的 `.boot` 会被整目录覆盖，可提前 `tar czf /etc/log/ikguard/boot-$(date +%F).tgz -C /etc/mnt .boot` 备份，回滚即解回该目录并重启。
-* **需要紧急停用**: `sed -i 's/^backdoor=.*/backdoor=0/' /etc/mnt/boot_args` 后执行
-  `iptables -D OUTPUT -m set --match-set ikuai_blk dst -j DROP` 等手工清理，或删除 `/etc/mnt/.boot` 目录后重启(框架即停止)。
+* **需要紧急停用**: `sed -i 's/^backdoor=.*/backdoor=0/' /etc/mnt/boot_args` 后把
+  `/etc/hosts` 里 `# [ikblock]` 段删掉、把空壳文件还原(或删除 `/etc/mnt/.boot` 目录后重启，
+  根分区还原即回到固件原状)。
 
 ---
 
@@ -963,6 +937,9 @@ bash vm/run.sh                 # 启动虚拟机(LAN 用 tap, WAN 仍走 user-ne
 > `could not configure /dev/net/tun (tap0): Operation not permitted`。
 
 ### 9.3 客户端实测(真实流量 + 封锁对照)
+
+> 下面的输出是 v0.0.5(iptables/ipset 网络层)时代的实测记录，仅作历史参考；
+> v0.0.6 起封锁改为 hosts + 空壳，验证方式见 §5.2。
 
 ```bash
 sudo bash vm/client-test.sh
