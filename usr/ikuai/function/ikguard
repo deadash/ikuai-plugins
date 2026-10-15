@@ -31,7 +31,8 @@ IK_EULA_VER="v1.0"
 IK_IKPLUGIN="$BOOT_DIR/bin/ikplugin"
 IK_IKAUDIT="$BOOT_DIR/bin/ikaudit"
 IK_CHECK_OUT="$IK_LOG_DIR/last-check.txt"
-IK_STUB_LOG="$IK_LOG_DIR/stub.log"           # 空壳记录的"启动尝试"监控日志
+IK_STUB_LOG="$IK_LOG_DIR/stub.log"           # 空壳记录的"启动尝试"监控日志(持久盘, 带历史)
+IK_STUB_BASE="/tmp/.ikblock.stub.base"        # 本次开机的基线(开机补丁写入; /tmp 每次开机清空)
 IK_HOSTS="/etc/hosts"                        # 域名封锁(0.0.0.0)所在文件
 IK_AU_PIDFILE="/tmp/.ikaudit/collect.pid"   # 被动采集器 pid 文件(由 ikaudit collect-start 写入)
 
@@ -102,6 +103,22 @@ ikg_collect_running() {
     kill -0 "$pid" 2>/dev/null
 }
 
+# 启动尝试(stub.log): 文件带历史记录, 判定"本次开机干不干净"要看增量
+ikg_stub_total() {
+    local n=0
+    [ -f "$IK_STUB_LOG" ] && n="$(grep -c -- "] \[ikblock\]" "$IK_STUB_LOG" 2>/dev/null)"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
+}
+
+ikg_stub_new() {
+    local now base=0
+    now="$(ikg_stub_total)"
+    [ -f "$IK_STUB_BASE" ] && base="$(cat "$IK_STUB_BASE" 2>/dev/null)"
+    case "$base" in ''|*[!0-9]*) base=0 ;; esac
+    [ "$now" -gt "$base" ] && printf '%s' "$((now - base))" || printf '0'
+}
+
 # 今日某类事件条数(按事件名统计, 避免把旧格式内容算进来)
 ikg_count() {
     local f pat="$2" n
@@ -159,7 +176,7 @@ __show_data() {
     status+="$(ikg_kv plugins_ok "$(cat /etc/plugins_ok 2>/dev/null)"),"
     status+="$(ikg_kv backdoor_alive "$procs"),"
     status+="$(ikg_num hosts_entries "$hosts"),"
-    status+="$(ikg_num stub_hits "$(grep -c '被启动' "$IK_STUB_LOG" 2>/dev/null || echo 0)"),"
+    status+="$(ikg_num stub_hits "$(ikg_stub_new)"),"
     status+="$(ikg_num collect_running "$(ikg_collect_running && echo 1 || echo 0)"),"
     status+="$(ikg_num n_conn "$(ikg_count conn 'conn\.(NEW|DESTROY)')"),"
     status+="$(ikg_num n_dns "$(ikg_count dns 'dns\.query')"),"
@@ -657,12 +674,12 @@ check()
     done
     out+=$'\n2) hosts 域名封锁: '"$hosts"' 条(0.0.0.0)'
     out+=$'\n3) 后门进程: '"${alive:-无}"
-    out+=$'\n4) 启动尝试监控 stub.log:'
-    if [ -s "$IK_STUB_LOG" ]; then
-        out+=$'\n'"$(tail -n 10 "$IK_STUB_LOG" 2>/dev/null)"
-        out+=$'\n     [!!] 有组件尝试启动被禁后门 —— 上面是时间与拉起者, 需要排查'
+    out+=$'\n4) 启动尝试监控: 本次开机 '"$(ikg_stub_new)"' 条(历史累计 '"$(ikg_stub_total)"' 条)'
+    if [ "$(ikg_stub_new)" != "0" ]; then
+        out+=$'\n'"$(tail -n 6 "$IK_STUB_LOG" 2>/dev/null)"
+        out+=$'\n     [!!] 本次开机有组件尝试启动被禁后门 —— 上面是时间与拉起者, 需要排查'
     else
-        out+=$'\n     [OK] 暂无任何启动尝试'
+        out+=$'\n     [OK] 本次开机没有任何启动尝试(历史记录只作存档)'
     fi
 
     out+=$'\n5) SSH 加固:'

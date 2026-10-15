@@ -63,10 +63,37 @@ BD_WATCH_LOG="/etc/log/ikguard/stub.log"
 # 空壳/被禁脚本据此一眼判断"这是 rc 内存旧副本的启动", 不用去读已经消失的父进程
 BD_RC_PID_FILE="/tmp/.ikblock.rc.pid"
 
+# "启动尝试"基线: stub.log 在持久盘上带历史记录, 所以"本次开机干不干净"看的是**增量** ——
+# 开机打补丁时把当时的条数快照到 /tmp(/tmp 每次开机清空, 天然就是"本次开机")。
+BD_STUB_BASE="/tmp/.ikblock.stub.base"
+
 # 开机 rc 的脚本路径(真机固定; 用于从自己的祖先链里认出 rc)
 BD_RC_SCRIPT="/usr/ikuai/script/rc"
 
 bd_log() { log "[backdoor] $*"; }
+
+# 启动尝试条数(记录行格式: [时间] [ikblock] ...)
+bd_stub_count() {
+    local f n=0
+    f="$(P "$BD_WATCH_LOG")"
+    [ -f "$f" ] && n="$(grep -c -- "] \[$BD_MARK\]" "$f" 2>/dev/null)"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
+}
+
+# 本次开机新增的启动尝试条数(>0 = 有枚举遗漏的启动点, 记录里就是拉起者)
+bd_stub_new() {
+    local base=0 now
+    now="$(bd_stub_count)"
+    [ -f "$(P "$BD_STUB_BASE")" ] && base="$(cat "$(P "$BD_STUB_BASE")" 2>/dev/null)"
+    case "$base" in ''|*[!0-9]*) base=0 ;; esac
+    [ "$now" -gt "$base" ] && printf '%s' "$((now - base))" || printf '0'
+}
+
+bd_record_stub_baseline() {
+    printf '%s\n' "$(bd_stub_count)" > "$(P "$BD_STUB_BASE")" 2>/dev/null
+    return 0
+}
 
 # 从自己的祖先链里认出"这次开机的 rc 进程"(真机: scripts/02 <- boot.sh <- plugins.sh <- rc),
 # 在 bd_apply 里记进 $BD_RC_PID_FILE —— 空壳/被禁脚本判断"是不是 rc 内存旧副本在启动我"时
@@ -384,6 +411,7 @@ bd_block_hosts() {
 bd_apply() {
     local rcp=""
     bd_log "开始禁用后门/更新通道"
+    bd_record_stub_baseline          # 记本次开机的启动尝试基线(历史记录不参与判定)
     # 先记下本次开机 rc 的 pid: 内存旧副本的开机竞态启动靠它判定(见 bd_watch_body)
     if rcp="$(bd_boot_rc_pid)"; then
         printf '%s\n' "$rcp" > "$(P "$BD_RC_PID_FILE")" 2>/dev/null

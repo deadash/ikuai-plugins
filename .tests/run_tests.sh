@@ -319,6 +319,21 @@ case "$v" in
     *) bad "au_count 无匹配时只输出一个 0(实际: $(printf '%s' "$v" | tr '\n' '/'))" ;;
 esac
 
+# 启动尝试要按"本次开机增量"判定: stub.log 在持久盘上带历史记录, 不该让自检永远报红
+printf '[2026-01-01 00:00:00] [ikblock] pmd 被启动(已拦截) ppid=1\n(历史记录)\n' >> "$STUBLOG"
+run_boot                                  # 开机时记下基线(=1 条历史)
+v="$(IK_SYSROOT="$MOCK" bash -c '. "'"$MOCK"'/etc/mnt/.boot/lib/common.sh"; . "'"$MOCK"'/etc/mnt/.boot/lib/backdoor.sh"; bd_stub_new' 2>/dev/null)"
+case "$v" in
+    0) ok "历史记录不算本次开机(增量 0)" ;;
+    *) bad "历史记录不算本次开机(实际增量: $v)" ;;
+esac
+printf '[2026-01-01 00:01:00] [ikblock] cre 被启动(已拦截) ppid=1\n(本次新增)\n' >> "$STUBLOG"
+v="$(IK_SYSROOT="$MOCK" bash -c '. "'"$MOCK"'/etc/mnt/.boot/lib/common.sh"; . "'"$MOCK"'/etc/mnt/.boot/lib/backdoor.sh"; bd_stub_new' 2>/dev/null)"
+case "$v" in
+    1) ok "本次开机新增能被数出来(增量 1)" ;;
+    *) bad "本次开机新增能被数出来(实际: $v)" ;;
+esac
+
 section "6. 定时任务: 不装守卫, 且清掉旧版遗留"
 assert_noexist  "$MOCK/etc/crontabs/cron.d/ikblock_guard"    "未安装每分钟守卫 cron"
 assert_not_grep "$MOCK/etc/crontabs/root" "backdoor_guard"   "旧版守卫行已从 crontab 清除"
