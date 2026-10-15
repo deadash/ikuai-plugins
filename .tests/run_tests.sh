@@ -219,10 +219,19 @@ run_boot
 assert_shim "iptables -w -I IKG_SRC_BAN 1 -s 203.0.113.9"    "重启后自动重放封禁名单"
 assert_not_shim "IKG_SSH_WAN"                                "开关关着时公网封禁不会自己回来"
 
-# ⑧ 解封
+# ⑧ 解封: 名单空了就要把链也拆掉(不留挂着的空链)
 IK_SYSROOT="$MOCK" bash "$SGBIN" unban 203.0.113.9 >/dev/null 2>&1
 assert_shim "iptables -w -D IKG_SRC_BAN -s 203.0.113.9"      "解封时删掉规则"
 assert_not_grep "$SG_LIST" '^203.0.113.9|'                    "解封后名单里不留"
+assert_shim "iptables -w -D INPUT -j IKG_SRC_BAN"             "名单空了就摘掉 INPUT 跳转(不留空链)"
+assert_shim "iptables -w -X IKG_SRC_BAN"                      "名单空了就删掉链"
+
+# ⑧b 清空名单同理
+IK_SYSROOT="$MOCK" bash "$SGBIN" ban 198.51.100.7 >/dev/null 2>&1
+: > "$SHIM_LOG"
+IK_SYSROOT="$MOCK" bash "$SGBIN" clear >/dev/null 2>&1
+assert_shim "iptables -w -X IKG_SRC_BAN"                      "清空名单后不留空链"
+assert_not_grep "$SG_LIST" '198.51.100.7'                     "清空后名单为空"
 
 # ⑨ 参数只收 IP 字面量(防把 shell 元字符带进 iptables 命令行)
 if IK_SYSROOT="$MOCK" bash "$SGBIN" ban '1.2.3.4;reboot' >/dev/null 2>&1; then

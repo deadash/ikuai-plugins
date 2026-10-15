@@ -386,7 +386,7 @@ EOF
 
     # SSH 事件(时间 / 事件 / 账号 / 来源 IP / 结果)
     entries="["
-    while IFS="$(printf '\t')" read -r t ev user ip res; do
+    while IFS='|' read -r t ev user ip res; do
         [ -n "$ev" ] || continue
         [ "$first" = 1 ] || entries+=","
         first=0

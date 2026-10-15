@@ -404,6 +404,8 @@ ssh sshd@127.0.0.1 -p 10022 "
 | 后门程序 | `/usr/sbin/ik_rc_client` 等被替换为空壳(含 `[ikblock] disabled` + stub.log 监控) |
 | hosts 封锁 | `/etc/hosts` 有 `# [ikblock] begin` 段，云端域名指向 `0.0.0.0` |
 | 启动监控 | `/etc/log/ikguard/stub.log` 不存在或为空(有任何记录 = 发现了新的启动点) |
+| SSH 加固 | `sshguard check`：端口/`open_sshd` 取官方值；`sshguard=0` 时防火墙里没有 `IKG_*` 链；`=1` 时 `IKG_SSH_WAN` 含 `ifaces` + `ctstate NEW` |
+| SSH 日志 | `sshguard log 5` 有输出（来自官方 `/etc/log/syslog.db` 的 `messages` 表，含失败尝试） |
 | 审计日志 | 打开 `audit` 后 `/etc/log/ikguard/audit-<date>.log` 出现 `collect.begin` 等事件 |
 | Web 接口 | `POST /Action/call {"func_name":"ikguard","action":"show","param":{"TYPE":"data"}}` 返回 `Result:30000` |
 | Web 页面 | 系统设置 → 插件管理(`#/system-setting/plugin-management`)：**无"需要绑定爱快云平台"提示**，点开插件后标题显示"插件"而不是"Docker" |
@@ -869,6 +871,7 @@ $ grep boot /etc/log/ikguard/bnfix.log | tail -1
 | `cron` | 1 | 铺开 `/etc/mnt/cron.d` |
 | `shell` | 1 | 链接 `/etc/mnt/shells` 下的程序/配置 |
 | `audit` | 0 | 审计取证=**常驻被动采集器**(conntrack 连接事件)；=0 时停掉采集器并清理遗留定时任务 |
+| `sshguard` | 0 | SSH 加固：封禁 WAN 侧来的**新 SSH 连接**(官方 `ifaces` 判公网网卡、官方 `sshd_port`)；=0 时撤销规则。开启后只剩 LAN 侧能连 SSH，**别把自己锁在门外**(Web 不受影响，可随时关) |
 
 > 采集**不占 cron**：`audit=1` 开机自动拉起采集器、`=0` 停止；DNS 不单独抓包，只是连接事件里 `dport=53` 的子集。
 > 框架自身不写任何定时任务。
@@ -890,6 +893,45 @@ sed -i 's/^backdoor=.*/backdoor=0/' /etc/mnt/boot_args     # 关闭
 ```
 
 ---
+
+## 7b. SSH 加固(封禁公网访问 + 一键封禁来源 IP)
+
+真机 3.7.16 核实: SSH 是自带的 **dropbear**(官方 `remote_control.sh __set_sshd` 拉起, 监听
+`0.0.0.0`), **官方没有做任何 WAN 侧限制** —— 22 不在 iKuai 的 `DROP_T_PORTS_WAN_IN`
+(只有 53 54 680~690 700 1900)、`WEBACL` 只管 web 端口。所以 `open_sshd=1` 且上游做了映射时,
+公网可直接连上来爆破。本框架补的是官方缺的那条链。
+
+```bash
+sshguard status                       # 状态: 端口/open_sshd/公网封禁/名单
+sshguard on                           # 封禁 WAN 侧新 SSH 连接(等同 sshguard=1)
+sshguard off                          # 解除
+sshguard log 30                       # SSH 日志(登录成功/失败/注销; 读官方 /etc/log/syslog.db)
+sshguard ban 203.0.113.9 SSH爆破        # 一键封禁(只挡它访问 SSH 端口)
+sshguard unban 203.0.113.9 / sshguard clear
+```
+
+* 公网网卡用官方定义判定(`/usr/ikuai/include/iptables.sh` 的 `IPT_WAN_NO_VPN_IFACE_IN`,
+  即 `-m ifaces --ifaces wan*,vwan*,adsl* --dir in`)；SSH 端口读官方
+  `config.db:remote_control.sshd_port`, 都不写死。
+* 规则带 `--ctstate NEW`: 只拦新连接 —— iKuai 的 INPUT 是"默认 ACCEPT + 靶向 DROP",
+  没有 ESTABLISHED 放行, 不限 NEW 会把自己正在用的 SSH 会话一起打断(实测: 生效后当前会话
+  仍可用)。
+* 来源封禁只挡**该 IP 访问 SSH 端口**, Web 与其它的不受影响; 名单在
+  `/etc/mnt/ikguard/ssh-ban.list`(持久), 开机 `scripts/07` 重放; 名单清空后链一起拆掉。
+
+**救援(实测过一遍)**: 公网 SSH 被封后 Web 照常可用 —— 登录后
+
+```bash
+# passwd 必须是 md5(明文密码), 明文会返回"账号或密码错误"
+curl -c /tmp/c -X POST http://<设备>/Action/login -H 'Content-Type: application/json' \
+     -d '{"username":"admin","passwd":"<md5>","pass":"","remember_password":""}'
+curl -b /tmp/c -X POST http://<设备>/Action/call -H 'Content-Type: application/json' \
+     -d '{"func_name":"ikguard","action":"seting","param":{"key":"sshguard","value":"0"}}'
+```
+
+**判据坑(踩过)**: 在 QEMU user-net 下 `hostfwd` 是 **QEMU 先 accept 再往客户机连** —— 裸
+socket `connect()` 成功**不代表**客户机可达(哪怕被 DROP 也返回 0.0s 成功)。判断"封禁是否生效"
+必须看**能否完成 SSH 握手**(如 `ikctl.py sh` / paramiko 读 banner), 或看内核里的包计数。
 
 ## 8. 回滚与排障
 

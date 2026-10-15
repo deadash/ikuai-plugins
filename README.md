@@ -63,6 +63,8 @@
 4. cron, cron, cron_test
 5. 程序安装, shell
 6. 审计取证, audit (默认关闭; 开启后运行常驻**被动采集**进程, 不占 cron, 日志写 /etc/log/ikguard)
+7. SSH 加固, sshguard (默认关闭; 开启后丢弃 **WAN 侧来的新 SSH 连接**, LAN 侧不受影响
+   —— 别把自己锁在门外, 需要时在 Web「SSH 防护」里一键开/关, 或命令行 `sshguard on|off`)
 
 > 四个曾经存在的开关已经去掉, 升级时会自动从 boot_args 里清掉:
 > * `remote` —— 历史遗留的空开关(没有任何脚本读取), iKuai 云的"远程控制/远程维护"
@@ -297,6 +299,56 @@ ikaudit report          # 立刻生成报告(异常返回码 1)
 
 > **本框架不写任何 cron**：`audit` 是持久化开关，=1 时开机自动拉起采集器、=0 时停掉；
 > 旧版本写入的框架定时任务(`bin/ikaudit` 行、`backdoor_guard` 每分钟守卫)在开机时被清除。
+
+## SSH 加固 (sshguard) —— 封禁公网访问 SSH + 一键封禁来源 IP
+
+真机(3.7.16)核实过的三件事:
+
+* SSH 是设备自带的 **dropbear**, 由官方 `/usr/ikuai/script/remote_control.sh __set_sshd` 拉起:
+  `killall -q dropbear; env - PATH=$PATH dropbear -p $sshd_port`。它监听 `0.0.0.0`, 而官方
+  **没有对 SSH 做任何 WAN 侧限制** —— 22 不在 iKuai 的 `DROP_T_PORTS_WAN_IN` 集合里
+  (该集合只有 53 54 680~690 700 1900), `WEBACL` 只管 web 端口。所以 `open_sshd=1` 时只要上游
+  把端口映射到公网, 任何人都能连上来爆破。
+* **公网网卡怎么判断 = 用官方自己的封装**: `/usr/ikuai/include/iptables.sh` 里
+  `IPT_WAN_NO_VPN_IFACE_IN="-m ifaces --ifaces wan*,vwan*,adsl* --dir in"`。iKuai 自研的 iptables
+  扩展 `ifaces` 按**接口名前缀**一次匹配所有 WAN/VPN/ADSL 网卡(多拨、多 WAN、PPPoE 全覆盖),
+  比看路由表/默认网关可靠。本框架运行时读这行定义, 固件升级自动跟随。
+* **SSH 日志官方已经在记**: `/usr/sbin/iksyslogd`(Lua) 把 dropbear 的 syslog 落进
+  `/etc/log/syslog.db` 的 `messages` 表(process=`dropbear[pid]`), 持久盘、重启不丢 ——
+  登录成功、失败、注销都有。我们只是读它, 不另采一份, 不常驻、不占额外空间。
+
+做了两件事(同样不常驻、不写 cron, 只在开机与"重新应用"/切开关时落规则):
+
+1. **封禁公网访问 SSH** —— 自建链 `IKG_SSH_WAN` 挂在 `INPUT` 最前:
+
+   ```
+   -A IKG_SSH_WAN -p tcp -m ifaces --ifaces wan*,vwan*,adsl* --dir in \
+       -m conntrack --ctstate NEW --dport <官方 sshd_port> -j DROP
+   ```
+
+   只拦 **WAN 侧的新连接**(LAN 不受影响)。`--ctstate NEW` 是必须的: iKuai 的 INPUT 是
+   "默认 ACCEPT + 靶向 DROP"(没有 ESTABLISHED 放行), 不限 NEW 会把正在操作的管理会话一起打断。
+2. **一键封禁来源 IP** —— 自建链 `IKG_SRC_BAN`, 名单存持久盘 `/etc/mnt/ikguard/ssh-ban.list`
+   (开机 `scripts/07` 重放)。封的是**该 IP 访问本机 SSH 端口**, Web 与其它服务不受影响 ——
+   手滑封错也能从网页解封; 名单清空后链会一起拆掉, 不留空链。
+
+> **救援通道(真机实测过)**: 公网 SSH 被封之后 Web 不受影响 —— 登录 Web 后
+> `POST /Action/call {"func_name":"ikguard","action":"seting","param":{"key":"sshguard","value":"0"}}`
+> 立刻解除; 设备本地还能用 `/etc/mnt/.boot/bin/sshguard off`。
+> 注意 `passwd` 字段是 **md5(明文密码)**, 明文会返回"账号或密码错误"。
+
+命令行:
+
+```bash
+sshguard status|check        # 状态 / 自检(规则还在不在、用的哪条官方定义)
+sshguard on|off              # 封禁 / 解除公网访问 SSH(等同改 sshguard 开关)
+sshguard log [n]             # SSH 登录日志: 登录成功/失败/注销(取自官方 syslog.db)
+sshguard ban <ip> [原因]      # 一键封禁来源 IP(只挡它访问 SSH)
+sshguard unban <ip>|clear    # 解封 / 清空名单
+```
+
+Web「系统设置 → 插件管理 → ikguard」的「SSH 防护」页签里有同样的东西: 公网访问开关、
+SSH 登录日志表格(每行带"封禁该 IP"按钮)、已封禁名单(可解封/清空)。
 
 ## 网页插件 (Web)
 

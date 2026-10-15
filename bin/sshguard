@@ -45,7 +45,7 @@ case "$cmd" in
         n="${1:-40}"
         case "$n" in ''|*[!0-9]*) n=40 ;; esac
         sg_log_rows "$n" | \
-            awk -F'\t' '{ printf "%-19s %-16s %-8s %s\n", $1, $2, ($3==""?"-":$3), ($4==""?"-":$4) }'
+            awk -F'|' '{ printf "%-19s %-18s %-8s %s\n", $1, $2, $3, $4 }'
         ;;
     ban)
         [ -n "$1" ] || { echo "用法: sshguard ban <ip> [原因]"; exit 1; }

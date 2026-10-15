@@ -220,11 +220,28 @@ sg_ban_del() {
         grep -v "^$ip|" "$(P "$SG_SSH_BAN_LIST")" > "$(P "$SG_SSH_BAN_LIST").tmp" 2>/dev/null
         mv "$(P "$SG_SSH_BAN_LIST").tmp" "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null
     fi
+    sg_ban_cleanup_if_empty
     log "[ssh] 已解除封禁: $ip"
     printf '%s' "$ip"
 }
 
-# 清空名单 + 清链
+# 名单空了就把链也拆掉 —— 不留"挂着的空链", 没封禁 = 防火墙里没有我们的东西
+sg_ban_cleanup_if_empty() {
+    [ -s "$(P "$SG_SSH_BAN_LIST")" ] && return 0
+    while sg_ipt -C INPUT -j "$SG_BAN_CHAIN" 2>/dev/null; do
+        sg_ipt -D INPUT -j "$SG_BAN_CHAIN" 2>/dev/null || break
+    done
+    sg_ipt -F "$SG_BAN_CHAIN" 2>/dev/null
+    sg_ipt -X "$SG_BAN_CHAIN" 2>/dev/null
+    while sg_ipt6 -C INPUT -j "$SG_BAN_CHAIN" 2>/dev/null; do
+        sg_ipt6 -D INPUT -j "$SG_BAN_CHAIN" 2>/dev/null || break
+    done
+    sg_ipt6 -F "$SG_BAN_CHAIN" 2>/dev/null
+    sg_ipt6 -X "$SG_BAN_CHAIN" 2>/dev/null
+    return 0
+}
+
+# 清空名单 + 拆链
 sg_ban_clear() {
     local n=0
     if [ -f "$(P "$SG_SSH_BAN_LIST")" ]; then
@@ -232,8 +249,7 @@ sg_ban_clear() {
         : > "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null
     fi
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    sg_ipt -F "$SG_BAN_CHAIN" 2>/dev/null
-    sg_ipt6 -F "$SG_BAN_CHAIN" 2>/dev/null
+    sg_ban_cleanup_if_empty
     log "[ssh] 已清空封禁名单($n 条)"
     printf '%s' "$n"
 }
@@ -303,8 +319,10 @@ sg_check_text() {
 
 # ---------------------------------------------------------------- SSH 日志(官方 syslog 库)
 
-# 读官方 syslog.db 里的 dropbear 事件, 输出 TSV: 时间 <TAB> 事件 <TAB> 账号 <TAB> 来源IP <TAB> 结果
-#   result: ok(登录成功) / fail(失败) / info(连接、注销)
+# 读官方 syslog.db 里的 dropbear 事件, 输出一行一条: 时间|事件|账号|来源IP|结果
+#   result: ok(登录成功) / fail(失败) / info(注销等)
+# 用 | 而不是 TAB 分隔: shell 的 IFS 把 TAB 当空白, **连续分隔符会被折叠、空字段会错位**
+# (真机上"建立连接"没有账号这一列, 用 TAB 时后面的 IP 就串到账号上了)。
 # 数据是官方 iksyslogd 已经落库的, 我们不额外采一份: 不常驻、不占 cron、不占额外空间。
 sg_log_rows() {
     local n="${1:-200}" db
@@ -329,20 +347,26 @@ sg_log_rows() {
             if (match(c, /from <[^>]+>/))    ip = strip_ip(substr(c, RSTART + 5, RLENGTH - 5))
             else if (match(c, /from [^ ]+/)) { ip = substr(c, RSTART + 5, RLENGTH - 5); sub(/:[0-9]+$/, "", ip) }
 
-            if (match(c, /for [^ ]+ from/))  user = substr(c, RSTART + 4, RLENGTH - 9)
+            if (match(c, /for [^ ]+ from/))      user = substr(c, RSTART + 4, RLENGTH - 9)
+            else if (match(c, /\(user [^,)]+/))  user = substr(c, RSTART + 6, RLENGTH - 6)
             else if (match(c, /\([^)]+\) from/)) user = substr(c, RSTART + 1, RLENGTH - 7)
 
-            if (c ~ /Pubkey.*succeeded/)           { ev = "登录成功(密钥)"; res = "ok" }
-            else if (c ~ /auth succeeded for/)     { ev = "登录成功(密码)"; res = "ok" }
-            else if (c ~ /attempt/)                { ev = "登录失败(口令错误)"; res = "fail" }
-            else if (c ~ /^Child connection/)      { ev = "建立连接";   res = "info" }
-            else if (c ~ /^Exit before auth/)      { ev = "未认证断开"; res = "info" }
-            else if (c ~ /^Exit /)                 { ev = "注销断开";   res = "info" }
-            else if (c ~ /nonexistent user/)       { ev = "用户名不存在"; res = "fail" }
-            else if (c ~ /no auth methods/)        { ev = "认证失败";   res = "fail" }
-            else                                   { ev = "其它";       res = "info" }
+            # 只留"登录行为": 真机上 Child connection / Running in background / Early exit 每次
+            # 连接都写, 会把要看的东西冲掉; 剩下认不出来的消息也不猜, 直接跳过
+            if (c ~ /Running in background/ || c ~ /^Early exit/ || c ~ /^Child connection/) next
 
-            printf "%s\t%s\t%s\t%s\t%s\n", ts, ev, user, ip, res
+            if (c ~ /Pubkey.*succeeded/)       { ev = "登录成功(密钥)"; res = "ok" }
+            else if (c ~ /auth succeeded for/) { ev = "登录成功(密码)"; res = "ok" }
+            else if (c ~ /attempt/)            { ev = "登录失败(口令错误)"; res = "fail" }
+            else if (c ~ /^Exit before auth/)  { ev = "未认证断开"; res = "info"
+                                                 if (c ~ /fails/) { ev = "多次失败后断开"; res = "fail" } }
+            else if (c ~ /^Exit /)             { ev = "注销断开"; res = "info"
+                                                 if (c ~ /signal/) ev = "断开(被信号终止)" }
+            else if (c ~ /nonexistent user/)   { ev = "用户名不存在"; res = "fail" }
+            else if (c ~ /no auth methods/)    { ev = "认证失败"; res = "fail" }
+            else next
+
+            printf "%s|%s|%s|%s|%s\n", ts, ev, (user == "" ? "-" : user), (ip == "" ? "-" : ip), res
         }'
     return 0
 }
