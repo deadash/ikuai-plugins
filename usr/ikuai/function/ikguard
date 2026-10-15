@@ -4,13 +4,14 @@
 # 页面: 系统设置 -> 插件管理 -> ikguard (前端 /plugins/app/ikguard.html)
 #
 # 动作:
-#   show    TYPE=data,flags,plugins,eula,logs,check,disk  读取状态/开关/插件/条款/日志/自检/磁盘
+#   show    TYPE=data,flags,plugins,eula,logs,check,disk,ssh  读取状态/开关/插件/条款/日志/自检/磁盘/SSH
 #   seting  key=<配置项> value=<0|1>                 修改 /etc/mnt/boot_args 开关并立即生效
 #   eula    op=accept|reject                         记录《使用条款》是否已同意(插件功能前置条件)
-#   apply   -                                        重新应用后门阻断 + 审计
+#   apply   -                                        重新应用后门阻断 + 审计 + SSH 加固
 #   plugin  op=scan|install|remove|list [name=...]    插件管理(install 用于安装刚上传的 zip)
-#   check   -                                        封锁自检: 空壳/hosts/进程/启动监控(即时完成)
+#   check   -                                        自检: 后门封锁 + SSH 加固(即时完成)
 #   expand  op=set|pending|cancel|log size=<MiB>      系统盘(/etc/mnt)扩容(提交后重启执行)
+#   sshban  op=ban|unban|clear [ip=...] [note=...]    一键封禁/解封来源 IP(封的是它访 SSH 端口)
 #   logclear -                                       清空审计日志(含滚动出的 .1)
 #
 # 审计取证(audit=1)是**常驻被动采集进程**(conntrack 连接事件), 不占 cron。
@@ -33,6 +34,11 @@ IK_CHECK_OUT="$IK_LOG_DIR/last-check.txt"
 IK_STUB_LOG="$IK_LOG_DIR/stub.log"           # 空壳记录的"启动尝试"监控日志
 IK_HOSTS="/etc/hosts"                        # 域名封锁(0.0.0.0)所在文件
 IK_AU_PIDFILE="/tmp/.ikaudit/collect.pid"   # 被动采集器 pid 文件(由 ikaudit collect-start 写入)
+
+# 框架公共库: SSH 加固(sg_*)与开关判定(is_enabled)都直接复用 .boot/lib 下的同一份实现,
+# 不在本接口里再抄一遍 —— 页面看到的规则和开机脚本落下的规则必须永远是一回事。
+. "$BOOT_DIR/lib/common.sh"
+. "$BOOT_DIR/lib/sshguard.sh"
 
 # 系统盘(/etc/mnt)扩容:
 #   /etc/mnt 出厂只有 43.4M, 装不下带二进制的插件; 设备上还有 15.5G 的 /etc/log。
@@ -353,6 +359,62 @@ __show_logs() {
     json_append __json_result__ logs:json
 }
 
+# SSH 加固状态 + SSH 日志(登录成功/失败/注销)
+#   日志直接读官方 /etc/log/syslog.db 的 messages 表 —— iksyslogd 已经把 dropbear 的
+#   syslog 落库了(含 Bad password attempt), 我们不另采一份, 不常驻、不占额外空间。
+__show_ssh() {
+    local port open pub entries first=1 t ev user ip res
+    port="$(sg_ssh_port)"
+    open="$(sg_ssh_open)"
+    if sg_pub_state; then pub="on"; else pub="off"; fi
+
+    # 封禁名单(ip|时间|原因)
+    local list="[" first2=1 lip lts lnote
+    while IFS='|' read -r lip lts lnote; do
+        [ -n "$lip" ] || continue
+        [ "$first2" = 1 ] || list+=","
+        first2=0
+        list+="{"
+        list+="$(ikg_kv ip "$lip"),"
+        list+="$(ikg_kv time "$lts"),"
+        list+="$(ikg_kv note "$lnote")"
+        list+="}"
+    done <<EOF
+$(sg_ban_list)
+EOF
+    list+="]"
+
+    # SSH 事件(时间 / 事件 / 账号 / 来源 IP / 结果)
+    entries="["
+    while IFS="$(printf '\t')" read -r t ev user ip res; do
+        [ -n "$ev" ] || continue
+        [ "$first" = 1 ] || entries+=","
+        first=0
+        entries+="{"
+        entries+="$(ikg_kv time "$t"),"
+        entries+="$(ikg_kv event "$ev"),"
+        entries+="$(ikg_kv user "$user"),"
+        entries+="$(ikg_kv ip "$ip"),"
+        entries+="$(ikg_kv result "$res")"
+        entries+="}"
+    done <<EOF
+$(sg_log_rows "${n:-200}")
+EOF
+    entries+="]"
+
+    local ssh="{"
+    ssh+="$(ikg_kv port "$port"),"
+    ssh+="$(ikg_kv open "$open"),"
+    ssh+="$(ikg_kv pub "$pub"),"
+    ssh+="$(ikg_num ban_count "$(sg_ban_count)"),"
+    ssh+="$(ikg_kv wan_arg "$(sg_wan_arg)"),"
+    ssh+="$(ikg_kv syslog_db "$(P "$SG_DB_SYSLOG")"),"
+    ssh+="\"list\":$list,"
+    ssh+="\"entries\":$entries"
+    ssh+="}"
+    json_append __json_result__ ssh:json
+}
+
 show()
 {
     Show __json_result__
@@ -368,6 +430,7 @@ __apply_for() {
         cron)      ikg_run_script 04_enable_cron.sh ;;
         shell)     ikg_run_script 05_enable_shell.sh ;;
         audit)     ikg_run_script 06_enable_audit.sh ;;
+        sshguard)  ikg_run_script 07_enable_sshguard.sh ;;
     esac
     return 0
 }
@@ -382,6 +445,7 @@ seting()
         cron)            k="cron" ;;
         shell)           k="shell" ;;
         audit)           k="audit" ;;
+        sshguard)        k="sshguard" ;;
         *)               echo "不支持的配置项: $key" ; return 1 ;;
     esac
 
@@ -441,7 +505,8 @@ apply()
 {
     ikg_run_script 02_disable_backdoor.sh
     ikg_run_script 06_enable_audit.sh
-    echo "已重新应用后门阻断与审计"
+    ikg_run_script 07_enable_sshguard.sh
+    echo "已重新应用后门阻断、审计与 SSH 加固"
     return 0
 }
 
@@ -558,11 +623,12 @@ expand()
     return 0
 }
 
-# 封锁自检: 即时完成(几十次 fork), 检查四件事:
+# 自定义自检: 即时完成(几十次 fork), 检查五件事:
 #   1) 5 个云端客户端是否都被换成了空壳
 #   2) /etc/hosts 里的云端域名封锁条目数
 #   3) 是否还有后门进程存活
 #   4) stub.log 里最近的"启动尝试"(应该为空 —— 有记录=发现了新的启动点)
+#   5) SSH 加固(公网访问是否已封禁、封了几个来源 IP)
 # 结果同时写 last-check.txt 供页面回看。不参与 cron, 也不在开机时执行。
 check()
 {
@@ -590,9 +656,12 @@ check()
         out+=$'\n     [OK] 暂无任何启动尝试'
     fi
 
+    out+=$'\n5) SSH 加固:'
+    out+=$'\n'"$(sg_check_text | tail -n +2 | sed 's/^/     /')"
+
     mkdir -p "$IK_LOG_DIR" 2>/dev/null
     printf '%s\n' "$out" > "$IK_CHECK_OUT" 2>/dev/null
-    ikg_audit INFO "check" "封锁自检: 进程=${alive:-无} hosts=$hosts 条 stub记录=$([ -s "$IK_STUB_LOG" ] && echo 有 || echo 无)"
+    ikg_audit INFO "check" "自检: 进程=${alive:-无} hosts=$hosts 条 stub记录=$([ -s "$IK_STUB_LOG" ] && echo 有 || echo 无) ssh封禁=$(sg_ban_count) 条"
     printf '%s\n' "$out"
     return 0
 }
@@ -608,5 +677,42 @@ logclear()
     done
     Syslog "[ikguard] 审计日志已清空"
     echo "审计日志已清空"
+    return 0
+}
+
+# ---------------------------------------------------------------- SSH 加固动作
+
+# 一键封禁/解封来源 IP。封的是"该 IP 访问本机 SSH 端口"(Web 与其它服务不受影响, 所以
+# 即便手滑封了自己所在网段, 也能从网页解封)。名单落在持久盘 /etc/mnt/ikguard/ssh-ban.list,
+# 重启后由 scripts/07_enable_sshguard.sh 重放。
+sshban()
+{
+    local op="${op:-ban}" ip="${ip:-}" n
+    case "$op" in
+        ban)
+            [ -n "$ip" ] || { echo "缺少 ip 参数"; return 1; }
+            sg_ban_add "$ip" "${note:-手工封禁}" >/dev/null || { echo "封禁失败: $ip"; return 1; }
+            Syslog "[ikguard] 封禁 SSH 来源 $ip"
+            ikg_audit WARN "ssh.ban" "封禁来源 IP $ip (${note:-手工封禁})"
+            echo "已封禁 $ip 访问本机 SSH(Web 不受影响, 随时可解封)"
+            ;;
+        unban)
+            [ -n "$ip" ] || { echo "缺少 ip 参数"; return 1; }
+            sg_ban_del "$ip" >/dev/null || { echo "解封失败: $ip"; return 1; }
+            Syslog "[ikguard] 解除 SSH 封禁 $ip"
+            ikg_audit INFO "ssh.unban" "解除封禁 $ip"
+            echo "已解除封禁 $ip"
+            ;;
+        clear)
+            n="$(sg_ban_clear)"
+            Syslog "[ikguard] 清空 SSH 封禁名单"
+            ikg_audit INFO "ssh.unban" "清空封禁名单(${n:-0} 条)"
+            echo "已清空封禁名单(${n:-0} 条)"
+            ;;
+        *)
+            echo "op 只支持 ban|unban|clear"
+            return 1
+            ;;
+    esac
     return 0
 }

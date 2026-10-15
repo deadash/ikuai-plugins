@@ -1,7 +1,54 @@
 #!/bin/sh
-# 测试替身: 记录调用; -C(检查) 一律返回1(表示规则不存在), 触发 -I 插入
+# 测试替身: 记录调用 + 维护一份简化的规则表(文件), 让 -N/-F/-X/-A/-I/-C/-D/-S 之间能互相对上
+#   -C 真实反映"规则在不在" —— 幂等与自检才有意义(旧版一律返回 1)
 echo "iptables $*" >> "$SHIM_LOG"
-for a in "$@"; do
-    [ "$a" = "-C" ] && exit 1
+STATE="${SHIM_STATE:-$SHIM_LOG.$(basename "$0")}"
+touch "$STATE"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -w|-4|-6) shift ;;
+        *) break ;;
+    esac
 done
+op="$1"; shift 2>/dev/null
+
+chain=""
+case "$op" in
+    -A|-I|-C|-D)
+        chain="$1"; shift
+        case "$1" in ''|*[!0-9]*) ;; *) shift ;; esac   # -I 的位置号不入规则
+        ;;
+    -N|-F|-X|-S)
+        chain="$1"; shift
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+rule="$*"
+key="R|$chain|$rule"
+
+case "$op" in
+    -N) grep -qxF "C|$chain" "$STATE" || printf 'C|%s\n' "$chain" >> "$STATE" ;;
+    -F) awk -v c="R|$chain|" 'index($0, c) != 1' "$STATE" > "$STATE.t" && mv "$STATE.t" "$STATE" ;;
+    -X) awk -v c="R|$chain|" -v n="C|$chain" '$0 != n && index($0, c) != 1' "$STATE" > "$STATE.t" \
+            && mv "$STATE.t" "$STATE" ;;
+    -A) grep -qxF "$key" "$STATE" || printf '%s\n' "$key" >> "$STATE" ;;
+    -I) grep -qxF "$key" "$STATE" || printf '%s\n' "$key" >> "$STATE" ;;
+    -C) grep -qxF "$key" "$STATE" && exit 0 || exit 1 ;;
+    -D)
+        if grep -qxF "$key" "$STATE"; then
+            awk -v k="$key" '$0 != k' "$STATE" > "$STATE.t" && mv "$STATE.t" "$STATE"
+            exit 0
+        fi
+        exit 1
+        ;;
+    -S)
+        if [ -n "$chain" ]; then
+            grep -F "R|$chain|" "$STATE" 2>/dev/null | \
+                awk -v c="$chain" '{ sub(/^R\|[^|]*\|/, ""); print "-A " c " " $0 }'
+        fi
+        ;;
+esac
 exit 0

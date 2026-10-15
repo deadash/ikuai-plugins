@@ -245,6 +245,32 @@ printf '#!/bin/sh\necho real dtalkc\n'       > "$R/usr/sbin/dtalkc"
 chmod +x "$R/usr/sbin/ik_rc_client" "$R/usr/sbin/cre" "$R/usr/sbin/pmd" \
          "$R/usr/sbin/dtalkd" "$R/usr/sbin/dtalkc"
 
+# ------------------------------------------------- SSH 加固(与 3.7.16 真机一致)
+# 官方 iptables 定义: 公网网卡就是靠这个变量判定的(iKuai 自研 ifaces 扩展, 按接口名前缀匹配)
+mkdir -p "$R/usr/ikuai/include"
+printf '%s\n' 'IPT_WAN_NO_VPN_IFACE_IN="-m ifaces --ifaces wan*,vwan*,adsl* --dir in"' \
+    > "$R/usr/ikuai/include/iptables.sh"
+
+# 官方配置库: SSH 开关/端口(故意用 2222, 用来证明我们是读官方值而不是写死 22)
+mkdir -p "$R/etc/mnt/ikuai"
+if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$R/etc/mnt/ikuai/config.db" \
+        "create table remote_control(id integer primary key, open_sshd int, sshd_port int, sshd_passwd text);
+         insert into remote_control values(1,1,2222,'x');" 2>/dev/null
+fi
+
+# 官方日志库: iksyslogd 把 dropbear 的 syslog 落进 messages 表(process=dropbear[pid])
+mkdir -p "$R/etc/log"
+if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$R/etc/log/syslog.db" \
+        "create table messages(id integer primary key, timestamp integer, process text, content text);
+         insert into messages values(1,1792043147,'dropbear[9962]','Password auth succeeded for sshd from 10.0.2.2:40260');
+         insert into messages values(2,1792043148,'dropbear[9962]','Exit (sshd) from <10.0.2.2:40260>: Exited normally');
+         insert into messages values(3,1792043149,'dropbear[10490]','Bad password attempt for sshd from 203.0.113.9:46448');
+         insert into messages values(4,1792043150,'dropbear[10490]','Child connection from 203.0.113.9:46448');
+         insert into messages values(5,1792043151,'kernel','与 SSH 无关的系统日志, 不该出现在 SSH 日志里');" 2>/dev/null
+fi
+
 # ------------------------------------------------- 其它
 # /etc/hosts 与真机一样: 由 /etc/hosts.d/* 汇总而成(basic.sh:__set_hostname 会重建它) ——
 # 域名封锁必须作为片段写在这里, 否则下一个重建它的脚本(basic.sh/function basic/pppoe_server)

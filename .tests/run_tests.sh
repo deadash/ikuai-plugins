@@ -158,6 +158,87 @@ printf 'if [ "$1" = boot2 ]; then ( "%s/usr/sbin/pmd" >/dev/null 2>&1 & exit 0 )
 bash "$RC" boot2 >/dev/null 2>&1
 assert_grep "$STUBLOG" "(拉起者已退出"                       "归属不了时写明"无法归属", 不伪造拉起者"
 
+section "5c. SSH 加固(封禁公网访问 / 一键封禁来源 IP / 官方日志)"
+SGBIN="$MOCK/etc/mnt/.boot/bin/sshguard"
+SG_LIST="$MOCK/etc/mnt/ikguard/ssh-ban.list"
+assert_exists   "$SGBIN"                                     "bin/sshguard 已部署"
+assert_grep     "$MOCK/etc/mnt/boot_args" "^sshguard=0"      "sshguard 默认关闭(开了会把 WAN 侧管理通道一起挡掉)"
+
+# ① 一切取官方值: SSH 端口读官方 remote_control.sshd_port(故意设成 2222),
+#    公网网卡读官方 /usr/ikuai/include/iptables.sh 的 IPT_WAN_NO_VPN_IFACE_IN
+sg_out="$(IK_SYSROOT="$MOCK" bash "$SGBIN" status 2>/dev/null)"
+case "$sg_out" in
+    *"端口=2222"*)        ok "SSH 端口取官方 sshd_port(2222), 没写死 22" ;;
+    *)                    bad "SSH 端口取官方 sshd_port(2222), 没写死 22" ;;
+esac
+case "$sg_out" in
+    *'wan*,vwan*,adsl*'*) ok "公网网卡取官方定义(-m ifaces --ifaces wan*,vwan*,adsl* --dir in)" ;;
+    *)                    bad "公网网卡取官方定义(-m ifaces --ifaces wan*,vwan*,adsl* --dir in)" ;;
+esac
+
+# ② 默认(开关关 + 无名单): 一个防火墙调用都不发 —— 保持"不开就不花代价"
+: > "$SHIM_LOG"; : > "$SHIM_LOG.iptables"; : > "$SHIM_LOG.ip6tables"
+run_boot
+assert_not_shim "IKG_SSH_WAN"                                "默认关闭时不下发公网封禁规则"
+assert_not_shim "IKG_SRC_BAN"                                "没有封禁名单时不建来源封禁链"
+
+# ③ 开启公网封禁: 官方网卡定义 + 官方端口 + 只拦新连接(iKuai 的 INPUT 是默认 ACCEPT,
+#    不限 NEW 会把正在操作的管理会话一起打断)
+IK_SYSROOT="$MOCK" bash "$SGBIN" on >/dev/null 2>&1
+assert_grep "$MOCK/etc/mnt/boot_args" "^sshguard=1"          "开关置 1 并写入 boot_args"
+assert_shim "iptables -w -A IKG_SSH_WAN -p tcp -m ifaces --ifaces wan*,vwan*,adsl* --dir in -m conntrack --ctstate NEW --dport 2222 -j DROP" \
+                                                             "公网封禁规则(官方网卡 + 官方端口 + 仅新连接)"
+assert_shim "iptables -w -I INPUT 1 -j IKG_SSH_WAN"          "封禁链挂到 INPUT 最前"
+
+# ④ 幂等: 再点一次不重复插跳转(锚定行首: ip6tables 的同一行不算)
+IK_SYSROOT="$MOCK" bash "$SGBIN" on >/dev/null 2>&1
+case "$(grep -c '^iptables -w -I INPUT 1 -j IKG_SSH_WAN$' "$SHIM_LOG" 2>/dev/null)" in
+    1) ok "重复应用不会重复插跳转(幂等)" ;;
+    *) bad "重复应用不会重复插跳转(幂等)" ;;
+esac
+
+# ⑤ 关闭: 撤销干净, 自检同步显示
+IK_SYSROOT="$MOCK" bash "$SGBIN" off >/dev/null 2>&1
+assert_grep "$MOCK/etc/mnt/boot_args" "^sshguard=0"          "开关置 0"
+assert_shim "iptables -w -D INPUT -j IKG_SSH_WAN"             "关闭时摘掉 INPUT 跳转"
+assert_shim "iptables -w -X IKG_SSH_WAN"                      "关闭时删掉自建链"
+case "$(IK_SYSROOT="$MOCK" bash "$SGBIN" status 2>/dev/null)" in
+    *"未封禁"*) ok "自检显示公网未封禁(与规则同步)" ;;
+    *)          bad "自检显示公网未封禁(与规则同步)" ;;
+esac
+
+# ⑥ 一键封禁来源 IP: 只挡该 IP 访问 SSH 端口(Web 不受影响, 手滑也能从网页解封)
+IK_SYSROOT="$MOCK" bash "$SGBIN" ban 203.0.113.9 "SSH 爆破" >/dev/null 2>&1
+assert_shim "iptables -w -I IKG_SRC_BAN 1 -s 203.0.113.9 -p tcp --dport 2222 -j DROP" \
+                                                             "封禁只挡该 IP 的 SSH 端口"
+assert_grep "$SG_LIST" '^203.0.113.9|'                        "封禁名单落到持久盘"
+
+# ⑦ 重启后名单要重放(用户点了封禁就该一直有效), 而开关关着时公网封禁不会自己回来
+: > "$SHIM_LOG"; : > "$SHIM_LOG.iptables"; : > "$SHIM_LOG.ip6tables"
+run_boot
+assert_shim "iptables -w -I IKG_SRC_BAN 1 -s 203.0.113.9"    "重启后自动重放封禁名单"
+assert_not_shim "IKG_SSH_WAN"                                "开关关着时公网封禁不会自己回来"
+
+# ⑧ 解封
+IK_SYSROOT="$MOCK" bash "$SGBIN" unban 203.0.113.9 >/dev/null 2>&1
+assert_shim "iptables -w -D IKG_SRC_BAN -s 203.0.113.9"      "解封时删掉规则"
+assert_not_grep "$SG_LIST" '^203.0.113.9|'                    "解封后名单里不留"
+
+# ⑨ 参数只收 IP 字面量(防把 shell 元字符带进 iptables 命令行)
+if IK_SYSROOT="$MOCK" bash "$SGBIN" ban '1.2.3.4;reboot' >/dev/null 2>&1; then
+    bad "非法 IP 被拒绝(防注入)"
+else
+    ok  "非法 IP 被拒绝(防注入)"
+fi
+
+# ⑩ SSH 登录日志: 直接读官方 syslog.db 的 messages 表(dropbear), 成功/失败/注销都要有
+IK_SYSROOT="$MOCK" bash "$SGBIN" log 20 > "$MOCK/tmp/.sshlog" 2>/dev/null
+assert_grep     "$MOCK/tmp/.sshlog" "登录成功(密码)"          "SSH 日志: 登录成功"
+assert_grep     "$MOCK/tmp/.sshlog" "登录失败(口令错误)"      "SSH 日志: 失败尝试(dropbear 的 Bad password attempt)"
+assert_grep     "$MOCK/tmp/.sshlog" "注销断开"                "SSH 日志: 注销"
+assert_grep     "$MOCK/tmp/.sshlog" "203.0.113.9"             "SSH 日志: 解析出来源 IP(去掉端口)"
+assert_not_grep "$MOCK/tmp/.sshlog" "与 SSH 无关"             "SSH 日志: 不掺入非 dropbear 的系统日志"
+
 section "6. 定时任务: 不装守卫, 且清掉旧版遗留"
 assert_noexist  "$MOCK/etc/crontabs/cron.d/ikblock_guard"    "未安装每分钟守卫 cron"
 assert_not_grep "$MOCK/etc/crontabs/root" "backdoor_guard"   "旧版守卫行已从 crontab 清除"

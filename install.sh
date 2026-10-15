@@ -58,6 +58,8 @@ ensure_key plugins 1
 ensure_key cron 1
 ensure_key shell 1
 ensure_key audit 0    # 审计取证=被动采集器(默认关闭; 开启后运行常驻进程, 不占 cron)
+ensure_key sshguard 0 # SSH 加固=封禁公网访问 SSH(默认关闭: 打开后从 WAN 侧的新 SSH 连接
+                      # 一律被丢, 只剩 LAN 侧可用 —— 别把自己锁在门外, 需要时在 Web 上一键开)
 
 # 清理已废弃开关:
 #   remote         历史遗留的空开关(没有任何脚本读取; iKuai 云平台的"远程控制/远程维护"

@@ -87,7 +87,7 @@
   <span class="tag">ikguard</span>
   <span style="flex:1"></span>
   <span class="msg" id="msg"></span>
-  <button onclick="load();loadLogs();loadDisk();">刷新</button>
+  <button onclick="load();loadLogs();loadDisk();loadSsh();">刷新</button>
 </div>
 
 <div class="row" id="cards"></div>
@@ -96,6 +96,7 @@
   <a class="on" data-p="p-status">开关配置</a>
   <a data-p="p-plugin">插件管理</a>
   <a data-p="p-log">审计日志</a>
+  <a data-p="p-ssh">SSH 防护</a>
   <a data-p="p-tool">工具</a>
 </div>
 
@@ -142,6 +143,46 @@
   <h4>DNS 查询(仅 dport=53 事件) dns-*.log</h4><pre id="log-dns">-</pre>
   <h4>启动尝试监控 stub.log(空壳记录, 正常应为空)</h4><pre id="log-stub">-</pre>
   <h4>开机日志 boot.log</h4><pre id="log-boot">-</pre>
+</div>
+
+<div class="pane" id="p-ssh">
+  <div class="tool">
+    <b>公网访问 SSH</b>
+    <div class="tip">SSH 是设备自带的 dropbear(端口见下), <b>官方没有对公网做任何限制</b> ——
+      只要上游把端口映射到公网, 任何人都能连上来爆破。打开开关后只有
+      <code>wan / vwan / adsl</code> 入向的<b>新连接</b>会被丢弃(公网网卡用官方的
+      <code>-m ifaces</code> 判定, 多拨/多 WAN 一起覆盖), LAN 侧与已建立的会话不受影响。</div>
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:6px 0">
+      <span>状态：<b id="s-pub">-</b></span>
+      <span class="tip">SSH 端口 <code id="s-port">-</code>，官方开关 open_sshd=<code id="s-open">-</code></span>
+      <button class="pri" id="s-btn" onclick="toggleSshguard()">-</button>
+      <button onclick="loadSsh()">刷新</button>
+    </div>
+    <div class="tip">公网网卡判定参数(运行时读官方定义)：<code id="s-wan">-</code></div>
+  </div>
+
+  <div class="tool">
+    <b>SSH 登录日志(登录成功 / 登录失败 / 注销)</b>
+    <div class="tip">数据取自设备自带 syslog 库 <code id="s-db">/etc/log/syslog.db</code> 的 messages 表
+      (官方 iksyslogd 已经在记, 重启不丢), 与官方 WEB 登录日志同源。右侧「封禁该 IP」只封它访问 SSH。</div>
+    <div style="max-height:420px;overflow:auto">
+    <table>
+      <thead><tr><th>时间</th><th>事件</th><th>账号</th><th>来源 IP</th><th>操作</th></tr></thead>
+      <tbody id="s-rows"><tr><td colspan="5" style="color:#909399">加载中…</td></tr></tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="tool">
+    <b>已封禁来源(<span id="s-bann">0</span> 条)</b>
+    <div class="tip">封的是<b>该 IP 访问本机 SSH 端口</b>, Web 与其它服务不受影响 —— 所以随时能从本页解封。
+      名单落在持久盘 <code>/etc/mnt/ikguard/ssh-ban.list</code>, 重启后由开机脚本自动重放。</div>
+    <table>
+      <thead><tr><th>IP</th><th>封禁时间</th><th>原因</th><th>操作</th></tr></thead>
+      <tbody id="s-ban-rows"><tr><td colspan="4" style="color:#909399">暂无</td></tr></tbody>
+    </table>
+    <div style="margin-top:8px"><button onclick="clearSshBan()">清空封禁名单</button></div>
+  </div>
 </div>
 
 <div class="pane" id="p-tool">
@@ -403,6 +444,7 @@ function load() {
     document.getElementById('app').style.visibility = 'visible';
 
     var s = d.status || {}, f = d.flags || {};
+    window.LAST_FLAGS = f;   // SSH 页签要用它显示 sshguard 开关状态
     var alive = (s.backdoor_alive||'').trim();
     var html = '';
     html += card('框架版本', s.version || '-');
@@ -461,8 +503,87 @@ function loadCheck() {
 
 function setFlag(key, value) {
   api('seting', {key:key, value:String(value)}).then(function(){
-    tip(key+' = '+value+' 已生效', 'msg ok'); load();
+    tip(key+' = '+value+' 已生效', 'msg ok'); load(); loadSsh();
   }).catch(function(e){ tip('设置失败: '+e.message, 'msg err'); });
+}
+
+/* ------------------------------------------------------------------ SSH 防护 */
+
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function loadSsh() {
+  if (!EULA_OK) return Promise.resolve();
+  return api('show', {TYPE:'ssh'}).then(function(d){
+    var s = d.ssh || {}, f = window.LAST_FLAGS || {};
+    var el;
+    if ((el = document.getElementById('s-pub'))) {
+      el.innerHTML = (s.pub === 'on')
+        ? '<span class="ok">已封禁(公网新连接被丢弃)</span>'
+        : '<span class="err">未封禁(公网可直连 SSH)</span>';
+    }
+    if ((el = document.getElementById('s-port')))  el.textContent = s.port || '22';
+    if ((el = document.getElementById('s-open')))  el.textContent = s.open || '0';
+    if ((el = document.getElementById('s-wan')))   el.textContent = s.wan_arg || '-';
+    if ((el = document.getElementById('s-db')))    el.textContent = s.syslog_db || '-';
+    var on = (String(f['sshguard']) === '1');
+    if ((el = document.getElementById('s-btn'))) {
+      el.textContent = on ? '关闭公网封禁' : '开启公网封禁';
+      el.className = on ? '' : 'pri';
+    }
+    if ((el = document.getElementById('s-bann')))  el.textContent = s.ban_count || 0;
+
+    var es = Array.isArray(s.entries) ? s.entries : [];
+    var rows = es.map(function(e){
+      var cls = (e.result === 'fail') ? 'err' : (e.result === 'ok' ? 'ok' : '');
+      var btn = e.ip ? '<button onclick="banIp(\''+esc(e.ip)+'\')">封禁该 IP</button>' : '';
+      return '<tr><td>'+esc(e.time)+'</td><td class="'+cls+'">'+esc(e.event)+'</td><td>'+esc(e.user||'-')
+           + '</td><td>'+esc(e.ip||'-')+'</td><td>'+btn+'</td></tr>';
+    }).join('');
+    if ((el = document.getElementById('s-rows'))) {
+      el.innerHTML = rows || '<tr><td colspan="5" style="color:#909399">暂无 SSH 登录记录</td></tr>';
+    }
+
+    var ls = Array.isArray(s.list) ? s.list : [];
+    var lrows = ls.map(function(b){
+      return '<tr><td>'+esc(b.ip)+'</td><td>'+esc(b.time||'-')+'</td><td>'+esc(b.note||'-')
+           + '</td><td><button onclick="unbanIp(\''+esc(b.ip)+'\')">解封</button></td></tr>';
+    }).join('');
+    if ((el = document.getElementById('s-ban-rows'))) {
+      el.innerHTML = lrows || '<tr><td colspan="4" style="color:#909399">暂无</td></tr>';
+    }
+  }).catch(function(e){ tip('SSH 状态加载失败: '+e.message, 'msg err'); });
+}
+
+function toggleSshguard() {
+  var on = (String((window.LAST_FLAGS||{})['sshguard']) === '1');
+  if (!on && !confirm('开启后, 从公网(WAN 侧)发起的新 SSH 连接会被丢弃。\n'
+                    + 'LAN 侧不受影响; 本页所在的 Web 也不受影响, 随时能关掉。\n\n确定开启？')) return;
+  setFlag('sshguard', on ? '0' : '1');
+}
+
+function banIp(ip) {
+  if (!ip) { tip('这条日志没有来源 IP，无法封禁', 'msg err'); return; }
+  if (!confirm('封禁 ' + ip + ' 访问本机 SSH ?\n(Web 与其它服务不受影响, 之后可随时解封)')) return;
+  api('sshban', {op:'ban', ip:ip, note:'SSH 日志一键封禁'}).then(function(){
+    tip('已封禁 ' + ip, 'msg ok'); loadSsh(); load();
+  }).catch(function(e){ tip('封禁失败: ' + e.message, 'msg err'); });
+}
+
+function unbanIp(ip) {
+  api('sshban', {op:'unban', ip:ip}).then(function(){
+    tip('已解封 ' + ip, 'msg ok'); loadSsh();
+  }).catch(function(e){ tip('解封失败: ' + e.message, 'msg err'); });
+}
+
+function clearSshBan() {
+  if (!confirm('清空全部封禁名单？(已封禁的 IP 会立即恢复访问 SSH)')) return;
+  api('sshban', {op:'clear'}).then(function(){
+    tip('已清空封禁名单', 'msg ok'); loadSsh();
+  }).catch(function(e){ tip('清空失败: ' + e.message, 'msg err'); });
 }
 
 function runCheck() {
@@ -509,6 +630,7 @@ document.querySelectorAll('.tabs a').forEach(function(a){
     a.classList.add('on');
     document.getElementById(a.dataset.p).classList.add('on');
     if (a.dataset.p === 'p-log') loadLogs();
+    if (a.dataset.p === 'p-ssh') loadSsh();
     if (a.dataset.p === 'p-tool') loadCheck();
   };
 });

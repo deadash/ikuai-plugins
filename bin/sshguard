@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# sshguard - SSH 加固命令行: 封禁公网访问 SSH / 一键封禁来源 IP / 看 SSH 登录日志
+#
+#   sshguard status           查看当前状态(端口、公网封禁、封禁名单)
+#   sshguard check            自检(规则是否还在, 用的是官方哪条公网网卡定义)
+#   sshguard on               封禁公网访问 SSH(等同 Web 上把 sshguard 开关打开)
+#   sshguard off              解除公网封禁(开关置 0)
+#   sshguard log [n]          看 SSH 登录/失败/注销日志(默认 40 条; 取自官方 syslog.db)
+#   sshguard ban <ip> [原因]   封禁该 IP 访问本机 SSH
+#   sshguard unban <ip>       解除封禁
+#   sshguard clear            清空封禁名单
+#
+# 说明:
+#   * 封禁只针对 SSH 端口 —— Web 与其它服务不受影响, 手滑封错也能从网页解封;
+#   * 公网封禁跟开关 sshguard 走, 封禁名单存持久盘并跨重启重放(见 lib/sshguard.sh);
+#   * 不常驻、不写 cron: 规则只在开机与"重新应用"/开关切换时落一次。
+
+# 通过 /usr/sbin/<name> 软链调用时 $0 是软链路径, 必须解析出真实路径
+SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+. "$SELF_DIR/../lib/common.sh"
+. "$SELF_DIR/../lib/sshguard.sh"
+
+usage() { sed -n '3,14p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+cmd="$1"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+    status|check|'')
+        sg_check_text
+        ;;
+    on|open)
+        sg_flag_set sshguard 1
+        sg_apply
+        echo "已开启: 公网(WAN 侧)发起的新 SSH 连接会被丢弃; LAN 侧与已建立的会话不受影响"
+        ;;
+    off|close)
+        sg_flag_set sshguard 0
+        sg_apply
+        echo "已关闭公网封禁(封禁名单不受影响, 仍会重放)"
+        ;;
+    log)
+        n="${1:-40}"
+        case "$n" in ''|*[!0-9]*) n=40 ;; esac
+        sg_log_rows "$n" | \
+            awk -F'\t' '{ printf "%-19s %-16s %-8s %s\n", $1, $2, ($3==""?"-":$3), ($4==""?"-":$4) }'
+        ;;
+    ban)
+        [ -n "$1" ] || { echo "用法: sshguard ban <ip> [原因]"; exit 1; }
+        sg_ban_add "$1" "${2:-手工封禁}" >/dev/null || exit 1
+        echo "已封禁 $1 访问本机 SSH(Web 不受影响)"
+        ;;
+    unban)
+        [ -n "$1" ] || { echo "用法: sshguard unban <ip>"; exit 1; }
+        sg_ban_del "$1" >/dev/null || exit 1
+        echo "已解除封禁 $1"
+        ;;
+    clear)
+        echo "已清空封禁名单($(sg_ban_clear) 条)"
+        ;;
+    -h|help|--help)
+        usage
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
