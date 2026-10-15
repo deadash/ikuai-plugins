@@ -139,6 +139,14 @@ printf 'if [ "$1" = boot ]; then "%s/usr/sbin/pmd"; exit 0; fi\n' "$MOCK" >> "$R
 bash "$RC" boot >/dev/null 2>&1
 assert_not_grep "$STUBLOG" "被启动"                          "rc 内存旧副本的启动不记为异常(判据: 磁盘 rc 已带补丁)"
 
+# 另一半: rc 的 `boot_load_async X &` 会先 fork 一个后台子 shell 再 exec —— 那个中间子 shell
+# 可能在被记录之前就已经退出并被回收(此时 $PPID 变成 1, 祖先链也断了), 归属不了。
+# 这种记录会明确标注"(拉起者已退出, 无法归属)", 而不是假装它是新启动点。
+: > "$STUBLOG"
+printf 'if [ "$1" = boot2 ]; then ( "%s/usr/sbin/pmd" >/dev/null 2>&1 & exit 0 ); sleep 2; fi\n' "$MOCK" >> "$RC"
+bash "$RC" boot2 >/dev/null 2>&1
+assert_grep "$STUBLOG" "(拉起者已退出"                       "拉起者已被回收时标注"无法归属", 不当成新启动点"
+
 section "6. 定时任务: 不装守卫, 且清掉旧版遗留"
 assert_noexist  "$MOCK/etc/crontabs/cron.d/ikblock_guard"    "未安装每分钟守卫 cron"
 assert_not_grep "$MOCK/etc/crontabs/root" "backdoor_guard"   "旧版守卫行已从 crontab 清除"

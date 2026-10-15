@@ -121,12 +121,16 @@
 cron 周期，叠加节流竞态)"实测会把 2 vCPU 设备打出 30%~65% 的 CPU 尖峰，连同 ipset/iptables
 网络层已整体移除。
 
-> **每次开机为什么会有 3 条"启动尝试"又不记进日志**: rc 的 `start_remote_services()` /
-> `start_ikuai_services()` 函数体在我们打补丁之前就已被 bash 解析进内存了(补丁走的是 boot()
-> 中段的 plugins.sh 钩子，改的是磁盘副本)，所以每次开机 rc 仍会按内存旧副本把
-> `ik_rc_client` / `cre` / `pmd` 拉起一遍 —— 被空壳拦下，不影响阻断。这类启动不算"新启动点"
-> (判据: 拉起者是 rc 且磁盘上的 rc 已带补丁)，因此不写 `stub.log`；`stub.log` 里出现的任何
-> 记录都来自其它代码路径，带上时间与拉起者 cmdline，正是要排查的对象。
+> **rc 的内存旧副本**: 它的 `start_remote_services()` / `start_ikuai_services()` 函数体、
+> `boot()` 里的启动行，在我们打补丁之前就已被 bash 解析进内存了(补丁走的是 boot() 中段的
+> plugins.sh 钩子，改的只是磁盘副本)，所以每次开机 rc 仍会按内存旧副本把
+> `ik_rc_client` / `cre` / `pmd` 和 `utils/update_hosts.sh` 拉起一遍 —— 都被空壳/被禁脚本拦下，
+> 阻断效果不受影响(strace 抓到了这些 execve)。
+> 这类启动不算"新启动点"，判据 = **拉起者是 rc 且磁盘上的 rc 已带补丁**，所以不写 `stub.log`。
+> 拉起者要向上找: rc 的 `boot_load_async X &` 会先 fork 一个后台子 shell 再 exec，那个中间
+> 子 shell 可能在记录前就退出(cmdline 读不出来)，此时顺 `/proc/<pid>/stat` 找它的父进程来判定。
+> 极少数情况下拉起者已被**完全回收**、连祖先链都断了，会记一笔并在第二行写明
+> `(拉起者已退出, 无法归属)` —— 标注出来而不是假装它是新启动点。
 
 需要重新应用时手动跑一次 `/etc/mnt/.boot/bin/backdoor_guard`，或用 Web 页的"重新应用"；
 看启动尝试: `tail /etc/log/ikguard/stub.log`(空 = 干净)。

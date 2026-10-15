@@ -476,10 +476,14 @@ ssh sshd@127.0.0.1 -p 10022 "
 
 两个真机上确认过的实现细节：
 
-* **开机竞态不算启动尝试**：rc 的 `start_remote_services()` / `start_ikuai_services()` 函数体
-  在我们打补丁之前就已被 bash 解析进内存（补丁走的是 `boot()` 中段的 `plugins.sh` 钩子，
-  `sed` 改的是磁盘副本），所以每次开机 rc 仍会按内存旧副本把 `ik_rc_client` / `cre` / `pmd`
-  拉起一遍（已被空壳拦下）。判据：拉起者是 rc **且**磁盘上的 rc 已带补丁 → 不记。
+* **开机竞态不算启动尝试**：rc 的 `start_remote_services()` / `start_ikuai_services()` 函数体、
+  `boot()` 里的启动行，在我们打补丁之前就已被 bash 解析进内存（补丁走的是 `boot()` 中段的
+  `plugins.sh` 钩子，`sed` 改的是磁盘副本），所以每次开机 rc 仍会按内存旧副本把
+  `ik_rc_client` / `cre` / `pmd` 和 `utils/update_hosts.sh` 拉起一遍（已被空壳/被禁脚本拦下，
+  strace 抓到过这些 `execve`）。判据：拉起者是 rc **且**磁盘上的 rc 已带补丁 → 不记。
+  拉起者要向上找：`boot_load_async X &` 会先 fork 后台子 shell 再 exec，中间子 shell 可能在
+  记录前就退出（cmdline 读不出来），此时顺 `/proc/<pid>/stat` 找父进程判定；极少数情况拉起者
+  已被完全回收、祖先链都断了，会记一笔并写明 `(拉起者已退出, 无法归属)`。
 * **被禁脚本是被 `source` 起来的**：`/etc/ikcommon` 的收尾是 `. $1 ""; Command $S0`，
   所以脚本里 `$0` 是 `/etc/ikcommon` 而非脚本名 —— 组件名在生成时就写死字面量；
   另外生成片段绝不能走 `awk -v`（它会把 `printf` 格式串里的 `\n` 变成真换行、写出语法错误

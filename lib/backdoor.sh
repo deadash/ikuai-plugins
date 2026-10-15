@@ -107,21 +107,38 @@ bd_kill() {
 # 空壳与被禁脚本共用的"启动尝试"记录代码(生成进目标文件, 只能用设备上的 sh / busybox 内建)。
 #   $1 = 日志里的动作文字, $2 = 组件名(生成时的字面量或运行期表达式)
 #
-# 开机竞态(真机 3.7.16 实测): rc 的 start_remote_services()/start_ikuai_services() 函数体在
-#   boot() 调它们之前就已经被 bash 解析进内存了, 而我们的补丁走的是 boot() 中段的 plugins.sh
-#   钩子、改的只是磁盘副本 —— 所以**每次开机 rc 仍会按内存里的旧内容把这几个组件拉起一遍**
-#   (已被空壳拦下, 阻断效果不受影响)。这类启动不是"新启动点":
-#   判据 = 拉起者是 rc 且磁盘上的 rc 已经带补丁(补丁生效, 只是 rc 用的是内存旧副本)。
+# 开机竞态(真机 3.7.16 实测, strace 抓到 execve 现场): rc 的 start_remote_services()/
+#   start_ikuai_services() 函数体、boot() 里的启动行, 都在我们打补丁之前就被 bash 解析进内存
+#   了(补丁走的是 boot() 中段的 plugins.sh 钩子, 改的只是磁盘副本) —— 所以**每次开机 rc 仍会
+#   按内存旧副本把这些组件拉起一遍**(已被空壳/被禁脚本拦下, 阻断效果不受影响)。
+#   这类启动不是"新启动点": 判据 = 拉起者是 rc 且磁盘上的 rc 已经带补丁。
+#
+# 为什么要向上找祖先, 而不是直接看 $PPID: rc 的 `boot_load_async X &` 会先 fork 一个后台
+#   子 shell、子 shell 再 exec 目标脚本 —— 中间那个子 shell 可能已经退出(留下 cmdline 读出来
+#   是空的僵尸), 真机首测就是这么漏记/错记的。僵尸的 /proc/<pid>/stat 仍可读, 顺着它可以找到
+#   真正的拉起者。取**最近的、cmdline 可读的那个祖先**作为拉起者即可: 若某脚本(如 register.sh)
+#   才是真正的调用方, 它自己是活着的、会被优先读到, 不会误判成开机竞态。
+#   找不到就明说: 中间进程被完全回收后子进程会被 init 收养, 走到 init 不代表 init 是拉起者,
+#   所以循环里跳过 pid 1 —— 归属不了就记"(拉起者已退出, 无法归属)", 而不是伪造一个拉起者。
 bd_watch_body() {
     local rc
     rc="$(P /usr/ikuai/script/rc)"
     cat <<EOF
 pp=\${PPID:-0}
-cmd="\$(tr '\0' ' ' < "/proc/\$pp/cmdline" 2>/dev/null)"
-case "\$cmd" in
+launcher=""
+p=\$pp
+i=0
+while [ -n "\$p" ] && [ "\$p" != 0 ] && [ "\$p" != 1 ] && [ "\$i" -lt 4 ]; do
+    launcher="\$(tr '\0' ' ' < "/proc/\$p/cmdline" 2>/dev/null)"
+    [ -n "\$launcher" ] && break
+    p="\$(cat "/proc/\$p/stat" 2>/dev/null)"; p="\${p#*) }"; p="\${p#* }"; p="\${p%% *}"
+    launcher=""
+    i=\$((i+1))
+done
+case "\$launcher" in
     *"$rc boot"*) grep -q "\[$BD_MARK\]" "$rc" 2>/dev/null && exit 0 ;;
 esac
-{ printf "[%s] [$BD_MARK] %s $1 ppid=%s\n" "\$(date "+%F %T")" "$2" "\$pp"; printf "%s\n" "\$cmd"; } >> $(P "$BD_WATCH_LOG") 2>/dev/null
+{ printf "[%s] [$BD_MARK] %s $1 ppid=%s\n" "\$(date "+%F %T")" "$2" "\$pp"; printf "%s\n" "\${launcher:-(拉起者已退出, 无法归属)}"; } >> $(P "$BD_WATCH_LOG") 2>/dev/null
 EOF
 }
 
