@@ -103,7 +103,7 @@
 <div class="pane on" id="p-status">
   <p class="tip">开关保存在 <code>/etc/mnt/boot_args</code>，修改后立即生效并在下次开机继续生效。</p>
   <div id="switches"></div>
-  <button class="pri" onclick="act('apply')">重新应用后门阻断 + 审计</button>
+  <button class="pri" onclick="act('apply')">重新应用(后门阻断 + 审计 + SSH 加固)</button>
 </div>
 
 <div class="pane" id="p-plugin">
@@ -233,9 +233,9 @@
 
   <div class="tool">
     <b>封锁自检</b>
-    <div class="tip">即时检查四件事：云端客户端是否都是空壳、/etc/hosts 封了多少域名、
+    <div class="tip">即时检查五件事：云端客户端是否都是空壳、/etc/hosts 封了多少域名、
       是否还有后门进程存活、stub.log 有没有新的"启动尝试"（有记录 = 发现了新的启动点，
-      里面会写明时间和拉起者）。点一下立即出结果。</div>
+      里面会写明时间和拉起者）、SSH 加固规则还在不在（公网封禁 + 封禁名单）。点一下立即出结果。</div>
     <button class="pri" onclick="runCheck()">立即自检一次</button>
     <h4>最近一次结果</h4>
     <pre id="check-out">-</pre>
