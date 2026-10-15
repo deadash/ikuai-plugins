@@ -96,6 +96,27 @@ section "4b. 云端审计组件下载器(ikaudit_update.sh)"
 assert_grep     "$MOCK/usr/ikuai/script/ikaudit_update.sh" "exit 0" "ikaudit_update.sh 已禁用(启动即退)"
 assert_grep     "$MOCK/usr/ikuai/script/utils/monitor_process.sh" "# \[ikblock\] start-stop-daemon ikaudit_update.sh" "monitor: 不再拉起 ikaudit_update.sh"
 
+section "4c. 被改写的固件脚本必须仍然语法正确"
+# 真机踩过: 把 if 块里**唯一**的命令注释掉 -> bash/dash 判"then 子句为空", 整份脚本语法错误,
+# monitor_process.sh 曾因此完全没跑起来(官方进程守护失效)。所以注释时一律留一条 no-op:
+# `: # [ikblock] 原命令`, 而不是光加 `#`。这里对所有会被改写的固件脚本做语法检查。
+for f in "$MOCK/usr/ikuai/script/rc" \
+         "$MOCK/usr/ikuai/script/upgrade.sh" \
+         "$MOCK/usr/ikuai/script/dingtalk.sh" \
+         "$MOCK/usr/ikuai/script/catcherd.sh" \
+         "$MOCK/usr/ikuai/script/ikaudit_update.sh" \
+         "$MOCK/usr/ikuai/script/utils/monitor_process.sh" \
+         "$MOCK/usr/ikuai/script/utils/collection.sh" \
+         "$MOCK/usr/ikuai/script/utils/update_hosts.sh" \
+         "$MOCK/usr/DTalkInside/monidtalk.sh"; do
+    [ -f "$f" ] || continue
+    if bash -n "$f" 2>/dev/null; then
+        ok "$(basename "$f"): 改写后语法正确"
+    else
+        bad "$(basename "$f"): 改写后语法错误(往 if 里塞注释却没留 no-op?)"
+    fi
+done
+
 section "5. 域名封锁(/etc/hosts, 不碰防火墙)"
 assert_not_shim "ipset"                                      "不碰 ipset(旧版网络层已删)"
 assert_not_shim "iptables"                                   "不碰 iptables(旧版网络层已删)"

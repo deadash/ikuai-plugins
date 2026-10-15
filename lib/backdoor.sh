@@ -268,16 +268,16 @@ bd_patch_rc() {
     grep -q "\[$BD_MARK\]" "$p" && return 0
 
     # 不再启动: 云端指令通道(submit3) / 云端取址(update_hosts)
-    bd_sed "$p" "s|^\([[:space:]]*\)boot_load_async[[:space:]][[:space:]]*utils/submit.lua|\1# [$BD_MARK] utils/submit.lua|"
-    bd_sed "$p" "s|^\([[:space:]]*\)boot_load_async[[:space:]][[:space:]]*utils/update_hosts.sh|\1# [$BD_MARK] utils/update_hosts.sh|"
+    bd_sed "$p" "s|^\([[:space:]]*\)boot_load_async[[:space:]][[:space:]]*utils/submit.lua|\1: # [$BD_MARK] utils/submit.lua|"
+    bd_sed "$p" "s|^\([[:space:]]*\)boot_load_async[[:space:]][[:space:]]*utils/update_hosts.sh|\1: # [$BD_MARK] utils/update_hosts.sh|"
 
     # start_remote_services(): 远程控制/包管理器/OME 客户端
-    bd_sed "$p" "s|^\([[:space:]]*\)ik_rc_client[[:space:]]*\$|\1# [$BD_MARK] ik_rc_client|"
-    bd_sed "$p" "s|^\([[:space:]]*\)pmd[[:space:]]*\$|\1# [$BD_MARK] pmd|"
-    bd_sed "$p" "s|^\([[:space:]]*\)cre_client[[:space:]][[:space:]]*start|\1# [$BD_MARK] cre_client start|"
+    bd_sed "$p" "s|^\([[:space:]]*\)ik_rc_client[[:space:]]*\$|\1: # [$BD_MARK] ik_rc_client|"
+    bd_sed "$p" "s|^\([[:space:]]*\)pmd[[:space:]]*\$|\1: # [$BD_MARK] pmd|"
+    bd_sed "$p" "s|^\([[:space:]]*\)cre_client[[:space:]][[:space:]]*start|\1: # [$BD_MARK] cre_client start|"
 
     # start_ikuai_services(): 采集上报引擎
-    bd_sed "$p" "s|^\([[:space:]]*\)cre[[:space:]]*>/dev/null[[:space:]]*2>&1|\1# [$BD_MARK] cre|"
+    bd_sed "$p" "s|^\([[:space:]]*\)cre[[:space:]]*>/dev/null[[:space:]]*2>&1|\1: # [$BD_MARK] cre|"
 }
 
 # monitor_process.sh: 进程守护会重新拉起后门(还会用 start-stop-daemon 拉起云端下载器)
@@ -287,12 +287,12 @@ bd_patch_monitor() {
     test -f "$p" || { bd_log "跳过(不存在): $f"; return 0; }
     grep -q "\[$BD_MARK\]" "$p" && return 0
 
-    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*pmd[[:space:]]|\1# [$BD_MARK] cgroup_exec pmd |"
-    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*ik_rc_client[[:space:]]|\1# [$BD_MARK] cgroup_exec ik_rc_client |"
-    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*cre[[:space:]]|\1# [$BD_MARK] cgroup_exec cre |"
-    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*cre_client[[:space:]]|\1# [$BD_MARK] cgroup_exec cre_client |"
+    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*pmd[[:space:]]|\1: # [$BD_MARK] cgroup_exec pmd |"
+    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*ik_rc_client[[:space:]]|\1: # [$BD_MARK] cgroup_exec ik_rc_client |"
+    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*cre[[:space:]]|\1: # [$BD_MARK] cgroup_exec cre |"
+    bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*cre_client[[:space:]]|\1: # [$BD_MARK] cgroup_exec cre_client |"
     # 云端审计组件下载器(audit.ikuai8.com / routers.ikuai8.com:6444), 常驻 while 循环
-    bd_sed "$p" "s|^\([[:space:]]*\)start-stop-daemon[[:space:]][[:space:]]*-S[[:space:]]*-x[[:space:]]*.*ikaudit_update.sh|\1# [$BD_MARK] start-stop-daemon ikaudit_update.sh |"
+    bd_sed "$p" "s|^\([[:space:]]*\)start-stop-daemon[[:space:]][[:space:]]*-S[[:space:]]*-x[[:space:]]*.*ikaudit_update.sh|\1: # [$BD_MARK] start-stop-daemon ikaudit_update.sh |"
 }
 
 # collection.sh: 远控连通性判断会误关多线IPv6，必须跳过(否则影响功能)
@@ -306,7 +306,7 @@ bd_patch_dtalk() {
     local f="/usr/ikuai/script/dingtalk.sh" p
     p="$(P "$f")"
     if test -f "$p" && ! grep -q "\[$BD_MARK\]" "$p"; then
-        bd_sed "$p" "s|^\([[:space:]]*\)/usr/DTalkInside/monidtalk.sh[[:space:]][[:space:]]*start|\1# [$BD_MARK] monidtalk|"
+        bd_sed "$p" "s|^\([[:space:]]*\)/usr/DTalkInside/monidtalk.sh[[:space:]][[:space:]]*start|\1: # [$BD_MARK] monidtalk|"
     fi
     bd_neuter_script "/usr/DTalkInside/monidtalk.sh"
 }
