@@ -262,6 +262,14 @@ sg_ban_count() {
     printf '%s' "$n"
 }
 
+# 名单文件里的条数(log() 会往 stdout 打日志, 所以不能靠函数返回值取条数)
+sg_ban_count_file() {
+    local n=0
+    [ -f "$(P "$SG_SSH_BAN_LIST")" ] && n="$(grep -c . "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null)"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
+}
+
 # 名单(ip|时间|原因; 一行一条, 前端按 | 拆开)
 sg_ban_list() {
     [ -f "$(P "$SG_SSH_BAN_LIST")" ] && grep . "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null

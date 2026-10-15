@@ -704,7 +704,8 @@ sshban()
             echo "已解除封禁 $ip"
             ;;
         clear)
-            n="$(sg_ban_clear)"
+            n="$(sg_ban_count_file)"
+            sg_ban_clear >/dev/null
             Syslog "[ikguard] 清空 SSH 封禁名单"
             ikg_audit INFO "ssh.unban" "清空封禁名单(${n:-0} 条)"
             echo "已清空封禁名单(${n:-0} 条)"

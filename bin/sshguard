@@ -58,7 +58,9 @@ case "$cmd" in
         echo "已解除封禁 $1"
         ;;
     clear)
-        echo "已清空封禁名单($(sg_ban_clear) 条)"
+        n="$(sg_ban_count_file)"
+        sg_ban_clear >/dev/null
+        echo "已清空封禁名单($n 条)"
         ;;
     -h|help|--help)
         usage
