@@ -27,8 +27,9 @@ assert_not_grep()  { grep -q -- "$2" "$1" 2>/dev/null && bad "$3" || ok "$3"; }
 assert_exists()    { [ -e "$1" ] && ok "$2" || bad "$2"; }
 assert_noexist()   { [ -e "$1" ] && bad "$2" || ok "$2"; }
 assert_notlink()   { [ -L "$1" ] && bad "$2" || ok "$2"; }
-assert_shim()      { grep -qF -- "$1" "$SHIM_LOG" 2>/dev/null && ok "$3" || bad "$3"; }
-assert_not_shim()  { grep -qF -- "$1" "$SHIM_LOG" 2>/dev/null && bad "$2" || ok "$2"; }
+# 说明: 老写法是 (pattern, 忽略, desc) 三个参数, 于是两参数调用时描述会打印成空 —— 现在兼容两种
+assert_shim()      { local d="${3:-$2}"; grep -qF -- "$1" "$SHIM_LOG" 2>/dev/null && ok "$d" || bad "$d"; }
+assert_not_shim()  { local d="${3:-$2}"; grep -qF -- "$1" "$SHIM_LOG" 2>/dev/null && bad "$d" || ok "$d"; }
 
 run_boot() {
     IK_SYSROOT="$MOCK" bash "$MOCK/etc/mnt/.boot/install.sh" >/dev/null 2>&1
@@ -239,6 +240,17 @@ esac
 run_boot
 assert_shim "iptables -w -I IKG_SRC_BAN 1 -s 203.0.113.9"    "重启后自动重放封禁名单"
 assert_not_shim "IKG_SSH_WAN"                                "开关关着时公网封禁不会自己回来"
+
+# ⑦b 真机抓到的场景: 曾经开过 sshguard(有 on 标记)但一个 IP 都没封 —— 开机重放不许留下空链
+: > "$MOCK/etc/mnt/ikguard/sshguard.on"
+IK_SYSROOT="$MOCK" bash "$SGBIN" on >/dev/null 2>&1
+rm -f "$SG_LIST"
+: > "$SHIM_LOG"; rm -f "$SHIM_LOG.iptables"     # 只看"接着 07 会不会自己建链"
+IK_SYSROOT="$MOCK" bash "$MOCK/etc/mnt/.boot/scripts/07_enable_sshguard.sh" >/dev/null 2>&1
+assert_not_shim "IKG_SRC_BAN"                                "名单为空时开机重放不建空链(真机踩过)"
+# 给 ⑧ 备好现场: 重新封一个 IP(链 + 跳转 + 规则 + 名单), 然后关掉公网封禁
+IK_SYSROOT="$MOCK" bash "$SGBIN" ban 203.0.113.9 调试 >/dev/null 2>&1
+IK_SYSROOT="$MOCK" bash "$SGBIN" off >/dev/null 2>&1
 
 # ⑧ 解封: 名单空了就要把链也拆掉(不留挂着的空链)
 IK_SYSROOT="$MOCK" bash "$SGBIN" unban 203.0.113.9 >/dev/null 2>&1

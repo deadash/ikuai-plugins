@@ -346,8 +346,10 @@ sg_ban_list() {
 # 按持久名单重放规则(开机/重新应用时调用)
 sg_ban_replay() {
     local ip _rest n=0
-    sg_ban_chain_init
+    # 名单为空时**什么都不做**: 真机上抓到过"曾经开过 sshguard(有 on 标记)但一个 IP 都没封"
+    # 的场景 —— 原来先无条件 sg_ban_chain_init 再检查名单, 每次开机都会留下一个空链 + INPUT 跳转
     [ -s "$(P "$SG_SSH_BAN_LIST")" ] || return 0
+    sg_ban_chain_init
     while IFS='|' read -r ip _rest; do
         [ -n "$ip" ] || continue
         sg_ip_ok "$ip" || continue
@@ -362,9 +364,8 @@ sg_ban_replay() {
 # 开机与"重新应用"都走这里: 公网封禁跟开关走; 名单始终重放(显式封禁要跨重启保持)。
 # 注意惰性: 没开过公网封禁(无标记)且名单为空时, 一次 iptables 都不碰。
 sg_apply() {
-    if [ -s "$(P "$SG_SSH_BAN_LIST")" ] || [ -f "$(P "$SG_PUB_MARK")" ]; then
-        sg_ban_replay
-    fi
+    # 名单非空才重放(显式封禁跨重启保持); 公网封禁的状态由 sg_pub_on/sg_pub_off 自己按开关与标记判断
+    [ -s "$(P "$SG_SSH_BAN_LIST")" ] && sg_ban_replay
     if is_enabled sshguard; then
         sg_pub_on
     else
