@@ -128,6 +128,15 @@ done
 "$MOCK/usr/sbin/pmd" >/dev/null 2>&1
 assert_grep "$STUBLOG" "pmd 被启动(已拦截)"                  "未知拉起者启动空壳 -> 记录启动尝试"
 assert_grep "$STUBLOG" "run_tests.sh"                        "记录里带上拉起者 cmdline"
+# rc-pid 快通道: bd_apply 补丁时记下"本次开机 rc 的 pid"; 真机上 rc 这个进程常常在本脚本
+# 读到它之前就已退出回收, 只靠 cmdline/祖先链判不出来 —— 对上 pid 就直接当开机竞态放行
+: > "$STUBLOG"
+mkdir -p "$MOCK/tmp"
+printf '%s\n' "$$" > "$MOCK/tmp/.ikblock.rc.pid"
+"$MOCK/usr/sbin/pmd" >/dev/null 2>&1
+assert_not_grep "$STUBLOG" "pmd 被启动(已拦截) ppid=$$"       "拉起者 pid == 记录的 rc pid -> 判为开机竞态(不记录)"
+rm -f "$MOCK/tmp/.ikblock.rc.pid"
+
 # 被禁脚本: 真机上由 /etc/ikcommon `source` 起来(顶层代码先跑), 这里等价地用 bash 起一次
 bash "$MOCK/usr/ikuai/script/utils/update_hosts.sh" >/dev/null 2>&1
 assert_grep "$STUBLOG" "update_hosts.sh 被启动(已禁用拦截)"  "被禁脚本被启动 -> 记录启动尝试"

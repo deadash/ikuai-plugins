@@ -59,7 +59,29 @@ BD_HOSTS_FRAG="/etc/hosts.d/ikblock"
 # 空壳/被禁脚本共用的"启动尝试"监控日志(持久分区, 重启不丢)
 BD_WATCH_LOG="/etc/log/ikguard/stub.log"
 
+# 本此开机 rc 进程的 pid(bd_apply 在补丁时记下, 见 bd_boot_rc_pid):
+# 空壳/被禁脚本据此一眼判断"这是 rc 内存旧副本的启动", 不用去读已经消失的父进程
+BD_RC_PID_FILE="/tmp/.ikblock.rc.pid"
+
+# 开机 rc 的脚本路径(真机固定; 用于从自己的祖先链里认出 rc)
+BD_RC_SCRIPT="/usr/ikuai/script/rc"
+
 bd_log() { log "[backdoor] $*"; }
+
+# 从自己的祖先链里认出"这次开机的 rc 进程"(真机: scripts/02 <- boot.sh <- plugins.sh <- rc),
+# 在 bd_apply 里记进 $BD_RC_PID_FILE —— 空壳/被禁脚本判断"是不是 rc 内存旧副本在启动我"时
+# 只看这个 pid 就够了, 不必再去读那个可能几毫秒前就消失的父进程(cmdline/stat 都读不到)。
+bd_boot_rc_pid() {
+    local p="$PPID" cmd i=0
+    while [ -n "$p" ] && [ "$p" != 0 ] && [ "$p" != 1 ] && [ "$i" -lt 6 ]; do
+        cmd="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+        case "$cmd" in *"$BD_RC_SCRIPT"*) printf '%s' "$p"; return 0 ;; esac
+        cmd="$(cat "/proc/$p/stat" 2>/dev/null)"
+        p="${cmd#*) }"; p="${p#* }"; p="${p%% *}"
+        i=$((i+1))
+    done
+    return 1
+}
 
 # ---------------------------------------------------------------- 进程层
 
@@ -128,8 +150,13 @@ bd_watch_body() {
     rc="$(P /usr/ikuai/script/rc)"
     cat <<EOF
 pp=\${PPID:-0}
-# 先只用 shell 内建(open+read, 不 fork)把父进程的 stat 抓下来: rc 的后台子 shell 可能在
-# 本脚本起来后几毫秒内就退出, 等 fork 出 tr 再读它就已经没了(真机就是这么漏成"无法归属"的)
+# rc 自己(内存旧副本)拉起的: pid 对上就直接放行, 连 /proc 都不用看 —— 真机上这个进程
+# 往往在本脚本读到它之前就已经退出并被回收了
+rcpid=""
+IFS= read -r rcpid < "$(P "$BD_RC_PID_FILE")" 2>/dev/null
+[ -n "\$rcpid" ] && [ "\$pp" = "\$rcpid" ] && exit 0
+# 再兜一次"rc 的后台子 shell"这种情形: 先用 shell 内建(open+read, 不 fork)把父进程的 stat
+# 抓下来 —— 子 shell 常常在本脚本起来后几毫秒内就退出, 等 fork 出 tr 再读它就已经没了
 st=""
 IFS= read -r st < "/proc/\$pp/stat" 2>/dev/null
 launcher=""
@@ -347,7 +374,13 @@ bd_block_hosts() {
 
 # 完整应用一次(开机调用; 需要"重新应用"时手动执行 bin/backdoor_guard 或 Web 页"重新应用")
 bd_apply() {
+    local rcp=""
     bd_log "开始禁用后门/更新通道"
+    # 先记下本次开机 rc 的 pid: 内存旧副本的开机竞态启动靠它判定(见 bd_watch_body)
+    if rcp="$(bd_boot_rc_pid)"; then
+        printf '%s\n' "$rcp" > "$(P "$BD_RC_PID_FILE")" 2>/dev/null
+        bd_log "本次开机 rc 进程 pid=$rcp"
+    fi
     bd_kill
     bd_stub
     bd_patch_system

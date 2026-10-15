@@ -480,10 +480,11 @@ ssh sshd@127.0.0.1 -p 10022 "
   `boot()` 里的启动行，在我们打补丁之前就已被 bash 解析进内存（补丁走的是 `boot()` 中段的
   `plugins.sh` 钩子，`sed` 改的是磁盘副本），所以每次开机 rc 仍会按内存旧副本把
   `ik_rc_client` / `cre` / `pmd` 和 `utils/update_hosts.sh` 拉起一遍（已被空壳/被禁脚本拦下，
-  strace 抓到过这些 `execve`）。判据：拉起者是 rc **且**磁盘上的 rc 已带补丁 → 不记。
-  拉起者要向上找：`boot_load_async X &` 会先 fork 后台子 shell 再 exec，中间子 shell 可能在
-  记录前就退出（cmdline 读不出来），此时顺 `/proc/<pid>/stat` 找父进程判定；极少数情况拉起者
-  已被完全回收、祖先链都断了，会记一笔并写明 `(拉起者已退出, 无法归属)`。
+  strace 抓到过这些 `execve`）。判定分三级：① `bd_apply` 补丁时沿祖先链认出本次开机 rc 的
+  pid 记进 `/tmp/.ikblock.rc.pid`，拉起者 pid 对上直接放行（rc 常在空壳读到它之前就已退出）；
+  ② 拉起者是 rc 后台子 shell 时，靠它的 cmdline（就是 rc 的命令行）或顺它自己的
+  `/proc/<pid>/stat` 向上找到 rc（起床第一件事用内建 `read` 抓 stat，fork 出 `tr` 再读就晚了）；
+  ③ 前两级都判不出来才记一笔，第二行写明 `(拉起者已退出, 无法归属)`，不伪造拉起者。
 * **被禁脚本是被 `source` 起来的**：`/etc/ikcommon` 的收尾是 `. $1 ""; Command $S0`，
   所以脚本里 `$0` 是 `/etc/ikcommon` 而非脚本名 —— 组件名在生成时就写死字面量；
   另外生成片段绝不能走 `awk -v`（它会把 `printf` 格式串里的 `\n` 变成真换行、写出语法错误
