@@ -1,434 +1,89 @@
-# 写插件请先用技能
+# iKuai 插件框架 (ikuai-plugins)
 
-> **推荐: 用 [`.codebuddy/skills/ikuai-plugin-dev/`](.codebuddy/skills/ikuai-plugin-dev/SKILL.md) 技能来生成插件。**
->
-> 它是本仓库内置的 **iKuai 插件开发技能**, 已经把"每次都要重新读源码才能搞清楚"的东西整理成参考资料:
-> **插件包格式 / 安装-开机-卸载生命周期 / Web 卡片-页面-后端接口 / 开机自启与常驻进程 /
-> sqlite3(设备 3.8.11.1 的语法边界) / LuaJIT(cjson、lsqlite3) 调用 / uClibc SDK 与 Rust 编译 /
-> 真机 SSH 安装-卸载-重启验证流程**。
->
-> 附带一个**已在真机完整验证过的模板插件**(`assets/template/`)、脚手架脚本 `scripts/new-plugin.sh`
-> 与部署脚本 `scripts/deploy-plugin.sh` —— 用 CodeBuddy 打开本仓库后直接说
-> "用 ikuai-plugin-dev 技能做一个 XXX 插件"(或让它加载该技能)即可, 不必再从 `lib/plugin.sh` 反推。
->
-> 该技能只覆盖**插件包**(基础包/签名不在其范围)。技能目录是点目录, 打包与签名会自动排除, 不影响基础包。
+走官方**插件通道**（`firmwareid=90001`）给 iKuai 装上一个基础包，设备随即获得
+**后门/更新通道阻断、插件系统、SSH 加固、审计取证、Web 控制台**。
+不刷固件、不改分区表，卸载即恢复（基础包 = 一个签名的 `.bin` + 一个 `install.sh`）。
 
-# 随版发布的插件
+![安全防护控制台](docs/images/ikguard-console.png)
 
-基础包里**不含任何插件**(`examples/`、`tools/` 都在 `package.exclude` 里排除了)，插件是**独立的 zip 发布物**，
-在 Web「高级应用 → 插件管理」里上传安装即可(插件包不需要签名)。
+## 当前支持的功能
+
+| 功能 | 开关 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| **后门/更新通道阻断** | `backdoor` | 开 | ① 5 个云端客户端（`ik_rc_client`/`cre`/`pmd`/`dtalkd`/`dtalkc`）换成**空壳**；② 改写启动点：`rc`、`utils/monitor_process.sh`、`upgrade.sh`、`utils/collection.sh`、`dingtalk.sh`、`catcherd.sh`、`utils/submit.lua`、`utils/update_hosts.sh`、`ikaudit_update.sh`；③ 25 个云端域名写进 `/etc/hosts.d/ikblock` 片段指向 `0.0.0.0`；④ 空壳/被禁脚本被**任何**代码路径拉起时，往 `/etc/log/ikguard/stub.log` 记一行（时间 + 拉起者），据此发现枚举遗漏的新启动点。每次开机重应用 |
+| **SSH 加固** | `sshguard` | 关 | ① 封禁 **WAN 侧新 SSH 连接**（公网网卡用官方 `-m ifaces` 判定、端口读官方 `sshd_port`、只拦 `--ctstate NEW` 所以不影响已建立的会话）；② **一键封禁来源 IP**（持久名单、开机重放，只挡它访问 SSH 端口，Web 不受影响）；③ Web 里看 **SSH 登录/失败/注销日志**（读官方 `/etc/log/syslog.db`，不另采）。命令行 `bin/sshguard` |
+| **插件系统** | `plugins` | 开 | Web「高级应用 → 插件管理」出现卡片（**无需绑定爱快云**）；上传 zip 即安装；插件可放数据盘（存储位置绑定）；CLI `bin/ikplugin`（install/remove/scan/verify/pack/keygen） |
+| **SSH 登录** | `sshd` | 开 | 把 `sshd` 账号的 shell 从控制台菜单换成 `/bin/bash`，可用 SSH 直接映射文件、改配置 |
+| **审计取证** | `audit` | 关 | 常驻**被动采集**：conntrack 连接事件 / DNS 查询 / 封锁命中，日志落 `/etc/log/ikguard`。不占 cron |
+| **cron / shell** | `cron` `shell` | 开 | `/etc/mnt/cron.d/*` → `/etc/crontabs/cron.d`；`/etc/mnt/shells` 下的程序与配置链接进系统 |
+| **网页控制台** | 随 `plugins` | — | 状态概览（版本/验签/后门进程/hosts 条数/启动尝试/采集/日志分区）+ 开关配置 + 插件管理 + 审计日志 + **SSH 防护** + 工具（封锁自检、磁盘信息、原生日志与 DNS 开关） |
+| **/etc/mnt 扩容** | — | — | `bin/ikexpand`：官方升级包只给 50M，可按 G 扩容且保住数据盘、跨重启有效、可回滚 |
+| **打包 / 自测** | — | — | `.tools/build.sh` 签名打包；`.tests/run_tests.sh` 离线测试（模拟真机布局）；`ikctl.py` 真机部署 + 一键体检 |
+
+![插件管理](docs/images/plugin-management.png)
+![SSH 防护](docs/images/ssh-guard.png)
+![审计日志](docs/images/audit-log.png)
+
+## 安装与升级
+
+1. Web「**系统设置 → 系统升级**」上传 `ikuai-plugins-v0.0.6-base.bin`（已签名，`firmwareid=90001`）
+2. 升级完成后**重启设备**（框架在开机时挂载：验签 → 清单比对 → 执行 `install.sh`）
+3. 不想点网页时也可以用 `ikctl.py`：`deploy <bin>` → `reboot --wait` → `verify`
+
+## 开关（`/etc/mnt/boot_args`）
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `ssh`/`sshd` | 1 | 控制台账号 shell 换 bash，可 SSH 登录 |
+| `backdoor` | 1 | 后门/更新通道阻断（空壳 + 改写启动点 + hosts 封域名 + 启动监控） |
+| `sshguard` | 0 | 封禁 WAN 侧新 SSH 连接（开了之后只剩 LAN 能连 SSH，Web 不受影响） |
+| `plugins` | 1 | 插件系统（含 Web 插件资源同步；首次使用需在插件管理页同意《使用条款》） |
+| `cron` | 1 | 铺开 `/etc/mnt/cron.d` |
+| `shell` | 1 | 链接 `/etc/mnt/shells` 下的程序/配置 |
+| `audit` | 0 | 审计取证（=1 才运行被动采集器） |
+
+> 升级时会自动从 `boot_args` 清掉历史遗留的空开关：`remote`、`plugins_verify`、
+> `backdoor_hosts`、`probe`。**框架自己不写任何定时任务**。
+
+## 目录
+
+| 路径 | 持久 | 内容 |
+| --- | --- | --- |
+| `/etc/mnt/.boot` | ✔ | 框架本体（`install.sh` + `scripts/ lib/ bin/ usr/ www/`） |
+| `/etc/mnt/plugins` | ✔ | 插件包与安装目录（可绑定到数据盘） |
+| `/etc/mnt/ikguard` | ✔ | SSH 封禁名单等运行状态 |
+| `/etc/log/ikguard` | ✔ | 日志：`boot.log`、`audit-*.log`、`stub.log`（启动尝试）、`report.txt` |
+| `/usr/ikuai/www/plugins`、`/usr/ikuai/function/ikguard`、`/usr/sbin/ikaudit` 等 | ✘ | 开机重建的软链与页面（根分区每次重启还原） |
+
+## 随版发布的插件
+
+基础包**不含插件**：插件是独立 zip，在 Web「高级应用 → 插件管理」上传安装（插件包不需要签名）。
 
 | 插件 | 版本 | 作用 |
 | --- | --- | --- |
-| [ikupd](examples/ikupd-plugin/) | 1.0.0 | **插件在线升级**: 从 GitHub 仓库的 Release 检查有没有新版(按包名前缀匹配、按 sha256 判断)，支持走代理拉取，用户确认后下载并安装 —— 新插件与升级都能做 |
-| [ikadblock](examples/adblock-plugin/) | 1.0.0 | **广告/跟踪域名拦截**: 把 LAN 全网的 DNS 查询纳管到本机一个 sinkhole，命中黑名单返回 `0.0.0.0`，客户端自己指定 8.8.8.8 也绕不过去 |
-| [bnfix](examples/bnfix-plugin/) | 1.0.0 | **系统 OpenSSL 组件修复**: 给设备自带的 `libcrypto` 打 1 字节定点补丁，修掉解析"显式曲线参数 + 压缩点"证书时的死循环 |
-| [rustdemo](examples/rust-plugin/) | 1.0.0 | **Rust 示例插件**: 编译型插件的完整示例(嵌入式数据库 + Web 配置页)，也用来量体积(musl 静态约 945KB) |
-
-> **推荐先装 `ikupd`**：上传安装后打开它的页面，把本仓库地址加进「仓库列表」——
-> `https://github.com/deadash/ikuai-plugins/releases` —— 点「检查更新」即可看到上面这些插件的
-> 状态(新插件 / 可更新 / 已是最新)，之后下载与安装都在页面里完成，**以后随版新增的插件也会自动出现在列表里**，
-> 不需要再手工下载 zip 上传。
-
-# sdk
-
-如果需要自己编译程序，参考 [ikuai-sdk](https://github.com/deadash/ikuai-sdk)
-
-# 支持以下功能
-
-1. 支持ssh直接打开, 便于映射文件和修改
-2. 支持cron, 可以定时任务
-3. 支持shells, 可以拷贝程序和配置
-4. **后门禁用**: 阻断/删除爱快云端后门与更新通道(不影响路由等本地功能)
-5. **插件系统**: 上传一个 zip 包即可安装插件(参考官方 firmwareid=90001 方案)
-6. **审计取证**: 记录进程启动、DNS 请求、网络连接、封锁命中, 用于确认没有后门进程/连接
-7. **网页插件**: 在 Web「系统设置 → 插件管理」里出现卡片, 可查看状态并配置开关
-
-> 日志统一落在持久分区 `/etc/log/ikguard/`(根分区每次重启还原且只有 ~800K 可用)。
-> 完整操作手册(分区/打包签名/SSH 升级/重启验证/审计/Web 插件/真实 WAN 与 LAN 客户端模拟)见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
-
-# 配置如下
-
-在路径 `/etc/mnt/boot_args` 是配置参数, 等于1是打开，等于0则是关闭
-
-比如关闭ssh，则可以执行 `sed -i "s/^sshd=.*/sshd=0/" /etc/mnt/boot_args`
-
-打开则相反，`sed -i "s/^sshd=.*/sshd=1/" /etc/mnt/boot_args`
-
-各配置名称如下
-
-1. ssh, sshd
-2. 后门禁用, backdoor (默认开启; 云端域名封锁已并入本开关, 不单独开关)
-3. 插件, plugins (默认开启, 首次使用需在插件管理页同意《使用条款》)
-4. cron, cron, cron_test
-5. 程序安装, shell
-6. 审计取证, audit (默认关闭; 开启后运行常驻**被动采集**进程, 不占 cron, 日志写 /etc/log/ikguard)
-7. SSH 加固, sshguard (默认关闭; 开启后丢弃 **WAN 侧来的新 SSH 连接**, LAN 侧不受影响
-   —— 别把自己锁在门外, 需要时在 Web「SSH 防护」里一键开/关, 或命令行 `sshguard on|off`)
-
-> 四个曾经存在的开关已经去掉, 升级时会自动从 boot_args 里清掉:
-> * `remote` —— 历史遗留的空开关(没有任何脚本读取), iKuai 云的"远程控制/远程维护"
->   已由 backdoor 层覆盖
-> * `plugins_verify` —— 插件强校验(插件包现在不再要求签名)
-> * `backdoor_hosts` —— 域名封锁已并入 backdoor(不再单独开关)
-> * `probe` —— 定时云端连通性自检(封锁不走 iptables, DNS+TCP 探测已无意义;
->   自检改为 Web 页"封锁自检"即时执行)
-
-## 配置 cron
-
-在 `/etc/mnt/cron.d` 下新建一个文件，里面写入crontab语句即可重启后生效
-
-如果需要测试cron功能，可以打开 `cron_test=1` 到 `/etc/mnt/boot_args`
-
-然后查看日志 `tail -f /var/log/crond.log`
-
-其中, 如果想动态测试，则修改 `/etc/crontabs/root` 文件
-
-## 配置 shells
-
-在 `/etc/mnt/shells/bin` 下放应用程序和相关的sh脚本，这些文件会动态链接到 `/usr/sbin` 下，注意，重启后生效，如果测试，请手动链接
-
-在 `/etc/mnt/shells/etc` 下放配置文件，这些文件会动态链接到 `/usr/local/etc` 下，也是重启生效，测试可以手动链接
-
-## 后门禁用 (backdoor)
-
-`scripts/02_disable_backdoor.sh` 每次开机执行 `lib/backdoor.sh`。封锁以**最小代价**为原则
-(不碰防火墙、不装定时器、无常驻进程)，名单按 3.7.16 真机逐项核实：
-
-1. **进程层**: 杀灭并用空壳替换 5 个云端客户端 `ik_rc_client` / `cre` / `pmd` / `dtalkd` /
-   `dtalkc`。空壳被启动时先往 `/etc/log/ikguard/stub.log` 记一笔"时间 + 拉起者 cmdline"
-   再退出 —— **空壳即启动监控**，没有新记录 = 没有任何启动尝试。
-2. **文件层**: 改写全部启动点，使其不再被拉起:
-   - `usr/ikuai/script/rc`: 注释 `cre` / `ik_rc_client` / `pmd` / `cre_client` 启动项、
-     不再启动 `submit.lua`(云端指令通道) 与 `update_hosts.sh`(云端取址)
-   - `usr/ikuai/script/utils/monitor_process.sh`: 不再守护上述进程，也不再拉起云端审计
-     组件下载器 `ikaudit_update.sh`(连 audit.ikuai8.com / routers.ikuai8.com:6444，
-     该脚本本身一并禁用 —— v0.0.6 新增覆盖)
-   - `usr/ikuai/script/utils/update_hosts.sh`: 禁用(它内部会 `killall pmd && pmd`)
-   - `usr/ikuai/script/utils/collection.sh`: 跳过远控连通性判断(否则 24h 后自关多线IPv6)
-   - `usr/ikuai/script/dingtalk.sh` + `usr/DTalkInside/monidtalk.sh`: 停用 dtalk 云管
-   - `usr/ikuai/script/catcherd.sh`: 停用抓包上报
-   - `usr/ikuai/script/utils/submit.lua` / `usr/ikuai/script/upgrade.sh`: 禁用云端指令与自动升级
-3. **域名封锁**: 云端域名(25 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写进
-   `/etc/hosts.d/ikblock` 片段、再按固件自己的方式汇总成 `/etc/hosts` 指向 `0.0.0.0`。
-   只影响本机自己的解析，零进程、零防火墙规则；**不做 IP/网段封锁、不碰 ipset/iptables**。
-   > 为什么是片段而不是直接追加 `/etc/hosts`: 固件有多处会**重建** /etc/hosts ——
-   > `basic.sh:__set_hostname()`(开机必经，rc 里排在 plugins.sh 之后)、`function/basic`
-   > (网页改主机名)、`pppoe_server.sh` 都是 `cat /etc/hosts.d/* >/etc/hosts`，直接追加的
-   > 条目会在开机后半程被冲掉(真机首测实测)。片段与固件同源，这些重建都会自动带上。
-
-由于根分区每次重启还原，`scripts/02` **每次开机完整应用一次**，并顺手清掉旧版本留下的
-"每分钟守卫"cron。本版本**不装任何定时器**：空壳与被禁脚本启动即自灭，每分钟复查属于空转。
-旧版"每分钟守卫 + 每 10 分钟给 24 个云端域名各做一次 nslookup(单轮 60~120s，长于 60s 的
-cron 周期，叠加节流竞态)"实测会把 2 vCPU 设备打出 30%~65% 的 CPU 尖峰，连同 ipset/iptables
-网络层已整体移除。
-
-> **rc 的内存旧副本**: 它的 `start_remote_services()` / `start_ikuai_services()` 函数体、
-> `boot()` 里的启动行，在我们打补丁之前就已被 bash 解析进内存了(补丁走的是 boot() 中段的
-> plugins.sh 钩子，改的只是磁盘副本)，所以每次开机 rc 仍会按内存旧副本把
-> `ik_rc_client` / `cre` / `pmd` 和 `utils/update_hosts.sh` 拉起一遍 —— 都被空壳/被禁脚本拦下，
-> 阻断效果不受影响(strace 抓到了这些 execve)。
-> 这类启动不算"新启动点"，所以不写 `stub.log`。判定按可靠性递减走三步：
-> ① **pid 快通道**——`bd_apply` 补丁时就沿着自己的祖先链认出了本次开机的 rc，把它的 pid 记到
-> `/tmp/.ikblock.rc.pid`，拉起者 pid 一对上就直接放行（rc 这个进程往往在空壳读到它之前就已经
-> 退出回收了，别的办法都来不及）；
-> ② **cmdline / 祖先链**——拉起者是 rc 的后台子 shell 时，那个子 shell 的 cmdline 就是 rc 的
-> 命令行，或顺它自己的 `/proc/<pid>/stat` 向上找到 rc（起床第一件事就用内建 `read` 抓 stat，
-> 等 fork 出 `tr` 再读就已经晚了）；
-> ③ 前两步都判不出来（拉起者被彻底回收、连 pid 都不在了）才记一笔，第二行写明
-> `(拉起者已退出, 无法归属)` —— 标注出来而不是假装它是某个拉起者。
-
-需要重新应用时手动跑一次 `/etc/mnt/.boot/bin/backdoor_guard`，或用 Web 页的"重新应用"；
-看启动尝试: `tail /etc/log/ikguard/stub.log`(空 = 干净)。
-
-可选的额外域名可通过 `/etc/mnt/ikblock.domains`(一行一条) 追加，开机时并入 hosts 封锁。
-
-> 说明: 保留 `plugins.sh` 钩子是必需的——它是本框架的启动入口（本地校验，不联网）。
-> 云端驱动的升级通道已全部切断；本地手动上传固件/插件的能力按需保留。
-
-## 插件系统 (plugins)
-
-### 空间不够了怎么办（插件装不进 `/etc/mnt`）
-
-插件本体装在 `/etc/mnt/plugins`，而 `/etc/mnt` 出厂只有 **43.4M**。两种做法，**优先第一种**：
-
-**① 拿一块闲置盘当插件盘**（不用改分区表、不用重启）
-
-```
-系统设置 → 磁盘分区 → 选中那块闲置盘/分区 → 绑定业务 选「插件存储」→ 保存
-```
-
-保存后**立即生效**（走 iKuai 自带的 `/etc/disk_notify/plugin` 回调，和"视频缓存/行为记录"那些业务一样）：
-`/etc/mnt/plugins` 会被挂到那块盘上，上传/安装/归档的插件全落在数据盘，系统盘一个字节都不占。
-解绑同理：插件先拷回系统盘再卸挂载，不会"消失"。
-（`/etc/mnt/.plugin-zips/` 会给 ≤16MB 的插件包留底，那块盘万一被格式化也能开机自动装回。）
-
-**② 扩容系统盘**（没有闲置盘时才用）
-
-```
-网页:  系统设置 → 插件管理 → ikguard → 工具 → 「方式二 扩容系统盘」→ 填 G → 扩容并重启
-命令行: ikexpand set 2048     # 目标 2048 MiB（只扩不缩）
-        reboot               # ★ 必须的一步
-```
-
-**扩容必做的操作**（就这三件）：
-
-1. **提交请求后必须重启** —— 扩容是**在启动过程中**由 `scripts/09_expand_mnt.sh` 做的
-   （运行中重读分区表一定 EBUSY），网页上的按钮已经把这一步串好；
-2. **重启期间不要断电** —— 正在重建两个文件系统并写盘，约 1~2 分钟不可用；脚本会**自动再重启一次**完成；
-3. **扩完确认**：`df -h /etc/mnt` 或 `ikexpand status`（过程日志 `/etc/log/ikguard/expand.log`）。
-
-注意事项：
-
-- **只扩不缩**（分区表和文件系统都是只增）；
-- 上限 = 磁盘总量 − `/etc/log` 已用内容 − 留白(256M) − **绑了业务的数据盘**（那些分区一个字节都不动）；
-  超上限的请求会被直接拒绝；想给插件更多空间，优先用做法 ①。
-- 扩容失败（复核不过）会自动把备份的 MBR/EBR 扇区写回并重启，系统照常能起，不会卡在半路。
-
-目录(位于持久盘，重启不丢):
-
-```
-/etc/mnt/plugins/                插件根目录
-/etc/mnt/plugins/*.zip           待安装插件包(开机自动安装)
-/etc/mnt/plugins/<name>/         已安装插件本体
-/etc/mnt/plugins/.installed/     已安装 zip 归档
-/etc/mnt/.boot/plugin.pub        插件校验公钥(可选)
-/etc/mnt/plugins/plugin.key      打包签名私钥(可选)
-```
-
-**安装**: 把 `xxx.zip` 传到 `/etc/mnt/plugins/` 后执行 `ikplugin scan`，或直接重启
-(开机会自动安装)。
-
-**插件包(zip)格式**:
-
-```
-Release           必需  plugin=<名称>  version=<版本>
-install.sh        必需  安装/每次开机执行(需幂等)
-boot.sh           可选  仅每次开机执行(优先于 install.sh)
-uninstall.sh      可选  卸载
-MANIFEST.MF       可选  Name: / SHA-256-Digest: 摘要清单
-SIGNATURE.RSA     可选  openssl dgst -sha256 -sign 结果
-bin/*             可选  自动软链到 /usr/sbin (去掉 .sh 后缀)
-etc/*             可选  自动软链到 /usr/local/etc
-```
-
-脚本执行时会带上环境变量: `PLUGIN_NAME` `PLUGIN_VERSION` `PLUGIN_DIR`
-`PLUGIN_ROOT` `PLUGIN_ACTION`(install/boot/uninstall) `IK_SYSROOT`。
-
-**命令行**:
-
-```
-ikplugin list                 列出已安装插件
-ikplugin install <zip|目录>    安装插件
-ikplugin remove <名称>         卸载插件
-ikplugin scan                 扫描 /etc/mnt/plugins/*.zip 并安装
-ikplugin verify <zip|目录>     仅校验插件包
-ikplugin pack <目录> <zip>     打包(自动生成清单并签名)
-ikplugin keygen [目录]         生成签名密钥对
-```
-
-**签名(可选)**: 插件包**不强制要求签名**，普通 zip(含 `Release` + `install.sh`)即可安装。
-如果插件包自带 `MANIFEST.MF`，会逐文件校验 SHA-256；再带 `SIGNATURE.RSA` 且存在
-`/etc/mnt/.boot/plugin.pub` 时才会额外校验签名。打包签名用 `ikplugin keygen` + `ikplugin pack`。
-
-> 注意区分: **框架本体 `/etc/mnt/.boot` 是必须签名的**(固件开机会校验，不通过整个框架不运行)，
-> 只有第三方插件包不要求签名。
-
-**插件包还能带 Web 页面与后端接口**(会自动软链到根分区，卸载自动清理):
-
-```
-www/plugins/<名称>/<名称>.json   插件卡片     -> /usr/ikuai/www/plugins/<名称>/
-www/plugins/app/<名称>.html|png  页面与图标   -> /usr/ikuai/www/plugins/app/
-function/<func_name>             后端接口     -> /usr/ikuai/function/
-bin/*                            命令行      -> /usr/sbin/
-```
-
-完整可运行示例：
-
-* [examples/rust-plugin](examples/rust-plugin/) —— Rust + 嵌入式数据库 + Web 配置页。
-  编译方式有两种(见该示例的 README)：**musl 静态**(仓库默认，实测 945KB/整包 454KB)与
-  **iKuai SDK 的 uClibc 交叉编译**(动态链接设备自带 libc，体积更小)。
-* [examples/bnfix-plugin](examples/bnfix-plugin/) —— 纯 shell 的最小示例（整包约 15KB，
-  **不编译任何东西**）：演示"就地给系统共享库打 1 字节定点补丁 + 每次开机重新施加 + 自检"，
-  以及"卸载后重启即彻底失效"的做法。
-* [examples/adblock-plugin](examples/adblock-plugin/) —— 广告/跟踪域名拦截（整包 27KB，**不编译任何东西**）：
-  用设备自带的 `ikdnsx` 跑一个独立 sinkhole 实例 + iptables `REDIRECT` 把 LAN 侧 UDP/53 纳管，
-  命中黑名单返回 `0.0.0.0`；演示"常驻实例 + 定时守卫 + fail-open 撤规则"的自启/自愈写法，
-  以及"内置种子表离线可用 + 一键拉取 anti-AD / StevenBlack 开源规则库"。
-
-**安装方式**:
-1. 网页: 系统设置 → 插件管理 → ikguard → 插件管理 → 选择 zip → 上传并安装
-2. 命令行: 把 zip 放到 `/etc/mnt/plugins/` 后执行 `ikplugin scan`(或直接重启)
-3. 命令行: `ikplugin install /path/xxx.zip`
-
-## 审计取证 (audit) —— 被动采集，不用 cron
-
-`audit=1` 时由 `scripts/06_enable_audit.sh` 拉起一个**常驻被动采集进程**(`ikaudit collect`)，
-事件全部由内核推送，**没有任何定时轮询**：
-
-| 事件源 | 拿到什么 |
-| --- | --- |
-| `conntrack -E` | 连接事件(`[NEW]`/`[DESTROY]`)；其中 `dport=53` 的另存为 DNS 事件 |
-| 空壳客户端 | **启动尝试**：被禁组件被任何代码路径拉起时，空壳自己往 `stub.log` 记一笔(时间 + 拉起者) |
-
-不做的事（设计上明确移除）：
-
-* **不判断"程序启动"** —— 本内核没编 `CONFIG_CONNECTOR`(cn_proc)/`CONFIG_AUDIT`/`CONFIG_KPROBES`/`CONFIG_FTRACE`，没有 exec/fork 事件源；启动点监控改由空壳完成（见上表）。
-* **不抓包做 DNS** —— DNS 只是连接事件里 `dport=53` 的子集；conntrack 不含报文，所以只能到"谁向谁查"，**拿不到域名**。
-* **不碰 iptables** —— 封锁只在 `/etc/hosts`（+ 空壳），没有规则可命中，因此**没有"封锁命中"事件源**。
-
-日志写在持久分区 `/etc/log/ikguard/`（时间 + 体积双限：保留 3 天、目录 300MB、单文件 10MB）：
-
-| 文件 | 内容 |
-| --- | --- |
-| `boot.log` | 框架开机日志 |
-| `audit-YYYYMMDD.log` | 结构化事件: `collect.begin/stop` `check` … |
-| `conn-YYYYMMDD.log` | 连接事件(公网方向) |
-| `dns-YYYYMMDD.log` | DNS 事件(`dport=53`) |
-| `stub.log` | 被禁组件的启动尝试(空壳记录；正常为空 = 没有任何启动尝试) |
-| `report.txt` | 最近一次采集报告 |
-
-```
-ikaudit status          # 采集器/事件源/日志状态(含启动尝试次数)
-ikaudit tail 80         # 最近的审计事件
-ikaudit collect-start   # 后台启动被动采集器(也可用控制台开关)
-ikaudit collect-stop    # 停止采集器(按 pid 关闭并清残留子进程)
-ikaudit collect-status  # 采集器是否在运行
-ikaudit report          # 立刻生成报告(异常返回码 1)
-```
-
-> **本框架不写任何 cron**：`audit` 是持久化开关，=1 时开机自动拉起采集器、=0 时停掉；
-> 旧版本写入的框架定时任务(`bin/ikaudit` 行、`backdoor_guard` 每分钟守卫)在开机时被清除。
-
-## SSH 加固 (sshguard) —— 封禁公网访问 SSH + 一键封禁来源 IP
-
-真机(3.7.16)核实过的三件事:
-
-* SSH 是设备自带的 **dropbear**, 由官方 `/usr/ikuai/script/remote_control.sh __set_sshd` 拉起:
-  `killall -q dropbear; env - PATH=$PATH dropbear -p $sshd_port`。它监听 `0.0.0.0`, 而官方
-  **没有对 SSH 做任何 WAN 侧限制** —— 22 不在 iKuai 的 `DROP_T_PORTS_WAN_IN` 集合里
-  (该集合只有 53 54 680~690 700 1900), `WEBACL` 只管 web 端口。所以 `open_sshd=1` 时只要上游
-  把端口映射到公网, 任何人都能连上来爆破。
-* **公网网卡怎么判断 = 用官方自己的封装**: `/usr/ikuai/include/iptables.sh` 里
-  `IPT_WAN_NO_VPN_IFACE_IN="-m ifaces --ifaces wan*,vwan*,adsl* --dir in"`。iKuai 自研的 iptables
-  扩展 `ifaces` 按**接口名前缀**一次匹配所有 WAN/VPN/ADSL 网卡(多拨、多 WAN、PPPoE 全覆盖),
-  比看路由表/默认网关可靠。本框架运行时读这行定义, 固件升级自动跟随。
-* **SSH 日志官方已经在记**: `/usr/sbin/iksyslogd`(Lua) 把 dropbear 的 syslog 落进
-  `/etc/log/syslog.db` 的 `messages` 表(process=`dropbear[pid]`), 持久盘、重启不丢 ——
-  登录成功、失败、注销都有。我们只是读它, 不另采一份, 不常驻、不占额外空间。
-
-做了两件事(同样不常驻、不写 cron, 只在开机与"重新应用"/切开关时落规则):
-
-1. **封禁公网访问 SSH** —— 自建链 `IKG_SSH_WAN` 挂在 `INPUT` 最前:
-
-   ```
-   -A IKG_SSH_WAN -p tcp -m ifaces --ifaces wan*,vwan*,adsl* --dir in \
-       -m conntrack --ctstate NEW --dport <官方 sshd_port> -j DROP
-   ```
-
-   只拦 **WAN 侧的新连接**(LAN 不受影响)。`--ctstate NEW` 是必须的: iKuai 的 INPUT 是
-   "默认 ACCEPT + 靶向 DROP"(没有 ESTABLISHED 放行), 不限 NEW 会把正在操作的管理会话一起打断。
-2. **一键封禁来源 IP** —— 自建链 `IKG_SRC_BAN`, 名单存持久盘 `/etc/mnt/ikguard/ssh-ban.list`
-   (开机 `scripts/07` 重放)。封的是**该 IP 访问本机 SSH 端口**, Web 与其它服务不受影响 ——
-   手滑封错也能从网页解封; 名单清空后链会一起拆掉, 不留空链。
-
-> **救援通道(真机实测过)**: 公网 SSH 被封之后 Web 不受影响 —— 登录 Web 后
-> `POST /Action/call {"func_name":"ikguard","action":"seting","param":{"key":"sshguard","value":"0"}}`
-> 立刻解除; 设备本地还能用 `/etc/mnt/.boot/bin/sshguard off`。
-> 注意 `passwd` 字段是 **md5(明文密码)**, 明文会返回"账号或密码错误"。
-
-命令行:
-
-```bash
-sshguard status|check        # 状态 / 自检(规则还在不在、用的哪条官方定义)
-sshguard on|off              # 封禁 / 解除公网访问 SSH(等同改 sshguard 开关)
-sshguard log [n]             # SSH 登录日志: 登录成功/失败/注销(取自官方 syslog.db)
-sshguard ban <ip> [原因]      # 一键封禁来源 IP(只挡它访问 SSH)
-sshguard unban <ip>|clear    # 解封 / 清空名单
-```
-
-Web「系统设置 → 插件管理 → ikguard」的「SSH 防护」页签里有同样的东西: 公网访问开关、
-SSH 登录日志表格(每行带"封禁该 IP"按钮)、已封禁名单(可解封/清空)。
-
-## 网页插件 (Web)
-
-![插件管理](docs/images/plugin-management.png)
-
-> 「高级应用 → 插件管理」里的插件卡片(实拍: iKuai 3.7.16 x64 + 本框架 v0.0.4)。
-> `安全防护控制台` 是基础包内置的 ikguard 插件；`Rust 示例插件` 是通过插件管理**单独上传安装**的
-> `rustdemo.zip` —— **基础包与插件是两个独立发布物**, 基础包里不含任何插件。
-> 目前随版发布的独立插件有四个：`rustdemo-v1.0.0-plugin.zip`(示例)、`bnfix-v1.0.0-plugin.zip`(系统 OpenSSL 组件修复)、
-> `ikadblock-v1.0.0-plugin.zip`(广告/跟踪域名拦截) 与 `ikupd-v1.0.0-plugin.zip`(插件在线升级)。
-> 其中 `ikupd` 可以自己把本仓库加进"仓库列表"后在线检查/下载/安装其余插件(见上文「随版发布的插件」)。
-
-![ikguard 控制台](docs/images/ikguard-console.png)
-
-> 点开卡片就是插件自己的页面: 概览(框架版本 / 签名校验 / 后门进程 / hosts 封锁条数 /
-> 启动尝试次数 / 被动采集 / 日志分区) + 开关配置(后门阻断、审计取证、SSH 登录…),
-> 改完立即生效并写入 `/etc/mnt/boot_args`。
-
-iKuai 的「系统设置 → 插件管理」是数据驱动的: 官方 `plugins.sh` 的 `show()` 会遍历
-`/usr/ikuai/www/plugins/*/*.json` 生成卡片，卡片点击后以 iframe 打开
-`/plugins/<目录>/<name>.html`(原目录名是 `docker`，本框架改成了 `app`)。本框架在 `www/` 下
-提供资源，开机由 `scripts/03_enable_plugins.sh` 同步到根分区:
-
-```
-www/plugins/<name>/<name>.json   元数据(name 决定卡片与 iframe 文件名)
-www/plugins/app/<name>.html      插件页面(自包含, 直接 fetch /Action/call)
-www/plugins/app/<name>.png       卡片图标
-www/eula.txt                     《使用条款与免责声明》正文(后端接口读取)
-usr/ikuai/function/<func_name>   后端接口(#!/bin/bash /etc/ikcommon)
-```
-
-内置插件 `ikguard`: 概览(签名/后门进程/封锁规则/命中数/DNS 状态/日志占用)、
-开关配置(写 `/etc/mnt/boot_args` 并立即生效)、插件管理(**上传 zip 安装**/扫描/卸载)、
-审计日志(实时查看)、工具(云端连通性自检、DNS 记录开关，均带用途说明)。
-
-**首次启用需要同意《使用条款》**: 未同意时插件功能不启用 —— 插件管理页只显示一个灰色按钮
-"查看并同意《使用条款》"，点开弹框阅读后同意才出现插件；同意记录写在
-`/etc/mnt/plugins/.eula`(持久，只在本机保存)，后端 `ikguard` 的 `plugin` 动作也会拒绝未同意的调用。
-条款正文在 `www/eula.txt`(版本 v1.0)。
-
-**前端补丁**(`lib/plugin.sh:plugin_web_patch()`，每次开机重打):
-1. 去掉"使用插件功能需要绑定爱快云平台！"拦截
-   (`yunbindstatus = ("" != code ? 2 : 1)` → `yunbindstatus=2`)；
-2. 插件页面目录 `/plugins/docker/` → `/plugins/app/`，不再和 Docker 功能混在一起；
-3. 点开插件后的小标题 `Docker` → `插件`；
-4. 顶部"爱快e云APP 掌上办，更方便"云绑定二维码弹框不再弹出
-   (`.tipCloudBind=!0` → `.tipCloudBind=!1`)；
-5. 插件卡片显示元数据里的 `title`(中文名) 而不是文件名
-   (`_s(e.name)` → `_s(e.title||e.name)`，`title` 写在 `www/plugins/<名>/<名>.json` 里)。
-   分包是 gzip 静态资源，做法是"解开 → sed → 重新压缩 → 复核后写回"，改完需 **Ctrl+F5 强刷**。
-
-接口约定: `POST /Action/call` `{func_name, action, param}`, 动作 `show` 的动作函数
-输出被包成 `{"Result":30000,"Data":{...}}`; 参数值不允许含空格/引号。
-
-## 本地离线测试
-
-不接触真机，在 Linux / Git-Bash 下运行:
-
-```
-bash .tests/run_tests.sh
-```
-
-它会在 `.tests/.mock` 生成一个"模拟系统根目录"(含 rc / monitor_process.sh /
-collection.sh / ikaudit_update.sh 等目标文件片段, 对齐 3.7.16 真机实况)，部署框架并执行
-开机引导，然后断言后门是否被正确阻断、插件系统是否可用。所有会改动系统的命令
-(killall / pidof 等)在测试中都用 `.tests/shims/` 下的替身记录，不会影响本机；
-`iptables` / `ipset` / `nslookup` 的替身用来断言**新版一次都不碰它们**。
-
-## 重要: 修改后必须重新签名
-
-官方 `/usr/ikuai/script/plugins.sh` 会用内置公钥校验 `/etc/mnt/.boot/{MANIFEST.MF,SIGNATURE.RSA}`，
-并且逐文件校验清单里的 SHA-256。**改动 `.boot` 内任何被清单列出的文件后，都必须重新签名**，
-否则开机校验失败，整个框架不会运行。
-
-```
-bash .tools/sign.sh     # 用 .tools/private.pem 生成 MANIFEST.MF + SIGNATURE.RSA
-bash .tools/verify.sh   # 本地自检
-bash .tools/build.sh    # 打出 .dist/custom.bin(firmwareid=90001)
-```
-
-> 注意: 打包前必须把文件统一成 LF 换行(Windows 上很容易带 CRLF，会让设备上的
-> `install.sh`/`*.sh` 直接语法报错)，且 `.tools/private.pem` 要与固件内置公钥配对。
-> 详细流程见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
+| [ikupd](examples/ikupd-plugin/) | 1.0.0 | **插件在线升级**：从仓库 Release 检查新版（按包名前缀 + sha256 判断），支持代理拉取，确认后下载安装 |
+| [ikadblock](examples/adblock-plugin/) | 1.0.0 | **广告/跟踪域名拦截**：LAN 全网 DNS 纳管到本机 sinkhole，命中黑名单返回 `0.0.0.0` |
+| [bnfix](examples/bnfix-plugin/) | 1.0.0 | **系统 OpenSSL 组件修复**：给自带 `libcrypto` 打 1 字节定点补丁，修"显式曲线参数 + 压缩点"证书解析死循环 |
+| [rustdemo](examples/rust-plugin/) | 1.0.0 | **Rust 示例插件**：编译型插件的完整示例（嵌入式数据库 + Web 配置页） |
+
+> 推荐先装 `ikupd`：把本仓库的 Release 地址加进它的「仓库列表」，之后新插件/升级都能在页面里
+> 检查并安装，不用手工传 zip。
+
+## 开发
+
+* **打包签名**：`.tools/build.sh`（产物在 `.dist/custom.bin`）。清单必须与实际铺开的文件**完全一致**，
+  否则设备端挂载会被拒绝；README 与 `docs/` 都在基础包内，改完要重新签名打包。
+* **离线测试**：`bash .tests/run_tests.sh`（mock 真机布局 + iptables/ipset/killall 替身）。
+* **真机**：`python3 ikctl.py deploy|reboot|verify|sh|push|pull`（`verify` 一键体检）。
+* **写插件**：用仓库内技能 [`.codebuddy/skills/ikuai-plugin-dev/`](.codebuddy/skills/ikuai-plugin-dev/SKILL.md)
+  —— 附带已在真机验证过的模板插件与脚手架/部署脚本，不必从源码反推。
+* **交叉编译**：参考 [ikuai-sdk](https://github.com/deadash/ikuai-sdk)。
+
+## 边界与说明
+
+* 阻断**只封域名**（`/etc/hosts` 片段），不封 IP/网段/端口、不碰官方防火墙链；
+  唯一会写 iptables 的是你显式开启的 `sshguard`，规则落在自建链上、默认关闭时一条都不写。
+* **不写 cron、无常驻进程**（除 `audit=1` 的被动采集器）。
+* 根分区每次重启还原，所以规则/软链/补丁都在**开机重放**；持久状态只在 `/etc/mnt` 与 `/etc/log`。
+* 完整操作手册（分区与扩容、打包签名约束、SSH 升级、重启验证、审计、Web 插件、
+  真实 WAN/LAN 客户端模拟、排障）见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
