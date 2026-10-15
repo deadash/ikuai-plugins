@@ -455,9 +455,14 @@ ssh sshd@127.0.0.1 -p 10022 "
 
 **封锁 = 域名封锁，不做 IP/网段封锁，不碰 ipset/iptables**（v0.0.6 起）：
 
-* 云端域名(24 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写入 `/etc/hosts` 指向 `0.0.0.0`；
+* 云端域名(24 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写进 `/etc/hosts.d/ikblock` 片段，
+  再按固件自己的方式 `cat /etc/hosts.d/* >/etc/hosts` 汇总成 `/etc/hosts` 指向 `0.0.0.0`；
 * 只影响**本机自己**的域名解析，局域网客户端的 DNS 查询不经过本机 hosts，不受影响；
-* 零进程、零防火墙规则、每开机重写一次(`/etc/hosts` 随根分区还原)。
+* 零进程、零防火墙规则、每开机重写一次(`/etc/hosts.d` 随根分区还原)。
+* **为什么必须写成片段**：固件有三处会整体重建 `/etc/hosts` —— `basic.sh:__set_hostname()`
+  (开机必经, rc 里排在 plugins.sh 之后)、`function/basic`(网页改主机名)、`pppoe_server.sh`
+  (NAS 名变更)，实现都是 `cat /etc/hosts.d/* >/etc/hosts`。往 `/etc/hosts` 直接追加的条目会被
+  它们冲掉(真机首测就是这么丢的封锁)；写成片段与固件同源，任何一次重建都会带上。
 
 历史包袱：旧版曾用 `bd_resolve_domains()` 每 10 分钟把域名解析结果灌进 ipset —— 每域名
 一次 `nslookup`(单次 2.5~5.1s)，24 个域名一轮 60~120s，长于 60s 的 cron 周期，叠加节流
@@ -469,6 +474,17 @@ ssh sshd@127.0.0.1 -p 10022 "
 `[时间] [ikblock] <组件> 被启动(已拦截) ppid=<pid>` + 拉起者的 cmdline，然后立即退出。
 文件为空 = 没有任何启动尝试；有记录 = 发现了文件层没覆盖的新启动点（记录里就是拉起者）。
 
+两个真机上确认过的实现细节：
+
+* **开机竞态不算启动尝试**：rc 的 `start_remote_services()` / `start_ikuai_services()` 函数体
+  在我们打补丁之前就已被 bash 解析进内存（补丁走的是 `boot()` 中段的 `plugins.sh` 钩子，
+  `sed` 改的是磁盘副本），所以每次开机 rc 仍会按内存旧副本把 `ik_rc_client` / `cre` / `pmd`
+  拉起一遍（已被空壳拦下）。判据：拉起者是 rc **且**磁盘上的 rc 已带补丁 → 不记。
+* **被禁脚本是被 `source` 起来的**：`/etc/ikcommon` 的收尾是 `. $1 ""; Command $S0`，
+  所以脚本里 `$0` 是 `/etc/ikcommon` 而非脚本名 —— 组件名在生成时就写死字面量；
+  另外生成片段绝不能走 `awk -v`（它会把 `printf` 格式串里的 `\n` 变成真换行、写出语法错误
+  的脚本，连启动尝试都记不下来，真机踩过），测试里对生成物有 `bash -n` 断言。
+
 ### 5.2 怎么验证封锁生效
 
 封锁 = 空壳 + 启动点改写 + hosts 域名封锁，验证也围绕这三件事(无需外网)：
@@ -476,10 +492,14 @@ ssh sshd@127.0.0.1 -p 10022 "
 ```bash
 ssh sshd@127.0.0.1 -p 10022 "
   grep -c '0.0.0.0' /etc/hosts;                       # 期望: >= 24(云端域名全在)
+  ls -l /etc/hosts.d/ikblock;                         # 期望: 片段在
+  cat /etc/hosts.d/* > /etc/hosts;                    # 模拟 basic.sh 重建 hosts
+  grep -c '0.0.0.0' /etc/hosts;                       # 期望: 重建后仍 >= 24
   grep -c 'ikblock' /usr/sbin/ik_rc_client /usr/sbin/cre /usr/sbin/pmd /usr/sbin/dtalkd /usr/sbin/dtalkc;
                                                       # 期望: 每个都是 1(空壳)
   ps | grep -E 'cre|pmd|ik_rc_client|dtalk';          # 期望: 空
   cat /etc/log/ikguard/stub.log 2>/dev/null;          # 期望: 空(没有任何启动尝试)
+  bash -n /usr/ikuai/script/utils/update_hosts.sh;    # 期望: 无输出(生成的拦截脚本语法正确)
   grep ikaudit_update /usr/ikuai/script/utils/monitor_process.sh;  # 期望: 已注释
 "
 ```

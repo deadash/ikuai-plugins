@@ -102,7 +102,42 @@ assert_not_shim "iptables"                                   "不碰 iptables(�
 # 60s 的 cron 周期, 叠加节流竞态 -> 2~6 个守卫并发), 是 30%~65% CPU 尖峰的根因
 assert_not_shim "nslookup"                                   "引导期间不做域名解析(不做 nslookup)"
 assert_grep     "$MOCK/etc/hosts" "0.0.0.0 302.ikuai8.com"   "hosts 屏蔽云端域名"
-assert_grep     "$MOCK/etc/hosts" "\[ikblock\]"              "hosts 屏蔽带标记(幂等依据)"
+assert_exists   "$MOCK/etc/hosts.d/ikblock"                  "封锁写成 /etc/hosts.d 片段(与固件同源)"
+assert_grep     "$MOCK/etc/hosts.d/ikblock" "\[ikblock\]"    "片段带标记(可追溯来源)"
+# 真机 basic.sh:__set_hostname()(开机必经)/ function basic(网页改主机名)/ pppoe_server.sh
+# 都会 `cat /etc/hosts.d/* > /etc/hosts` —— 直接追加会被冲掉, 片段必须活下来
+cat "$MOCK/etc/hosts.d"/* > "$MOCK/etc/hosts"
+assert_grep     "$MOCK/etc/hosts" "0.0.0.0 302.ikuai8.com"   "hosts 被重建后封锁仍在"
+
+section "5b. 启动尝试监控(空壳 / 被禁脚本)"
+STUBLOG="$MOCK/etc/log/ikguard/stub.log"
+# 生成进空壳/被禁脚本里的记录代码必须是语法正确的:
+# 真机首测就是 awk -v 转义把 printf 格式串里的 \n 变成真换行 -> 整脚本解析失败 -> 连启动尝试都记不下来
+for f in "$MOCK/usr/sbin/ik_rc_client" "$MOCK/usr/ikuai/script/utils/update_hosts.sh" \
+         "$MOCK/usr/ikuai/script/ikaudit_update.sh" "$MOCK/usr/DTalkInside/monidtalk.sh"; do
+    if bash -n "$f" 2>/dev/null; then
+        ok "$(basename "$f"): 拦截脚本语法正确"
+    else
+        bad "$(basename "$f"): 拦截脚本语法错误"
+    fi
+done
+
+# 未知拉起者: 必须记一笔(否则"空壳即监控"形同虚设)
+: > "$STUBLOG"
+"$MOCK/usr/sbin/pmd" >/dev/null 2>&1
+assert_grep "$STUBLOG" "pmd 被启动(已拦截)"                  "未知拉起者启动空壳 -> 记录启动尝试"
+assert_grep "$STUBLOG" "run_tests.sh"                        "记录里带上拉起者 cmdline"
+# 被禁脚本: 真机上由 /etc/ikcommon `source` 起来(顶层代码先跑), 这里等价地用 bash 起一次
+bash "$MOCK/usr/ikuai/script/utils/update_hosts.sh" >/dev/null 2>&1
+assert_grep "$STUBLOG" "update_hosts.sh 被启动(已禁用拦截)"  "被禁脚本被启动 -> 记录启动尝试"
+# 被禁脚本必须真的不干活: 原脚本体内的断言行不能被执行到
+assert_grep "$MOCK/usr/ikuai/script/utils/update_hosts.sh" "get_hosts" "被禁脚本原文保留(便于比对)"
+# 开机竞态: rc 的函数体在补丁前已被 bash 解析进内存, 每次开机 rc 还会按旧内容拉起一遍
+# (磁盘上的 rc 已带补丁) —— 这是预期内的, 不该污染"启动尝试"日志
+: > "$STUBLOG"
+printf 'if [ "$1" = boot ]; then "%s/usr/sbin/pmd"; exit 0; fi\n' "$MOCK" >> "$RC"
+bash "$RC" boot >/dev/null 2>&1
+assert_not_grep "$STUBLOG" "被启动"                          "rc 内存旧副本的启动不记为异常(判据: 磁盘 rc 已带补丁)"
 
 section "6. 定时任务: 不装守卫, 且清掉旧版遗留"
 assert_noexist  "$MOCK/etc/crontabs/cron.d/ikblock_guard"    "未安装每分钟守卫 cron"

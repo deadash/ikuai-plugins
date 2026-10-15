@@ -47,6 +47,13 @@ genuine.ikuai8.com iapi.ikuai8.com yun.ikuai8.com portal.ikuai8.com local.ikuai8
 # 用户扩展域名文件(可选, 一行一条, 追加进 hosts)
 BD_EXT_DOMAINS="/etc/mnt/ikblock.domains"
 
+# 域名封锁写进 /etc/hosts.d/ 的一个片段, 而不是直接追加 /etc/hosts:
+#   固件多处会**重建** /etc/hosts —— 都是 `cat /etc/hosts.d/* >/etc/hosts`:
+#     basic.sh:__set_hostname()(开机必经, rc 里排在 plugins.sh 之后)
+#     function/basic(网页改主机名) / pppoe_server.sh(NAS 名变更)
+#   直接追加会被它们冲掉(真机首测即被 basic.sh 冲掉)。写成片段与固件同源, 上述重建都会带上。
+BD_HOSTS_FRAG="/etc/hosts.d/ikblock"
+
 # 空壳/被禁脚本共用的"启动尝试"监控日志(持久分区, 重启不丢)
 BD_WATCH_LOG="/etc/log/ikguard/stub.log"
 
@@ -97,6 +104,27 @@ bd_kill() {
     bd_kill_pattern
 }
 
+# 空壳与被禁脚本共用的"启动尝试"记录代码(生成进目标文件, 只能用设备上的 sh / busybox 内建)。
+#   $1 = 日志里的动作文字, $2 = 组件名(生成时的字面量或运行期表达式)
+#
+# 开机竞态(真机 3.7.16 实测): rc 的 start_remote_services()/start_ikuai_services() 函数体在
+#   boot() 调它们之前就已经被 bash 解析进内存了, 而我们的补丁走的是 boot() 中段的 plugins.sh
+#   钩子、改的只是磁盘副本 —— 所以**每次开机 rc 仍会按内存里的旧内容把这几个组件拉起一遍**
+#   (已被空壳拦下, 阻断效果不受影响)。这类启动不是"新启动点":
+#   判据 = 拉起者是 rc 且磁盘上的 rc 已经带补丁(补丁生效, 只是 rc 用的是内存旧副本)。
+bd_watch_body() {
+    local rc
+    rc="$(P /usr/ikuai/script/rc)"
+    cat <<EOF
+pp=\${PPID:-0}
+cmd="\$(tr '\0' ' ' < "/proc/\$pp/cmdline" 2>/dev/null)"
+case "\$cmd" in
+    *"$rc boot"*) grep -q "\[$BD_MARK\]" "$rc" 2>/dev/null && exit 0 ;;
+esac
+{ printf "[%s] [$BD_MARK] %s $1 ppid=%s\n" "\$(date "+%F %T")" "$2" "\$pp"; printf "%s\n" "\$cmd"; } >> $(P "$BD_WATCH_LOG") 2>/dev/null
+EOF
+}
+
 # 用空壳替换程序: 启动即记一笔"谁想启动我"(零代价启动监控), 睡 1 秒防被守护进程
 # 紧密循环重拉, 然后退出
 bd_stub() {
@@ -107,15 +135,12 @@ bd_stub() {
         # 已是空壳则跳过
         grep -q "\[$BD_MARK\]" "$path" 2>/dev/null && continue
         rm -f "$path"
-        cat > "$path" <<EOF
-#!/bin/sh
-# [$BD_MARK] disabled —— 空壳: 记一笔"谁想启动我"后立即退出
-n=\${0##*/}
-{ printf "[%s] [ikblock] %s 被启动(已拦截) ppid=%s\n" "\$(date "+%F %T")" "\$n" "\$PPID"; \
-  tr "\0" " " < "/proc/\$PPID/cmdline" 2>/dev/null; printf "\n"; } >> $(P "$BD_WATCH_LOG") 2>/dev/null
-sleep 1
-exit 0
-EOF
+        {
+            printf '#!/bin/sh\n'
+            printf '# [%s] disabled —— 空壳: 记一笔"谁想启动我"后立即退出\n' "$BD_MARK"
+            bd_watch_body "被启动(已拦截)" '${0##*/}'    # 空壳是被 exec 起来的, $0 就是组件名
+            printf 'sleep 1\nexit 0\n'
+        } > "$path"
         chmod +x "$path"
         bd_log "空壳替换: $f"
     done
@@ -137,17 +162,25 @@ bd_sed() {
 }
 
 # 让整个脚本在 shebang 之后立即退出(启动尝试会先记进监控日志)
+# 两个真机上踩到的点:
+#   1) **不能用 awk -v 传多行片段** —— awk 会把片段里 printf 格式串中的 \n 当成真换行写进
+#      文件, 生成的脚本引号不闭合, 整脚本解析失败, 连启动尝试都记不下来。改用 head/tail +
+#      printf/cat 拼装, 生成物语法正确(测试里带 bash -n 断言)。
+#   2) 这些脚本是被 /etc/ikcommon `source` 起来再按参数调函数的(`. $1 ""; Command $S0`),
+#      所以 $0 是 /etc/ikcommon 而不是脚本名 —— 组件名必须在生成时写死字面量。
 bd_neuter_script() {
-    local f="$1" p blk
+    local f="$1" p tmp
     p="$(P "$f")"
     test -f "$p" || return 0
     grep -q "\[$BD_MARK\]" "$p" 2>/dev/null && return 0
-    blk='# [ikblock] 已禁用: 记一笔启动尝试后立即退出
-n=${0##*/}
-{ printf "[%s] [ikblock] %s 被启动(已禁用拦截) ppid=%s\n" "$(date "+%F %T")" "$n" "$PPID"; tr "\0" " " < "/proc/$PPID/cmdline" 2>/dev/null; printf "\n"; } >> /etc/log/ikguard/stub.log 2>/dev/null
-exit 0'
-    awk -v blk="$blk" 'NR==1{print; print blk; next}{print}' "$p" > "$p.tmp" \
-        && mv "$p.tmp" "$p"
+    tmp="$p.$BD_MARK.tmp"
+    {
+        head -n 1 "$p"                  # 保留首行(#!/bin/bash /etc/ikcommon), 启动方式不变
+        printf '# [%s] 已禁用: 记一笔启动尝试后立即退出\n' "$BD_MARK"
+        bd_watch_body "被启动(已禁用拦截)" "$(basename "$f")"
+        printf 'exit 0\n'
+        tail -n +2 "$p"                 # 原内容留在 exit 之后(死代码, 便于比对/回滚)
+    } > "$tmp" && mv "$tmp" "$p"
     chmod +x "$p"
     bd_log "已禁用脚本: $f"
 }
@@ -259,25 +292,27 @@ bd_patch_system() {
 
 # ---------------------------------------------------------------- 域名封锁
 
-# 把云端域名写入 /etc/hosts 指向 0.0.0.0 —— 唯一的网络层手段。
-# 只影响本机自己的域名解析(零进程、零防火墙规则); 局域网客户端的 DNS 查询
-# 不经过本机 hosts, 不受影响。/etc/hosts 每次开机随根分区还原, 所以每次开机重写。
+# 把云端域名写进 /etc/hosts.d/ 片段, 再用固件自己的方式(`cat /etc/hosts.d/* >/etc/hosts`)重建
+# /etc/hosts —— 这是唯一的网络层手段。只影响本机自己的域名解析(零进程、零防火墙规则);
+# 局域网客户端的 DNS 查询不经过本机 hosts, 不受影响。根分区每次开机还原, 所以每次开机重写。
 bd_block_hosts() {
-    local p d
+    local dir p frag d hits
+    dir="$(P "/etc/hosts.d")"
     p="$(P "/etc/hosts")"
-    test -f "$p" || return 0
-    grep -q "\[$BD_MARK\]" "$p" 2>/dev/null && return 0
+    frag="$(P "$BD_HOSTS_FRAG")"
+    test -d "$dir" || { bd_log "跳过(不存在): /etc/hosts.d"; return 0; }
     {
-        echo "# [$BD_MARK] begin 屏蔽爱快云端域名"
+        echo "# [$BD_MARK] 屏蔽爱快云端域名(本文件由 /etc/hosts.d/* 汇总成 /etc/hosts)"
         for d in $BD_DOMAINS; do echo "0.0.0.0 $d"; done
         test -f "$(P "$BD_EXT_DOMAINS")" && \
             while IFS= read -r d; do
                 case "$d" in ''|\#*) continue ;; esac
                 echo "0.0.0.0 $d"
             done < "$(P "$BD_EXT_DOMAINS")"
-        echo "# [$BD_MARK] end"
-    } >> "$p"
-    bd_log "已写入 hosts 域名封锁: $p"
+    } > "$frag"
+    cat "$dir"/* > "$p"
+    hits="$(grep -c '^0\.0\.0\.0' "$p" 2>/dev/null)"
+    bd_log "已写入 hosts 域名封锁: $BD_HOSTS_FRAG (重建 /etc/hosts, $hits 条)"
 }
 
 # ---------------------------------------------------------------- 对外接口

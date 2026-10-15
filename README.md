@@ -107,14 +107,26 @@
    - `usr/ikuai/script/dingtalk.sh` + `usr/DTalkInside/monidtalk.sh`: 停用 dtalk 云管
    - `usr/ikuai/script/catcherd.sh`: 停用抓包上报
    - `usr/ikuai/script/utils/submit.lua` / `usr/ikuai/script/upgrade.sh`: 禁用云端指令与自动升级
-3. **域名封锁**: 云端域名(24 个 + 可选扩展)写入 `/etc/hosts` 指向 `0.0.0.0`。
+3. **域名封锁**: 云端域名(24 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写进
+   `/etc/hosts.d/ikblock` 片段、再按固件自己的方式汇总成 `/etc/hosts` 指向 `0.0.0.0`。
    只影响本机自己的解析，零进程、零防火墙规则；**不做 IP/网段封锁、不碰 ipset/iptables**。
+   > 为什么是片段而不是直接追加 `/etc/hosts`: 固件有多处会**重建** /etc/hosts ——
+   > `basic.sh:__set_hostname()`(开机必经，rc 里排在 plugins.sh 之后)、`function/basic`
+   > (网页改主机名)、`pppoe_server.sh` 都是 `cat /etc/hosts.d/* >/etc/hosts`，直接追加的
+   > 条目会在开机后半程被冲掉(真机首测实测)。片段与固件同源，这些重建都会自动带上。
 
 由于根分区每次重启还原，`scripts/02` **每次开机完整应用一次**，并顺手清掉旧版本留下的
 "每分钟守卫"cron。本版本**不装任何定时器**：空壳与被禁脚本启动即自灭，每分钟复查属于空转。
 旧版"每分钟守卫 + 每 10 分钟给 24 个云端域名各做一次 nslookup(单轮 60~120s，长于 60s 的
 cron 周期，叠加节流竞态)"实测会把 2 vCPU 设备打出 30%~65% 的 CPU 尖峰，连同 ipset/iptables
 网络层已整体移除。
+
+> **每次开机为什么会有 3 条"启动尝试"又不记进日志**: rc 的 `start_remote_services()` /
+> `start_ikuai_services()` 函数体在我们打补丁之前就已被 bash 解析进内存了(补丁走的是 boot()
+> 中段的 plugins.sh 钩子，改的是磁盘副本)，所以每次开机 rc 仍会按内存旧副本把
+> `ik_rc_client` / `cre` / `pmd` 拉起一遍 —— 被空壳拦下，不影响阻断。这类启动不算"新启动点"
+> (判据: 拉起者是 rc 且磁盘上的 rc 已带补丁)，因此不写 `stub.log`；`stub.log` 里出现的任何
+> 记录都来自其它代码路径，带上时间与拉起者 cmdline，正是要排查的对象。
 
 需要重新应用时手动跑一次 `/etc/mnt/.boot/bin/backdoor_guard`，或用 Web 页的"重新应用"；
 看启动尝试: `tail /etc/log/ikguard/stub.log`(空 = 干净)。

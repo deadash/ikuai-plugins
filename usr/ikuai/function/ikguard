@@ -142,7 +142,7 @@ __show_data() {
     ver="$(sed -n 's/^version=//p' "$BOOT_DIR/Release" 2>/dev/null | head -n1)"
     procs="$(ikg_backdoor_alive)"
     usage="$(df -h "$IK_LOG_DIR" 2>/dev/null | tail -n1 | awk '{printf "%s 总 / %s 可用 / %s 已用", $2, $4, $5}')"
-    hosts="$(grep -c '\[ikblock\]' "$IK_HOSTS" 2>/dev/null)"
+    hosts="$(grep -c '^0\.0\.0\.0' "$IK_HOSTS" 2>/dev/null)"
     case "$hosts" in ''|*[!0-9]*) hosts=0 ;; esac
 
     status="{"
@@ -150,7 +150,7 @@ __show_data() {
     status+="$(ikg_kv plugins_ok "$(cat /etc/plugins_ok 2>/dev/null)"),"
     status+="$(ikg_kv backdoor_alive "$procs"),"
     status+="$(ikg_num hosts_entries "$hosts"),"
-    status+="$(ikg_num stub_hits "$(wc -l < "$IK_STUB_LOG" 2>/dev/null || echo 0)"),"
+    status+="$(ikg_num stub_hits "$(grep -c '被启动' "$IK_STUB_LOG" 2>/dev/null || echo 0)"),"
     status+="$(ikg_num collect_running "$(ikg_collect_running && echo 1 || echo 0)"),"
     status+="$(ikg_num n_conn "$(ikg_count conn 'conn\.(NEW|DESTROY)')"),"
     status+="$(ikg_num n_dns "$(ikg_count dns 'dns\.query')"),"

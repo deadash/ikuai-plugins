@@ -17,6 +17,7 @@ rm -rf "$R"
 mkdir -p "$R"
 
 mkdir -p "$R"/etc/mnt "$R"/etc/crontabs/cron.d "$R"/etc/http_lua "$R"/usr/ikuai/script
+mkdir -p "$R"/etc/log/ikguard
 
 # 模拟"从旧版本(装过每分钟守卫)升级上来"的现场: 新版开机要清掉这些遗留,
 # 同时不能误删 iKuai 自带的 cron 行
@@ -245,7 +246,13 @@ chmod +x "$R/usr/sbin/ik_rc_client" "$R/usr/sbin/cre" "$R/usr/sbin/pmd" \
          "$R/usr/sbin/dtalkd" "$R/usr/sbin/dtalkc"
 
 # ------------------------------------------------- 其它
-: > "$R/etc/hosts"
+# /etc/hosts 与真机一样: 由 /etc/hosts.d/* 汇总而成(basic.sh:__set_hostname 会重建它) ——
+# 域名封锁必须作为片段写在这里, 否则下一个重建它的脚本(basic.sh/function basic/pppoe_server)
+# 就把封锁冲掉了
+mkdir -p "$R/etc/hosts.d"
+printf '127.0.0.1 localhost\n'   > "$R/etc/hosts.d/default"
+printf '127.0.0.1 iKuai\n'       > "$R/etc/hosts.d/hostname"
+cat "$R/etc/hosts.d"/* > "$R/etc/hosts"
 cat > "$R/etc/passwd" <<'EOF'
 root:x:0:0:root:/root:/bin/bash
 sshd:x:0:0:sshd:/root:/etc/setup/rc
