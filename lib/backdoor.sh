@@ -118,8 +118,9 @@ bd_kill() {
 # 为什么要向上找祖先, 而不是直接看 $PPID: rc 的 `boot_load_async X &` 会先 fork 一个后台
 #   子 shell、子 shell 再 exec 目标脚本 —— 中间那个子 shell 可能已经退出(留下 cmdline 读出来
 #   是空的僵尸), 真机首测就是这么漏记/错记的。僵尸的 /proc/<pid>/stat 仍可读, 顺着它可以找到
-#   真正的拉起者。取**最近的、cmdline 可读的那个祖先**作为拉起者即可: 若某脚本(如 register.sh)
-#   才是真正的调用方, 它自己是活着的、会被优先读到, 不会误判成开机竞态。
+#   真正的拉起者 —— 前提是**在脚本一起床就用内建 read 把它抓下来**(fork 出 tr 再读, 父进程
+#   常常已经没了)。取**最近的、cmdline 可读的那个祖先**作为拉起者即可: 若某脚本(如
+#   register.sh)才是真正的调用方, 它自己是活着的、会被优先读到, 不会误判成开机竞态。
 #   找不到就明说: 中间进程被完全回收后子进程会被 init 收养, 走到 init 不代表 init 是拉起者,
 #   所以循环里跳过 pid 1 —— 归属不了就记"(拉起者已退出, 无法归属)", 而不是伪造一个拉起者。
 bd_watch_body() {
@@ -127,16 +128,24 @@ bd_watch_body() {
     rc="$(P /usr/ikuai/script/rc)"
     cat <<EOF
 pp=\${PPID:-0}
+# 先只用 shell 内建(open+read, 不 fork)把父进程的 stat 抓下来: rc 的后台子 shell 可能在
+# 本脚本起来后几毫秒内就退出, 等 fork 出 tr 再读它就已经没了(真机就是这么漏成"无法归属"的)
+st=""
+IFS= read -r st < "/proc/\$pp/stat" 2>/dev/null
 launcher=""
-p=\$pp
-i=0
-while [ -n "\$p" ] && [ "\$p" != 0 ] && [ "\$p" != 1 ] && [ "\$i" -lt 4 ]; do
-    launcher="\$(tr '\0' ' ' < "/proc/\$p/cmdline" 2>/dev/null)"
-    [ -n "\$launcher" ] && break
-    p="\$(cat "/proc/\$p/stat" 2>/dev/null)"; p="\${p#*) }"; p="\${p#* }"; p="\${p%% *}"
-    launcher=""
-    i=\$((i+1))
-done
+# pp=1 说明父进程早就退了、本进程被 init 收养 —— init 只是收养者, 不是拉起者
+[ "\$pp" != 1 ] && launcher="\$(tr '\0' ' ' < "/proc/\$pp/cmdline" 2>/dev/null)"
+if [ -z "\$launcher" ]; then
+    p="\${st#*) }"; p="\${p#* }"; p="\${p%% *}"
+    i=0
+    while [ -n "\$p" ] && [ "\$p" != 0 ] && [ "\$p" != 1 ] && [ "\$i" -lt 4 ]; do
+        launcher="\$(tr '\0' ' ' < "/proc/\$p/cmdline" 2>/dev/null)"
+        [ -n "\$launcher" ] && break
+        st="\$(cat "/proc/\$p/stat" 2>/dev/null)"; p="\${st#*) }"; p="\${p#* }"; p="\${p%% *}"
+        launcher=""
+        i=\$((i+1))
+    done
+fi
 case "\$launcher" in
     *"$rc boot"*) grep -q "\[$BD_MARK\]" "$rc" 2>/dev/null && exit 0 ;;
 esac
