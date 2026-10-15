@@ -14,11 +14,14 @@ CRON_TARGET="$(P /etc/crontabs/cron.d)"
 test -d "$CRON_TARGET" || mkdir -p "$CRON_TARGET"
 
 # 拷贝cron文件
-test -d "$CRON_SOURCE" && \
-find "$CRON_SOURCE" -type f -print0 | \
-while IFS= read -r -d '' file; do
-    ln -sf "$file" "$CRON_TARGET/"
-done
+if [ -d "$CRON_SOURCE" ]; then
+    find "$CRON_SOURCE" -type f -print0 | \
+    while IFS= read -r -d '' file; do
+        ln -sf "$file" "$CRON_TARGET/"
+    done
+else
+    log "[cron] 源目录不存在, 跳过: $CRON_SOURCE"
+fi
 
 # 立即生效: iKuai 的 crond 从 /etc/crontabs/root 执行, cron.d/* 需要汇总进去
 if [ -f "$(P /usr/ikuai/include/crond.sh)" ]; then

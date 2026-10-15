@@ -15,7 +15,7 @@ is_enabled "sshd" || exit 0
 #   1) 不依赖具体路径: 直接把 sshd 账号的 shell 字段整段替换成 /bin/bash
 #   2) 兜底: 老固件里的字面路径替换写法(万一格式不同)
 sed -i 's|^\(sshd:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:\).*|\1/bin/bash|' "$(P /etc/passwd)"
-sed -i 's|/etc/setup/rc|/bin/bash|' "$(P /etc/passwd)"
+sed -i 's|^\(sshd:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:\)/etc/setup/rc$|\1/bin/bash|' "$(P /etc/passwd)"
 
 if grep -q '^sshd:.*:/bin/bash$' "$(P /etc/passwd)"; then
     log "[ssh] sshd 账号 shell 已换成 /bin/bash"

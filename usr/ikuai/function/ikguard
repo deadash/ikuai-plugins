@@ -104,14 +104,17 @@ ikg_collect_running() {
 
 # 今日某类事件条数(按事件名统计, 避免把旧格式内容算进来)
 ikg_count() {
-    local f pat="$2"
+    local f pat="$2" n
     f="$(ikg_day_file "$1")"
     [ -f "$f" ] || { printf '0'; return 0; }
+    # grep -c 无匹配时自己就打印 0(退出码 1), 再 `|| printf 0` 会变成两行 "0\n0"
     if [ -n "$pat" ]; then
-        grep -cE "$pat" "$f" 2>/dev/null || printf '0'
+        n="$(grep -cE "$pat" "$f" 2>/dev/null)"
     else
-        grep -c . "$f" 2>/dev/null || printf '0'
+        n="$(grep -c . "$f" 2>/dev/null)"
     fi
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
 }
 
 # 审计事件(与 lib/audit.sh 相同格式, 便于同一份日志里检索)
@@ -423,16 +426,18 @@ show()
 # ---------------------------------------------------------------- seting
 
 __apply_for() {
-    local k="$1"
+    local k="$1" s=""
     case "$k" in
-        backdoor)  ikg_run_script 02_disable_backdoor.sh ;;
-        plugins)   ikg_run_script 03_enable_plugins.sh ;;
-        cron)      ikg_run_script 04_enable_cron.sh ;;
-        shell)     ikg_run_script 05_enable_shell.sh ;;
-        audit)     ikg_run_script 06_enable_audit.sh ;;
-        sshguard)  ikg_run_script 07_enable_sshguard.sh ;;
+        ssh|sshd)  s="01_enable_ssh.sh" ;;            # 切换控制台账号 shell, 立即生效
+        backdoor)  s="02_disable_backdoor.sh" ;;
+        plugins)   s="03_enable_plugins.sh" ;;
+        cron)      s="04_enable_cron.sh" ;;
+        shell)     s="05_enable_shell.sh" ;;
+        audit)     s="06_enable_audit.sh" ;;
+        sshguard)  s="07_enable_sshguard.sh" ;;
+        *)         return 0 ;;                        # 没有对应脚本的开关(如 plugins_verify 之类)
     esac
-    return 0
+    ikg_run_script "$s"                               # 返回脚本退出码, 别把失败也说成"已生效"
 }
 
 seting()
@@ -463,8 +468,12 @@ seting()
     Syslog "[ikguard] 开关变更: $k=$value"
     ikg_audit INFO "flag.change" "开关变更 $k=$value"
 
-    __apply_for "$k" "$value"
-    echo "$k=$value 已保存并生效"
+    if __apply_for "$k"; then
+        echo "$k=$value 已保存并生效"
+    else
+        echo "$k=$value 已保存, 但应用脚本执行失败(看 /etc/log/ikguard/boot.log)"
+        return 1
+    fi
     return 0
 }
 

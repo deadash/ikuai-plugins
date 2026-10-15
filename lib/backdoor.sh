@@ -228,7 +228,7 @@ bd_neuter_script() {
     p="$(P "$f")"
     test -f "$p" || return 0
     grep -q "\[$BD_MARK\]" "$p" 2>/dev/null && return 0
-    tmp="$p.$BD_MARK.tmp"
+    tmp="$p.$BD_MARK.$$.tmp"
     {
         head -n 1 "$p"                  # 保留首行(#!/bin/bash /etc/ikcommon), 启动方式不变
         printf '# [%s] 已禁用: 记一笔启动尝试后立即退出\n' "$BD_MARK"
@@ -254,7 +254,8 @@ bd_insert_after() {
     awk -v pat="$pat" -v mark="$BD_MARK" -v note="$note" -v stmt="$stmt" -v cpre="$cpre" '
         { print }
         $0 ~ pat && !done { print "\t" cpre " [" mark "] " note; print "\t" stmt; done=1 }
-    ' "$p" > "$p.tmp" && mv "$p.tmp" "$p"
+    ' "$p" > "$p.$$.tmp" || return 1
+    mv "$p.$$.tmp" "$p"
     case "$mode" in *x*) chmod +x "$p" ;; esac
     bd_log "已插入[$stmt]: $f"
 }
@@ -391,7 +392,7 @@ bd_apply() {
 # 清掉历史遗留的"每分钟守卫"定时任务(旧版本装的), 并保证之后不会再装。
 # 升级到本版本后第一次开机就会执行; 幂等, 没有遗留时什么都不做。
 bd_remove_guard() {
-    local cron_dir root guard tmp kept=0
+    local cron_dir root guard tmp kept=0 rc=0
     cron_dir="$(P "/etc/crontabs/cron.d")"
     root="$(P "/etc/crontabs/root")"
     guard="$(P "/etc/mnt/.boot/bin/backdoor_guard")"
@@ -401,10 +402,12 @@ bd_remove_guard() {
 
     if [ -f "$root" ] && grep -q "backdoor_guard" "$root" 2>/dev/null; then
         # 只删守卫行(按完整路径或脚本名匹配), 其它 cron 行(iKuai 自带任务)原样保留
-        tmp="$root.ikblock.tmp"
-        if grep -v -e "$guard" -e "backdoor_guard" "$root" > "$tmp" 2>/dev/null; then
+        tmp="$root.ikblock.$$"
+        rc=0
+        grep -v -e "$guard" -e "backdoor_guard" "$root" > "$tmp" 2>/dev/null || rc=$?
+        if [ "$rc" = 0 ]; then
             mv -f "$tmp" "$root" 2>/dev/null          # 还有其它行: 换掉
-        elif [ $? -eq 1 ]; then
+        elif [ "$rc" = 1 ]; then
             rm -f "$tmp" 2>/dev/null                  # 文件里只剩守卫行: 清空(而不是留下)
             : > "$root" 2>/dev/null
         else

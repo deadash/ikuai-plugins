@@ -50,6 +50,38 @@ sg_flag_set() {
 sg_ipt()  { iptables -w "$@" 2>/dev/null; }
 sg_ipt6() { sg_has ip6tables || return 1; ip6tables -w "$@" 2>/dev/null; }
 
+# 串行化"改规则 + 改名单": 开机 07 与 Web 点击(或连点两次)并发时, 否则会出现重复跳转、
+# 重复 DROP、名单重复行、半截临时文件。各步本身都写成幂等的(先删净再插/先删旧行再追加),
+# 锁只是把"检测到插入"之间的窗口关掉; 机器上没有 flock 时也照常工作(退化为幂等写法)。
+SG_LOCK_FILE="/tmp/ikguard-sshguard.lock"
+sg_lock() {
+    SG_LOCK_HELD=0
+    if sg_has flock; then
+        exec 299>>"$SG_LOCK_FILE" 2>/dev/null || return 0
+        flock -w 5 299 2>/dev/null || return 0
+        SG_LOCK_HELD=1
+    fi
+    return 0
+}
+sg_unlock() {
+    [ "${SG_LOCK_HELD:-0}" = 1 ] && flock -u 299 2>/dev/null
+    SG_LOCK_HELD=0
+    return 0
+}
+
+# 让 CHAIN 在 INPUT 里最多只被跳转一次: 先删净再插一条(重复应用/并发后自动收敛回一条)
+sg_jump_unique() {
+    while sg_ipt -C INPUT -j "$1" 2>/dev/null; do
+        sg_ipt -D INPUT -j "$1" 2>/dev/null || break
+    done
+    sg_ipt -I INPUT 1 -j "$1" 2>/dev/null
+    while sg_ipt6 -C INPUT -j "$1" 2>/dev/null; do
+        sg_ipt6 -D INPUT -j "$1" 2>/dev/null || break
+    done
+    sg_ipt6 -I INPUT 1 -j "$1" 2>/dev/null
+    return 0
+}
+
 # ---------------------------------------------------------------- 读官方配置
 
 # 官方 SSH 端口(remote_control.sshd_port; 取不到就按 22)
@@ -88,24 +120,22 @@ sg_pub_on() {
     port="$(sg_ssh_port)"
     wan_arg="$(sg_wan_arg)"
 
+    sg_lock
     sg_ipt -F "$SG_WAN_CHAIN" 2>/dev/null
     sg_ipt -N "$SG_WAN_CHAIN" 2>/dev/null
     # shellcheck disable=SC2086  # $wan_arg 需要按空格拆成多个参数
     sg_ipt -A "$SG_WAN_CHAIN" -p tcp $wan_arg -m conntrack --ctstate NEW \
         --dport "$port" -j DROP
-    sg_ipt -C INPUT -j "$SG_WAN_CHAIN" 2>/dev/null || sg_ipt -I INPUT 1 -j "$SG_WAN_CHAIN"
-
-    if sg_has ip6tables; then
-        sg_ipt6 -F "$SG_WAN_CHAIN" 2>/dev/null
-        sg_ipt6 -N "$SG_WAN_CHAIN" 2>/dev/null
-        # shellcheck disable=SC2086
-        sg_ipt6 -A "$SG_WAN_CHAIN" -p tcp $wan_arg -m conntrack --ctstate NEW \
-            --dport "$port" -j DROP
-        sg_ipt6 -C INPUT -j "$SG_WAN_CHAIN" 2>/dev/null || sg_ipt6 -I INPUT 1 -j "$SG_WAN_CHAIN"
-    fi
+    sg_ipt6 -F "$SG_WAN_CHAIN" 2>/dev/null
+    sg_ipt6 -N "$SG_WAN_CHAIN" 2>/dev/null
+    # shellcheck disable=SC2086
+    sg_ipt6 -A "$SG_WAN_CHAIN" -p tcp $wan_arg -m conntrack --ctstate NEW \
+        --dport "$port" -j DROP
+    sg_jump_unique "$SG_WAN_CHAIN"
 
     mkdir -p "$(dirname "$(P "$SG_PUB_MARK")")" 2>/dev/null
     : > "$(P "$SG_PUB_MARK")" 2>/dev/null
+    sg_unlock
     log "[ssh] 已封禁公网访问 SSH: 端口=$port, 公网网卡参数=[$wan_arg], 只拦新连接"
     return 0
 }
@@ -113,6 +143,7 @@ sg_pub_on() {
 # 撤销: 摘掉跳转 + 清链接删链(没有生效过就什么都不碰)
 sg_pub_off() {
     [ -f "$(P "$SG_PUB_MARK")" ] || return 0
+    sg_lock
     while sg_ipt -C INPUT -j "$SG_WAN_CHAIN" 2>/dev/null; do
         sg_ipt -D INPUT -j "$SG_WAN_CHAIN" 2>/dev/null || break
     done
@@ -124,6 +155,7 @@ sg_pub_off() {
     sg_ipt6 -F "$SG_WAN_CHAIN" 2>/dev/null
     sg_ipt6 -X "$SG_WAN_CHAIN" 2>/dev/null
     rm -f "$(P "$SG_PUB_MARK")" 2>/dev/null
+    sg_unlock
     log "[ssh] 已解除公网访问 SSH 的封禁"
     return 0
 }
@@ -139,8 +171,8 @@ sg_pub_state() {
 
 sg_ban_chain_init() {
     sg_ipt -N "$SG_BAN_CHAIN" 2>/dev/null
-    sg_ipt -C INPUT -j "$SG_BAN_CHAIN" 2>/dev/null || sg_ipt -I INPUT 1 -j "$SG_BAN_CHAIN"
-    sg_has ip6tables && sg_ipt6 -N "$SG_BAN_CHAIN" 2>/dev/null
+    sg_ipt6 -N "$SG_BAN_CHAIN" 2>/dev/null
+    sg_jump_unique "$SG_BAN_CHAIN"
     return 0
 }
 
@@ -163,8 +195,10 @@ sg_is_v6() { case "$1" in *:*) return 0 ;; *) return 1 ;; esac; }
 sg_ip_norm() {
     local ip="$1"
     case "$ip" in
-        ''|*:*:*:*) printf '%s' "$ip" ;;
-        *:*)        printf '%s' "${ip%%:*}" ;;
+        '')         return 0 ;;
+        *::*)       printf '%s' "$ip" ;;          # IPv6 压缩写法(::1/fe80::1) —— 不能按 "IP:端口" 截
+        *:*:*:*)    printf '%s' "$ip" ;;          # IPv6 完整写法
+        *:*)        printf '%s' "${ip%%:*}" ;;    # IPv4:端口
         *)          printf '%s' "$ip" ;;
     esac
 }
@@ -178,12 +212,21 @@ sg_ban_present() {
 }
 
 sg_ban_rule_add() {
-    sg_ban_present "$1" && return 0
+    local dport
+    dport="$(sg_ssh_port)"
+    # 先删净再插一条: 并发/重复点"封禁"也只会留一条规则
     if sg_is_v6 "$1"; then
-        sg_ipt6 -I "$SG_BAN_CHAIN" 1 -s "$1" -p tcp --dport "$(sg_ssh_port)" -j DROP
+        while sg_ipt6 -C "$SG_BAN_CHAIN" -s "$1" -p tcp --dport "$dport" -j DROP 2>/dev/null; do
+            sg_ipt6 -D "$SG_BAN_CHAIN" -s "$1" -p tcp --dport "$dport" -j DROP 2>/dev/null || break
+        done
+        sg_ipt6 -I "$SG_BAN_CHAIN" 1 -s "$1" -p tcp --dport "$dport" -j DROP 2>/dev/null
     else
-        sg_ipt -I "$SG_BAN_CHAIN" 1 -s "$1" -p tcp --dport "$(sg_ssh_port)" -j DROP
+        while sg_ipt -C "$SG_BAN_CHAIN" -s "$1" -p tcp --dport "$dport" -j DROP 2>/dev/null; do
+            sg_ipt -D "$SG_BAN_CHAIN" -s "$1" -p tcp --dport "$dport" -j DROP 2>/dev/null || break
+        done
+        sg_ipt -I "$SG_BAN_CHAIN" 1 -s "$1" -p tcp --dport "$dport" -j DROP 2>/dev/null
     fi
+    return 0
 }
 
 sg_ban_rule_del() {
@@ -199,13 +242,12 @@ sg_ban_add() {
     local ip note="${2:-手工封禁}"
     ip="$(sg_ip_norm "$1")"
     sg_ip_ok "$ip" || { echo "IP 格式不对: $1"; return 1; }
+    sg_lock
     sg_ban_chain_init
     sg_ban_rule_add "$ip"
-    if ! grep -q "^$ip|" "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null; then
-        mkdir -p "$(dirname "$(P "$SG_SSH_BAN_LIST")")" 2>/dev/null
-        printf '%s|%s|%s\n' "$ip" "$(date '+%Y-%m-%d %H:%M:%S')" "$note" \
-            >> "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null
-    fi
+    mkdir -p "$(dirname "$(P "$SG_SSH_BAN_LIST")")" 2>/dev/null
+    sg_ban_list_put "$ip" "$note"
+    sg_unlock
     log "[ssh] 已封禁来源 IP: $ip ($note)"
     printf '%s' "$ip"
 }
@@ -215,12 +257,11 @@ sg_ban_del() {
     local ip
     ip="$(sg_ip_norm "$1")"
     sg_ip_ok "$ip" || { echo "IP 格式不对: $1"; return 1; }
+    sg_lock
     sg_ban_rule_del "$ip"
-    if [ -f "$(P "$SG_SSH_BAN_LIST")" ]; then
-        grep -v "^$ip|" "$(P "$SG_SSH_BAN_LIST")" > "$(P "$SG_SSH_BAN_LIST").tmp" 2>/dev/null
-        mv "$(P "$SG_SSH_BAN_LIST").tmp" "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null
-    fi
+    sg_ban_list_rm "$ip"
     sg_ban_cleanup_if_empty
+    sg_unlock
     log "[ssh] 已解除封禁: $ip"
     printf '%s' "$ip"
 }
@@ -244,12 +285,14 @@ sg_ban_cleanup_if_empty() {
 # 清空名单 + 拆链
 sg_ban_clear() {
     local n=0
+    sg_lock
     if [ -f "$(P "$SG_SSH_BAN_LIST")" ]; then
-        n="$(grep -c . "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null)"
+        n="$(sg_ban_count_file)"
         : > "$(P "$SG_SSH_BAN_LIST")" 2>/dev/null
     fi
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
     sg_ban_cleanup_if_empty
+    sg_unlock
     log "[ssh] 已清空封禁名单($n 条)"
     printf '%s' "$n"
 }
@@ -260,6 +303,30 @@ sg_ban_count() {
     n="$(sg_ipt -S "$SG_BAN_CHAIN" 2>/dev/null | grep -c -- "-j DROP")"
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
     printf '%s' "$n"
+}
+
+# 名单写/删: 先删旧行再追加(幂等), 临时文件带 $$ (并发时不同名, 不会互相覆盖出半截文件)
+sg_ban_list_put() {
+    local ip="$1" note="$2" list tmp
+    list="$(P "$SG_SSH_BAN_LIST")"
+    tmp="$list.$$"
+    if [ -f "$list" ]; then
+        # 注意: grep -v 过滤到"一行不剩"时退出码是 1 —— 不能写成 `&& mv`, 否则旧行换了不掉、
+        # 再追加就长出重复行(离线测试就是这么抓到的)
+        grep -v "^$ip|" "$list" > "$tmp" 2>/dev/null || : > "$tmp"
+        mv "$tmp" "$list" 2>/dev/null
+    fi
+    printf '%s|%s|%s\n' "$ip" "$(date '+%Y-%m-%d %H:%M:%S')" "$note" >> "$list" 2>/dev/null
+    return 0
+}
+
+sg_ban_list_rm() {
+    local ip="$1" list
+    list="$(P "$SG_SSH_BAN_LIST")"
+    [ -f "$list" ] || return 0
+    grep -v "^$ip|" "$list" > "$list.$$" 2>/dev/null || : > "$list.$$"
+    mv "$list.$$" "$list" 2>/dev/null
+    return 0
 }
 
 # 名单文件里的条数(log() 会往 stdout 打日志, 所以不能靠函数返回值取条数)

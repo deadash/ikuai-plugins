@@ -450,7 +450,7 @@ plugin_install() {
         if test "$(cd "$src" && pwd)" != "$dest"; then
             rm -rf "$dest"
             mkdir -p "$dest"
-            cp -rf "$src"/. "$dest"/
+            cp -rf "$src"/. "$dest"/ || { plugin_log "复制失败: $src"; rm -rf "$dest"; return 1; }
         fi
     else
         case "$src" in
@@ -500,7 +500,7 @@ plugin_install() {
         fi
         rm -rf "$dest"
         mkdir -p "$(dirname "$dest")"
-        mv "$tmp" "$dest"
+        mv "$tmp" "$dest" || { plugin_log "移动失败: $tmp -> $dest"; rm -rf "$tmp"; return 1; }
         if [ "$keep_data" = "1" ]; then
             rm -rf "$dest/data"
             if mv "$bak/data" "$dest/data" 2>/dev/null; then

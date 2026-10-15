@@ -22,14 +22,15 @@ execute_scripts()
 
     test -d "$boot_path/scripts" || return 0
 
-    find "$boot_path/scripts" -maxdepth 1 -type f -name "[0-9][0-9]*" -print0 | \
-    sort -z -n | \
-    while IFS= read -r -d '' script; do
+    # 用通配符按文件名排序(字典序 = 数字序): 不依赖 find -print0 / sort -z 这些 busybox 可能
+    # 没编进去的选项, 顺序也是确定的(原来 sort -n 拿整条路径比较, 数值其实都相同, 只靠实现细节)
+    for script in "$boot_path"/scripts/[0-9][0-9]*; do
+        [ -f "$script" ] || continue
         # 兼容丢失可执行位的情况(Windows/zip 拷贝后常见)
-        if test -x "$script"; then
-            "$script"
+        if [ -x "$script" ]; then
+            "$script" || echo "[boot] 脚本执行失败: $(basename "$script")"
         else
-            bash "$script"
+            bash "$script" || echo "[boot] 脚本执行失败: $(basename "$script")"
         fi
     done
     return 0

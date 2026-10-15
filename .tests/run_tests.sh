@@ -190,11 +190,22 @@ assert_shim "iptables -w -A IKG_SSH_WAN -p tcp -m ifaces --ifaces wan*,vwan*,ads
                                                              "公网封禁规则(官方网卡 + 官方端口 + 仅新连接)"
 assert_shim "iptables -w -I INPUT 1 -j IKG_SSH_WAN"          "封禁链挂到 INPUT 最前"
 
-# ④ 幂等: 再点一次不重复插跳转(锚定行首: ip6tables 的同一行不算)
+# ④ 幂等 + 并发: 重复点(以及两个进程同时点)之后, 规则表里 INPUT 只能有一条跳转。
+#    实现是"先删净再插一条"+flock 串行化, 所以这里断言**最终状态**, 而不是调用了几次。
+n_jump() { grep -c '^R|INPUT|-j IKG_SSH_WAN$' "$SHIM_LOG.iptables" 2>/dev/null; }
 IK_SYSROOT="$MOCK" bash "$SGBIN" on >/dev/null 2>&1
-case "$(grep -c '^iptables -w -I INPUT 1 -j IKG_SSH_WAN$' "$SHIM_LOG" 2>/dev/null)" in
-    1) ok "重复应用不会重复插跳转(幂等)" ;;
-    *) bad "重复应用不会重复插跳转(幂等)" ;;
+case "$(n_jump)" in
+    1) ok "重复应用后 INPUT 跳转仍只有一条(幂等)" ;;
+    *) bad "重复应用后 INPUT 跳转仍只有一条(幂等)" ;;
+esac
+# 两个进程同时应用(测试替身自己没锁, 所以并发后可能留下重复 —— 再应用一次必须收敛)
+( IK_SYSROOT="$MOCK" bash "$SGBIN" on >/dev/null 2>&1 &
+  IK_SYSROOT="$MOCK" bash "$SGBIN" on >/dev/null 2>&1 &
+  wait ) 2>/dev/null
+IK_SYSROOT="$MOCK" bash "$SGBIN" on >/dev/null 2>&1
+case "$(n_jump)" in
+    1) ok "并发应用后再次应用能收敛成一条(幂等设计兜住并发)" ;;
+    *) bad "并发应用后再次应用能收敛成一条(幂等设计兜住并发)" ;;
 esac
 
 # ⑤ 关闭: 撤销干净, 自检同步显示
@@ -212,6 +223,16 @@ IK_SYSROOT="$MOCK" bash "$SGBIN" ban 203.0.113.9 "SSH 爆破" >/dev/null 2>&1
 assert_shim "iptables -w -I IKG_SRC_BAN 1 -s 203.0.113.9 -p tcp --dport 2222 -j DROP" \
                                                              "封禁只挡该 IP 的 SSH 端口"
 assert_grep "$SG_LIST" '^203.0.113.9|'                        "封禁名单落到持久盘"
+# 同一 IP 再封一次: 名单与规则都不许长出第二份
+IK_SYSROOT="$MOCK" bash "$SGBIN" ban 203.0.113.9 "再封一次" >/dev/null 2>&1
+case "$(grep -c '^203.0.113.9|' "$SG_LIST")" in
+    1) ok "同一 IP 重复封禁不写重复名单行" ;;
+    *) bad "同一 IP 重复封禁不写重复名单行" ;;
+esac
+case "$(grep -c '^R|IKG_SRC_BAN|-s 203.0.113.9 ' "$SHIM_LOG.iptables")" in
+    1) ok "同一 IP 重复封禁只有一条 DROP 规则" ;;
+    *) bad "同一 IP 重复封禁只有一条 DROP 规则" ;;
+esac
 
 # ⑦ 重启后名单要重放(用户点了封禁就该一直有效), 而开关关着时公网封禁不会自己回来
 : > "$SHIM_LOG"; : > "$SHIM_LOG.iptables"; : > "$SHIM_LOG.ip6tables"
@@ -247,6 +268,13 @@ assert_grep     "$MOCK/tmp/.sshlog" "登录失败(口令错误)"      "SSH 日�
 assert_grep     "$MOCK/tmp/.sshlog" "注销断开"                "SSH 日志: 注销"
 assert_grep     "$MOCK/tmp/.sshlog" "203.0.113.9"             "SSH 日志: 解析出来源 IP(去掉端口)"
 assert_not_grep "$MOCK/tmp/.sshlog" "与 SSH 无关"             "SSH 日志: 不掺入非 dropbear 的系统日志"
+
+# 取值函数只能吐一个值: grep -c 无匹配时自己已经打印 0(退出码 1), 再 `|| printf 0` 就是 "0\n0"
+v="$(IK_SYSROOT="$MOCK" bash -c '. "'"$MOCK"'/etc/mnt/.boot/lib/common.sh"; . "'"$MOCK"'/etc/mnt/.boot/lib/audit.sh"; au_count /nonexistent-file ""' 2>/dev/null)"
+case "$v" in
+    0) ok "au_count 无匹配时只输出一个 0(不是 \"0\n0\")" ;;
+    *) bad "au_count 无匹配时只输出一个 0(实际: $(printf '%s' "$v" | tr '\n' '/'))" ;;
+esac
 
 section "6. 定时任务: 不装守卫, 且清掉旧版遗留"
 assert_noexist  "$MOCK/etc/crontabs/cron.d/ikblock_guard"    "未安装每分钟守卫 cron"

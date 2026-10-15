@@ -396,7 +396,9 @@ dd if="$WORK/log.img" of="$DEV" bs=1M seek=$((p5_start / 2048)) conv=notrunc 2>/
 sync
 
 log "回读校验 ..."
-[ "$(img_size "$WORK/mnt.img")" = "0" ] && fail_after_write "镜像大小异常"
+case "$(img_size "$WORK/mnt.img")" in
+    ''|0|*[!0-9]*) fail_after_write "镜像大小异常" ;;
+esac
 verify_written "$WORK/mnt.img" "$mnt_start" 0 \
     || fail_after_write "/etc/mnt 新位置回读不一致"
 log "  /etc/mnt 回读一致"

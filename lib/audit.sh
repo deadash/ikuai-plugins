@@ -73,13 +73,17 @@ au_event() {
 
 # 统计某类事件条数(按事件名匹配 —— 避免把旧版本留下的其它格式内容也算进来)
 au_count() {
-    local f="$1" pat="$2"
+    local f="$1" pat="$2" n
     [ -f "$f" ] || { printf '0'; return 0; }
+    # 注意: grep -c 无匹配时**自己就会打印 0**(退出码 1), 再 `|| printf 0` 会打出两行 "0\n0",
+    # 报告/接口里就会出现两个值。这里先取输出再收敛成纯数字。
     if [ -n "$pat" ]; then
-        grep -cE "$pat" "$f" 2>/dev/null || printf '0'
+        n="$(grep -cE "$pat" "$f" 2>/dev/null)"
     else
-        grep -c . "$f" 2>/dev/null || printf '0'
+        n="$(grep -c . "$f" 2>/dev/null)"
     fi
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
 }
 
 # IP 是否属于内网/组播(这些不出现在"对外连接"档案里)
@@ -230,7 +234,7 @@ au_collect_cleanup() {
 
 # 采集主循环(常驻; 由 au_collect_start 后台拉起)
 au_collect() {
-    local line holder
+    local line holder n=0
     au_init
     au_rotate
 
@@ -250,17 +254,27 @@ au_collect() {
 
     au_event INFO "collect.begin" "被动采集启动(conntrack 事件)"
 
+    command -v conntrack >/dev/null 2>&1 || {
+        au_event WARN "collect.ct" "设备上没有 conntrack, 采集器直接退出(不空转)"
+        rm -f "$AU_COLLECT_PIDFILE" 2>/dev/null
+        return 1
+    }
     au_ct_spawn
 
     trap 'au_collect_cleanup' INT TERM EXIT
     exec 9<> "$AU_FIFO"
 
+    # 维护既要能被"60 秒没事件"触发, 也要能被"事件很多"触发 —— 否则流量一直不断时 read 永不
+    # 超时, au_rotate 永远轮不到, 日志会无上限长下去(撑爆 /etc/log)
     while :; do
         if read -r -t 60 -u 9 line; then
             case "$line" in
                 *'[NEW]'*|*'[DESTROY]'*|*'[UPDATE]'*) au_ct_event "$line" ;;
             esac
+            n=$((n + 1))
+            [ $((n % 500)) -eq 0 ] && au_collect_maintain
         else
+            n=0
             au_collect_maintain
         fi
     done
@@ -311,7 +325,6 @@ au_collect_stop() {
         c="$( { tr '\0' ' ' < "$p"; } 2>/dev/null )"
         case "$c" in
             *"conntrack -E"*|*"ikaudit collect "*)
-                kill -9 "${p#/proc/}" 2>/dev/null
                 kill -9 "$(echo "${p#/proc/}" | cut -d/ -f1)" 2>/dev/null
                 ;;
         esac
@@ -362,12 +375,23 @@ au_report() {
 # 按 "bin/ikaudit" 匹配: 真机遗留行是 /etc/mnt/.boot/bin/ikaudit ...,
 # 不会误伤 /usr/ikuai/script/ikaudit_update.sh(不含 bin/ikaudit)
 au_remove_cron() {
-    local cron_dir root
+    local cron_dir root tmp rc
     cron_dir="$(P /etc/crontabs/cron.d)"
     root="$(P /etc/crontabs/root)"
     if [ -f "$root" ]; then
-        grep -v "bin/ikaudit" "$root" > "$root.ikguard.tmp" 2>/dev/null || :
-        mv -f "$root.ikguard.tmp" "$root" 2>/dev/null
+        # 与 bd_remove_guard 同一套写法: grep 成功才换; 只剩本行则清空; grep 本身出错就原样保留
+        # (原来写成 `grep ... || :` 后无条件 mv, grep 出错时会用半截文件覆盖掉整个 crontab)
+        tmp="$root.ikguard.$$"
+        rc=0
+        grep -v "bin/ikaudit" "$root" > "$tmp" 2>/dev/null || rc=$?
+        if [ "$rc" = 0 ]; then
+            mv -f "$tmp" "$root" 2>/dev/null
+        elif [ "$rc" = 1 ]; then
+            rm -f "$tmp" 2>/dev/null
+            : > "$root" 2>/dev/null
+        else
+            rm -f "$tmp" 2>/dev/null
+        fi
     fi
     rm -f "$cron_dir/ikguard_audit" "$cron_dir/ikguard_report" "$cron_dir/ikguard_probe" 2>/dev/null
     return 0
