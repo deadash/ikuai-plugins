@@ -2,401 +2,312 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>插件在线升级</title>
-<style>
-  :root{
-    --bg:#f4f6fb; --card:#fff; --line:#e6eaf2; --txt:#1f2733; --sub:#7c8798;
-    --pri:#2f6fed; --ok:#12a150; --warn:#e8a33d; --err:#e04b4b;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--txt);
-       font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
-  .wrap{max-width:1060px;margin:0 auto;padding:18px}
-  .hd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-  .hd h1{font-size:19px;margin:0;font-weight:600}
-  .badge{font-size:12px;padding:2px 9px;border-radius:10px;background:#eef2fa;color:var(--sub)}
-  .badge.on{background:#e6f7ee;color:var(--ok)}
-  .badge.off{background:#f2f4f8;color:var(--sub)}
-  .badge.warn{background:#fdf3e3;color:#a16a12}
-  .grow{flex:1}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
-  .card h2{font-size:14px;margin:0 0 10px;font-weight:600;color:#39445a}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  button{font:inherit;padding:7px 14px;border-radius:8px;border:1px solid var(--line);
-         background:#fff;color:var(--txt);cursor:pointer}
-  button:hover{border-color:#c8d4ea}
-  button.pri{background:var(--pri);border-color:var(--pri);color:#fff}
-  button.pri:hover{background:#2560d8}
-  button.danger{color:var(--err)}
-  button:disabled{opacity:.55;cursor:not-allowed}
-  input[type=text]{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:8px;min-width:230px}
-  input[type=text]:focus{outline:none;border-color:var(--pri)}
-  .sw{position:relative;width:46px;height:26px;border-radius:14px;background:#ccd4e2;cursor:pointer;transition:.2s;flex:0 0 auto}
-  .sw.on{background:var(--ok)}
-  .sw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.2s}
-  .sw.on i{left:23px}
-  table{width:100%;border-collapse:collapse;margin-top:10px}
-  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}
-  th{font-size:12px;color:var(--sub);font-weight:500}
-  td.mono,.mono{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
-  .tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:10px;white-space:nowrap}
-  .tag.new{background:#e8f0fe;color:#2f6fed}
-  .tag.up{background:#fdf3e3;color:#a16a12}
-  .tag.cur{background:#e6f7ee;color:#0d7f41}
-  .tag.same{background:#f2f4f8;color:#7c8798}
-  .tag.err{background:#fdeaea;color:#b33030}
-  pre{background:#1d2333;color:#cdd6e6;border-radius:10px;padding:12px;overflow:auto;max-height:260px;
-      font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;margin:0;white-space:pre-wrap}
-  .muted{color:var(--sub);font-size:12px}
-  .msg{font-size:13px;padding:8px 12px;border-radius:8px;display:none;margin-bottom:10px;white-space:pre-wrap}
-  .msg.show{display:block}
-  .msg.ok{background:#e6f7ee;color:#0d7f41}
-  .msg.err{background:#fdeaea;color:#b33030}
-  .sub{font-size:12px;color:var(--sub);margin-top:4px}
-  details summary{cursor:pointer;color:var(--sub);font-size:12px}
-  .notes{background:#fafbfe;border:1px solid var(--line);border-radius:8px;padding:8px 10px;
-         margin-top:6px;font-size:12px;color:#4a5568;white-space:pre-wrap;max-height:200px;overflow:auto}
-</style>
+<title>插件在线升级 ikupd</title>
+<!-- 界面用插件统一 UI 套件 ikui；资源由基础包提供，插件不带（见 references/ui.md） -->
+<link rel="stylesheet" href="./ikui.css">
 </head>
 <body>
-<div class="wrap">
-  <div class="hd">
-    <h1>插件在线升级</h1>
-    <span id="bProxy" class="badge">—</span>
-    <span id="bStaged" class="badge">—</span>
-    <div class="grow"></div>
-    <button id="btnCheck" class="pri">检查更新</button>
-    <button id="btnRefresh">刷新</button>
-  </div>
 
-  <div id="msg" class="msg"></div>
+<script type="text/x-template" id="tpl">
+<ik-page title="插件在线升级" tag="ikupd" :sub="msg">
+  <template #actions>
+    <el-tag :type="proxyOn ? 'success' : 'info'" size="small" effect="plain">
+      {{ proxyOn ? '代理已启用' : '直连' }}
+    </el-tag>
+    <el-tag :type="staged.count > 0 ? 'warning' : 'info'" size="small" effect="plain">
+      暂存 {{ staged.count || 0 }} 个包{{ staged.size > 0 ? '（' + fmtSize(staged.size) + '）' : '' }}
+    </el-tag>
+    <el-button size="small" type="primary" :loading="busy" @click="act('check', {}, '检查完成')">检查更新</el-button>
+    <el-button size="small" @click="load">刷新</el-button>
+  </template>
 
-  <div class="card">
-    <h2>代理</h2>
-    <div class="row">
-      <div id="sw" class="sw" title="开启/关闭代理"><i></i></div>
-      <span id="swLabel" class="muted">未启用</span>
-      <input type="text" id="inProxy" placeholder="socks5h://192.168.1.100:1080 或 http://192.168.1.100:1080">
-      <button id="btnProxySave">保存地址</button>
-      <button id="btnTokenSave">保存 Token</button>
-      <input type="text" id="inToken" placeholder="GitHub Token(可选, 避免匿名限流 60 次/小时)">
+  <ik-sec title="代理">
+    <div class="ik-toolbar">
+      <el-switch v-model="proxyOn" @change="toggleProxy"></el-switch>
+      <span class="ik-mut" style="font-size:12px">
+        {{ proxyOn ? ('已启用 ' + (proxy.url || '(未填地址)')) : '未启用（直连）' }}
+      </span>
     </div>
-    <p class="muted" style="margin:8px 0 0">
-      启用后 API 请求与插件包下载都走该地址; 关闭则直连。
-    </p>
-  </div>
-
-  <div class="card">
-    <h2>仓库列表</h2>
-    <div class="row">
-      <input type="text" id="inRepo" placeholder="https://github.com/deadash/ikuai-plugins/releases">
-      <input type="text" id="inDesc" placeholder="说明(可空)">
-      <button id="btnRepoAdd" class="pri">添加</button>
+    <div class="ik-toolbar" style="margin-top:10px">
+      <el-input v-model="proxy.url" style="width:360px"
+                placeholder="socks5h://192.168.1.100:1080 或 http://192.168.1.100:1080"></el-input>
+      <el-button @click="saveProxyUrl">保存地址</el-button>
+      <el-input v-model="proxy.token" style="width:320px" :placeholder="tokenPlaceholder"></el-input>
+      <el-button @click="saveToken">保存 Token</el-button>
     </div>
-    <p class="muted" style="margin:8px 0 0">
-      只识别 github.com/用户/仓库; 写成 .../releases 取最新版, 写成 .../releases/tag/&lt;标签&gt; 取指定版本。
-      地址里不能带 <code>?</code> <code>&amp;</code> <code>=</code> 等字符(设备的 Web 接口会拒绝)。
-    </p>
-    <table>
-      <thead><tr><th style="width:44%">仓库</th><th style="width:22%">最新版本</th><th>操作</th></tr></thead>
-      <tbody id="tbRepos"></tbody>
-    </table>
-  </div>
+    <p class="ik-tip">启用后 API 请求与插件包下载都走该地址；关闭则直连。</p>
+  </ik-sec>
 
-  <div class="card">
-    <h2>可用更新</h2>
-    <table>
-      <thead><tr>
-        <th style="width:20%">插件</th>
-        <th style="width:14%">远端版本</th>
-        <th style="width:12%">本地版本</th>
-        <th style="width:10%">状态</th>
-        <th style="width:10%">大小</th>
-        <th>sha256</th>
-        <th style="width:16%">操作</th>
-      </tr></thead>
-      <tbody id="tbAssets"></tbody>
-    </table>
-    <p class="muted" style="margin:10px 0 0">
-      只列出 Release 里的 <code>.zip</code> 资源(自动排除 GitHub 生成的 Source code 包);
-      插件名按文件名前缀匹配(<code>插件名-v版本-plugin.zip</code>);
+  <ik-sec title="仓库列表">
+    <div class="ik-toolbar">
+      <el-input v-model="newRepo.url" style="width:380px"
+                placeholder="https://github.com/deadash/ikuai-plugins/releases"></el-input>
+      <el-input v-model="newRepo.desc" style="width:200px" placeholder="说明(可空)"></el-input>
+      <el-button type="primary" @click="addRepo">添加</el-button>
+    </div>
+    <p class="ik-tip">
+      只识别 github.com/用户/仓库；写成 <code class="ik-code">.../releases</code> 取最新版，
+      写成 <code class="ik-code">.../releases/tag/&lt;标签&gt;</code> 取指定版本。
+      地址里不能带 <code class="ik-code">?</code> <code class="ik-code">&amp;</code>
+      <code class="ik-code">=</code> 等字符（设备的 Web 接口会拒绝）。
+    </p>
+    <el-table :data="repos" border size="small" style="width:100%">
+      <el-table-column label="仓库" min-width="320">
+        <template #default="{ row }">
+          <div>{{ row.url }}</div>
+          <div class="ik-mut" style="font-size:12px">{{ row.desc || '(无说明)' }}</div>
+          <el-collapse v-if="notesOf(row.slug)" style="margin-top:4px">
+            <el-collapse-item title="发布说明" :name="row.slug">
+              <pre class="ik-pre" style="max-height:200px">{{ notesOf(row.slug) }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+        </template>
+      </el-table-column>
+      <el-table-column label="最新版本" min-width="180">
+        <template #default="{ row }">
+          <el-tag v-if="row.error" type="danger" size="small" effect="plain">{{ shortErr(row.error) }}</el-tag>
+          <span v-else-if="row.tag" style="font-family:var(--ik-mono)">{{ row.tag }}</span>
+          <span v-else class="ik-mut">未检查</span>
+          <div class="ik-mut" style="font-size:12px">
+            {{ row.when ? fmtWhen(row.when) : '' }}{{ row.at ? ' · 检查于 ' + row.at : '' }}
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="90">
+        <template #default="{ row }">
+          <el-button size="small" type="danger" plain @click="delRepo(row)">删除</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+  </ik-sec>
+
+  <ik-sec title="可用更新">
+    <el-table :data="assets" border size="small" style="width:100%" row-key="name">
+      <el-table-column type="expand">
+        <template #default="{ row }">
+          <div v-if="row.downloaded" style="font-size:12px;line-height:1.9">
+            包内 Release: plugin={{ row.pkg_plugin || '-' }} version={{ row.pkg_version || '-' }}
+            <span v-if="row.pkg_comment"> comment={{ row.pkg_comment }}</span><br>
+            sha256 校验通过 · 下载于 {{ row.pkg_time || '-' }}
+            <span v-if="row.pkg_manifest === '1'"> · 包内含 MANIFEST</span>
+            <div v-if="row.note" class="ik-err">{{ row.note }}</div>
+          </div>
+          <div v-else style="font-size:12px;line-height:1.9">
+            仓库: {{ row.repo }}
+            <div v-if="row.note" class="ik-warn">{{ row.note }}</div>
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="插件" min-width="200">
+        <template #default="{ row }">
+          <span style="font-family:var(--ik-mono)">{{ row.plugin }}</span>
+          <div class="ik-mut" style="font-size:12px">{{ row.name }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="远端版本" width="110">
+        <template #default="{ row }">{{ row.remote_ver || '-' }}</template>
+      </el-table-column>
+      <el-table-column label="本地版本" width="110">
+        <template #default="{ row }">{{ row.local_ver || '未安装' }}</template>
+      </el-table-column>
+      <el-table-column label="状态" width="110">
+        <template #default="{ row }">
+          <el-tag :type="stateType(row.state)" size="small" effect="plain">{{ stateText(row.state) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="大小" width="100">
+        <template #default="{ row }">{{ fmtSize(row.size) }}</template>
+      </el-table-column>
+      <el-table-column label="sha256" width="150">
+        <template #default="{ row }">
+          <span style="font-family:var(--ik-mono);font-size:12px">
+            {{ row.sha256 ? row.sha256.slice(0, 16) : '资源未提供' }}
+          </span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="170">
+        <template #default="{ row }">
+          <template v-if="row.downloaded">
+            <el-button size="small" type="primary" @click="doInstall(row)">安装</el-button>
+            <el-button size="small" @click="doDiscard(row)">丢弃</el-button>
+          </template>
+          <el-button v-else size="small" type="primary" plain @click="doDownload(row)">
+            {{ (row.state === 'current' || row.state === 'same') ? '重新下载' : '下载' }}
+          </el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <p class="ik-tip">
+      只列出 Release 里的 <code class="ik-code">.zip</code> 资源（自动排除 GitHub 生成的 Source code 包）；
+      插件名按文件名前缀匹配（<code class="ik-code">插件名-v版本-plugin.zip</code>）；
       是否更新由资源自带的 sha256 与本地已安装包的 sha256 比对得出。
     </p>
-  </div>
+  </ik-sec>
 
-  <div class="card">
-    <details>
-      <summary>日志(最近 12 条)</summary>
-      <pre id="logs" style="margin-top:8px">—</pre>
-    </details>
-  </div>
-</div>
+  <el-collapse>
+    <el-collapse-item title="日志（最近 12 条）" name="log">
+      <pre class="ik-pre">{{ logs.length ? logs.join('\n') : '(暂无日志)' }}</pre>
+    </el-collapse-item>
+  </el-collapse>
+</ik-page>
+</script>
 
+<div id="app"></div>
+
+<script src="./ikui.js"></script>
 <script>
-const FN = 'ikupd';
-const $ = id => document.getElementById(id);
-
-function api(action, param){
-  return fetch('/Action/call', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({func_name:FN, action:action, param:param||{}})
-  }).then(r => r.json()).then(j => {
-    if (j.Result !== 30000) throw new Error(j.ErrMsg || ('错误码 ' + j.Result));
-    // 后端 show 用 json_append 追加在 "data" 键下, 这里拆一层
-    let d = j.Data === undefined ? {} : j.Data;
-    if (d && typeof d === 'object' && d.proxy === undefined && d.data !== undefined) d = d.data;
-    return d;
-  });
-}
-
-function msg(text, ok){
-  const m = $('msg');
-  m.textContent = text;
-  m.className = 'msg show ' + (ok ? 'ok' : 'err');
-  clearTimeout(msg._t);
-  msg._t = setTimeout(() => { m.className = 'msg'; }, 8000);
-}
-
-// 请求参数不能含空格: 说明里的空格编码成 +, 后端 tr '+' ' ' 还原
-function enc(s){ return String(s || '').replace(/ /g, '+'); }
-
-function fmtSize(n){
-  n = parseInt(n, 10) || 0;
-  if (n >= 1048576) return (n/1048576).toFixed(2) + ' MB';
-  if (n >= 1024) return (n/1024).toFixed(1) + ' KB';
-  return n + ' B';
-}
-
-function fmtWhen(s){
-  if (!s) return '';
-  return String(s).replace('T', ' ').replace('Z', '');
-}
-
-function esc(s){
-  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
-
-function stateTag(st){
-  if (st === 'new')    return '<span class="tag new">新插件</span>';
-  if (st === 'update') return '<span class="tag up">可更新</span>';
-  if (st === 'same')   return '<span class="tag same">版本相同</span>';
-  return '<span class="tag cur">已是最新</span>';
-}
-
-function renderRepos(d){
-  const tb = $('tbRepos');
-  tb.innerHTML = '';
-  const repos = d.repos || [];
-  if (!repos.length){
-    tb.innerHTML = '<tr><td colspan="3" class="muted">还没有仓库, 先在上面添加一个</td></tr>';
-    return;
-  }
-  repos.forEach(r => {
-    const tr = document.createElement('tr');
-    const errShort = r.error && r.error.length > 40 ? r.error.slice(0, 40) + '…' : r.error;
-    const ver = r.error
-      ? '<span class="tag err" title="' + esc(r.error) + '">' + esc(errShort) + '</span>'
-      : (r.tag ? '<span class="mono">' + esc(r.tag) + '</span>' : '<span class="muted">未检查</span>');
-    const notes = (d.release_notes || {})[r.slug];
-    const notesHtml = notes
-      ? '<details><summary>发布说明</summary><div class="notes">' + esc(notes) + '</div></details>'
-      : '';
-    tr.innerHTML =
-      '<td>' + esc(r.url) + '<div class="sub">' + esc(r.desc || '(无说明)') + '</div>' + notesHtml + '</td>' +
-      '<td>' + ver + '<div class="sub">' + (r.when ? esc(fmtWhen(r.when)) : '') +
-        (r.at ? '<br>检查于 ' + esc(r.at) : '') + '</div></td>' +
-      '<td><button class="danger" data-del="' + esc(r.url) + '">删除</button></td>';
-    tb.appendChild(tr);
-  });
-  tb.querySelectorAll('button[data-del]').forEach(b => {
-    b.onclick = () => {
-      const u = b.getAttribute('data-del');
-      if (!confirm('从列表中删除该仓库?\n\n' + u)) return;
-      act('repo_del', {url:u}, '已删除仓库');
+IKUI.mount('#app', {
+  tpl: '#tpl',
+  func: 'ikupd',
+  data: function () {
+    return {
+      msg: '', busy: false,
+      proxy: { enabled: '0', url: '', token: '' },
+      proxyOn: false, proxySaved: '',
+      staged: {}, repos: [], assets: [], logs: [], releaseNotes: {},
+      newRepo: { url: '', desc: '' },
+      tokenPlaceholder: 'GitHub Token(可选, 避免匿名限流 60 次/小时)'
     };
-  });
-}
+  },
+  computed: {
+    proxyOn_: function () { return String(this.proxy.enabled) === '1'; }
+  },
+  methods: {
+    fmtSize: function (n) {
+      n = parseInt(n, 10) || 0;
+      if (n >= 1048576) { return (n / 1048576).toFixed(2) + ' MB'; }
+      if (n >= 1024) { return (n / 1024).toFixed(1) + ' KB'; }
+      return n + ' B';
+    },
+    fmtWhen: function (s) { return s ? String(s).replace('T', ' ').replace('Z', '') : ''; },
+    shortErr: function (s) { return s && s.length > 40 ? s.slice(0, 40) + '…' : s; },
+    notesOf: function (slug) { return this.releaseNotes[slug] || ''; },
+    stateText: function (st) {
+      return st === 'new' ? '新插件' : (st === 'update' ? '可更新'
+        : (st === 'same' ? '版本相同' : '已是最新'));
+    },
+    stateType: function (st) {
+      return st === 'new' ? 'success' : (st === 'update' ? 'warning'
+        : (st === 'same' ? 'info' : ''));
+    },
+    load: function () {
+      var self = this;
+      return this.ik('show', { TYPE: 'data' }).then(function (d) {
+        if (d && d.error) { self.msg = d.error; return; }
+        /* 后端 show 用 json_append 追加在 "data" 键下, 这里拆一层 */
+        if (d && typeof d === 'object' && d.proxy === undefined && d.data !== undefined) { d = d.data; }
+        var p = d.proxy || {};
+        self.proxy = { enabled: String(p.enabled || '0'), url: p.url || '', token: '' };
+        self.proxySaved = p.url || '';
+        self.proxyOn = String(p.enabled) === '1';
+        self.tokenPlaceholder = String(p.token) === '1'
+          ? 'GitHub Token 已设置（留空保存=不改，填 - 保存=清除）'
+          : 'GitHub Token(可选, 避免匿名限流 60 次/小时)';
+        self.staged = d.staged || {};
+        self.repos = d.repos || [];
+        self.assets = d.assets || [];
+        self.logs = d.log || [];
+        self.releaseNotes = d.release_notes || {};
+      }).catch(function (e) { self.msg = '读取状态失败: ' + e.message; });
+    },
+    act: function (action, param, okText) {
+      var self = this;
+      this.busy = true;
+      return this.ik(action, param || {}).then(function () {
+        IKUI.toast(okText || '操作完成', 'success');
+        return self.load();
+      }).catch(function (e) {
+        IKUI.toast((okText ? okText + ' 失败: ' : '') + e.message, 'error');
+      }).then(function () { self.busy = false; });
+    },
+    /* 请求参数不能含空格: 说明里的空格编码成 +, 后端 tr '+' ' ' 还原 */
+    enc: function (s) { return String(s || '').replace(/ /g, '+'); },
 
-function renderAssets(d){
-  const tb = $('tbAssets');
-  tb.innerHTML = '';
-  const list = d.assets || [];
-  if (!list.length){
-    tb.innerHTML = '<tr><td colspan="7" class="muted">没有可用资源, 先点右上角「检查更新」</td></tr>';
-    return;
-  }
-  list.forEach(a => {
-    const tr = document.createElement('tr');
+    /* ---------------------------------------------------------- 代理 */
+    toggleProxy: function () {
+      var self = this;
+      var on = this.proxyOn;                 /* el-switch 已经把值改过来了 */
+      var url = String(this.proxy.url || '').trim();
+      var go = function () {
+        self.ik('seting', { key: 'proxy', value: on ? '1' : '0' }).then(function () {
+          IKUI.toast(on ? '已启用代理' : '已关闭代理', 'success');
+          self.load();
+        }).catch(function (e) { IKUI.toast(e.message, 'error'); });
+      };
+      /* 先保存地址再启用, 避免"启用了但没地址" */
+      if (on && url && url !== this.proxySaved) {
+        this.ik('seting', { key: 'proxy_url', value: url }).then(function () {
+          self.proxySaved = url;
+          go();
+        }).catch(function (e) { IKUI.toast('代理地址保存失败: ' + e.message, 'error'); });
+        return;
+      }
+      go();
+    },
+    saveProxyUrl: function () {
+      var self = this;
+      var url = String(this.proxy.url || '').trim();
+      this.proxySaved = url;
+      this.act('seting', { key: 'proxy_url', value: url }, '已保存代理地址');
+    },
+    saveToken: function () {
+      var v = String(this.proxy.token || '').trim();
+      if (v === '-' || v === '0') { v = ''; }   /* 输 - 表示清除 */
+      var self = this;
+      this.act('seting', { key: 'token', value: v }, v ? '已保存 Token' : '已清除 Token')
+        .then(function () { self.proxy.token = ''; });
+    },
 
-    let op, info;
-    if (a.downloaded){
-      info = '包内 Release: plugin=' + esc(a.pkg_plugin || '-') +
-             ' version=' + esc(a.pkg_version || '-') +
-             (a.pkg_comment ? ' comment=' + esc(a.pkg_comment) : '') +
-             '<br>sha256 校验通过 · 下载于 ' + esc(a.pkg_time || '-') +
-             (a.pkg_manifest === '1' ? ' · 包内含 MANIFEST' : '');
-      if (a.note) info += '<br><span style="color:#b33030">' + esc(a.note) + '</span>';
-      op = '<button class="pri" data-inst="1">安装</button> ' +
-           '<button data-disc="1">丢弃</button>';
-    } else {
-      info = '仓库: ' + esc(a.repo);
-      if (a.note) info += '<br><span style="color:#a16a12">' + esc(a.note) + '</span>';
-      op = '<button class="pri" data-dl="1">' +
-           (a.state === 'current' || a.state === 'same' ? '重新下载' : '下载') + '</button>';
+    /* ---------------------------------------------------------- 仓库 */
+    addRepo: function () {
+      var url = String(this.newRepo.url || '').trim();
+      if (!url) { IKUI.toast('请先填仓库地址', 'warning'); return; }
+      var self = this;
+      this.act('repo_add', { url: url, desc: this.enc(this.newRepo.desc) }, '已添加仓库')
+        .then(function () { self.newRepo.url = ''; self.newRepo.desc = ''; });
+    },
+    delRepo: function (row) {
+      var self = this;
+      IKUI.confirm('从列表中删除该仓库?\n\n' + row.url).then(function (yes) {
+        if (yes) { self.act('repo_del', { url: row.url }, '已删除仓库'); }
+      });
+    },
+
+    /* ---------------------------------------------------------- 下载 / 安装 */
+    /* 用户同意后才下载 */
+    doDownload: function (a) {
+      var self = this;
+      var lines = ['确认下载这个插件包?', '',
+        '插件: ' + a.plugin,
+        '远端版本: ' + (a.remote_ver || '-'),
+        '本地版本: ' + (a.local_ver || '未安装'),
+        '大小: ' + this.fmtSize(a.size),
+        'sha256: ' + (a.sha256 ? a.sha256.slice(0, 16) + '…' : '(资源未提供, 下载后仍会计算)'),
+        '', '下载完还需要再确认一次才会安装。'];
+      IKUI.confirm(lines.join('\n'), '下载确认').then(function (yes) {
+        if (yes) { self.act('download', { slug: a.slug, name: a.name }, '已下载并校验: ' + a.name); }
+      });
+    },
+    /* 用户同意后才安装 */
+    doInstall: function (a) {
+      var self = this;
+      var t = '确认安装 / 更新?\n\n插件: ' + (a.pkg_plugin || a.plugin) +
+        '\n版本: ' + (a.pkg_version || a.remote_ver || '-') +
+        '\n本地版本: ' + (a.local_ver || '未安装') +
+        '\n\n安装后会立刻生效(插件自身的配置与数据会保留)。';
+      IKUI.confirm(t, '安装确认').then(function (yes) {
+        if (yes) { self.act('install', { name: a.name }, '安装完成: ' + (a.pkg_plugin || a.plugin)); }
+      });
+    },
+    doDiscard: function (a) {
+      var self = this;
+      IKUI.confirm('丢弃已下载的包?\n\n' + a.name).then(function (yes) {
+        if (yes) { self.act('discard', { name: a.name }, '已丢弃: ' + a.name); }
+      });
     }
-
-    tr.innerHTML =
-      '<td><span class="mono">' + esc(a.plugin) + '</span>' +
-        '<div class="sub">' + esc(a.name) + '</div></td>' +
-      '<td>' + esc(a.remote_ver || '-') + '</td>' +
-      '<td>' + esc(a.local_ver || '未安装') + '</td>' +
-      '<td>' + stateTag(a.state) + '</td>' +
-      '<td>' + fmtSize(a.size) + '</td>' +
-      '<td class="mono">' + esc(a.sha256 ? a.sha256.slice(0, 16) : '资源未提供') + '</td>' +
-      '<td>' + op + '</td>';
-
-    // 附加一行展示包内 Release 信息
-    const tr2 = document.createElement('tr');
-    tr2.innerHTML = '<td colspan="7" class="sub" style="border-top:0;padding-top:0">' + info + '</td>';
-
-    const dl = tr.querySelector('button[data-dl]');
-    if (dl) dl.onclick = () => doDownload(a);
-    const ins = tr.querySelector('button[data-inst]');
-    if (ins) ins.onclick = () => doInstall(a);
-    const dis = tr.querySelector('button[data-disc]');
-    if (dis) dis.onclick = () => {
-      if (!confirm('丢弃已下载的包?\n\n' + a.name)) return;
-      act('discard', {name:a.name}, '已丢弃: ' + a.name);
-    };
-
-    tb.appendChild(tr);
-    tb.appendChild(tr2);
-  });
-}
-
-function render(d){
-  if (d.error){ msg(d.error, false); return; }
-  const p = d.proxy || {};
-  const on = String(p.enabled) === '1';
-  $('sw').className = 'sw' + (on ? ' on' : '');
-  $('swLabel').textContent = on ? ('已启用 ' + (p.url || '(未填地址)')) : '未启用(直连)';
-  $('bProxy').textContent = on ? '代理已启用' : '直连';
-  $('bProxy').className = 'badge ' + (on ? 'on' : 'off');
-  if (!$('inProxy').value) $('inProxy').value = p.url || '';
-  $('inToken').value = '';
-  $('inToken').placeholder = String(p.token) === '1'
-    ? 'GitHub Token 已设置(留空保存=不改, 填 - 保存=清除)'
-    : 'GitHub Token(可选, 避免匿名限流 60 次/小时)';
-
-  const st = d.staged || {};
-  $('bStaged').textContent = '暂存 ' + (st.count || 0) + ' 个包 ' +
-    ((st.size || 0) > 0 ? '(' + fmtSize(st.size) + ')' : '');
-  $('bStaged').className = 'badge ' + ((st.count || 0) > 0 ? 'warn' : 'off');
-
-  renderRepos(d);
-  renderAssets(d);
-  const logs = d.log || [];
-  $('logs').textContent = logs.length ? logs.join('\n') : '(暂无日志)';
-}
-
-async function load(){
-  try{
-    render(await api('show', {TYPE:'data'}));
-  }catch(e){
-    msg('读取状态失败: ' + e.message, false);
-  }
-}
-
-function lock(on){
-  document.querySelectorAll('button').forEach(b => { b.disabled = on; });
-}
-
-async function act(action, param, okText){
-  lock(true);
-  msg('正在执行, 请稍候…', true);
-  try{
-    await api(action, param);
-    msg(okText || '操作完成', true);
-    await load();
-  }catch(e){
-    msg((okText ? okText + ' 失败: ' : '') + e.message, false);
-  }finally{
-    lock(false);
-  }
-}
-
-// ---- 用户同意后才下载
-function doDownload(a){
-  const lines = [
-    '确认下载这个插件包?',
-    '',
-    '插件: ' + a.plugin,
-    '远端版本: ' + (a.remote_ver || '-'),
-    '本地版本: ' + (a.local_ver || '未安装'),
-    '大小: ' + fmtSize(a.size),
-    'sha256: ' + (a.sha256 ? a.sha256.slice(0, 16) + '…' : '(资源未提供, 下载后仍会计算)'),
-    '',
-    '下载完还需要再确认一次才会安装。'
-  ];
-  if (!confirm(lines.join('\n'))) return;
-  act('download', {slug:a.slug, name:a.name}, '已下载并校验: ' + a.name);
-}
-
-// ---- 用户同意后才安装
-function doInstall(a){
-  const t = '确认安装 / 更新?\n\n插件: ' + (a.pkg_plugin || a.plugin) +
-            '\n版本: ' + (a.pkg_version || a.remote_ver || '-') +
-            '\n本地版本: ' + (a.local_ver || '未安装') +
-            '\n\n安装后会立刻生效(插件自身的配置与数据会保留)。';
-  if (!confirm(t)) return;
-  act('install', {name:a.name}, '安装完成: ' + (a.pkg_plugin || a.plugin));
-}
-
-// ---- 代理
-$('sw').onclick = () => {
-  const on = $('sw').className.indexOf('on') >= 0;
-  const url = $('inProxy').value.trim();
-  const go = () => act('seting', {key:'proxy', value: on ? '0' : '1'},
-                       on ? '已关闭代理' : '已启用代理');
-  if (!on && url && url !== ($('inProxy').dataset.saved || '')){
-    // 先保存地址再启用, 避免"启用了但没地址"
-    api('seting', {key:'proxy_url', value:url})
-      .then(() => { $('inProxy').dataset.saved = url; return go(); })
-      .catch(e => msg('代理地址保存失败: ' + e.message, false));
-    return;
-  }
-  go();
-};
-$('btnProxySave').onclick = () => {
-  const url = $('inProxy').value.trim();
-  $('inProxy').dataset.saved = url;
-  act('seting', {key:'proxy_url', value:url}, '已保存代理地址');
-};
-$('btnTokenSave').onclick = () => {
-  let v = $('inToken').value.trim();
-  if (v === '-' || v === '0') v = '';       // 输 - 表示清除
-  act('seting', {key:'token', value:v}, v ? '已保存 Token' : '已清除 Token')
-    .then(() => { $('inToken').value = ''; });
-};
-
-// ---- 仓库
-$('btnRepoAdd').onclick = () => {
-  const url = $('inRepo').value.trim();
-  const desc = $('inDesc').value.trim();
-  if (!url) { msg('请先填仓库地址', false); return; }
-  act('repo_add', {url:url, desc:enc(desc)}, '已添加仓库').then(() => {
-    $('inRepo').value = ''; $('inDesc').value = '';
-  });
-};
-[$('inRepo'), $('inDesc')].forEach(el => el.addEventListener('keydown', e => {
-  if (e.key === 'Enter') $('btnRepoAdd').click();
-}));
-
-$('btnCheck').onclick = () => act('check', {}, '检查完成');
-$('btnRefresh').onclick = load;
-
-load();
+  },
+  mounted: function () { this.load(); }
+});
 </script>
 </body>
 </html>

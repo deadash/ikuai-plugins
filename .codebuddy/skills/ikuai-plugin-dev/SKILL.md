@@ -20,6 +20,13 @@ description: This skill should be used when creating, packaging, deploying or de
    设备自带 bash 4.4 + busybox + sqlite3 + LuaJIT + jq + curl + openssl，绝大多数需求纯 shell 就能解决。
    需要 C/C++ 时用 **iKuai SDK(uClibc-ng 1.0.40，与设备同版本)** 交叉编译；
    需要写较复杂程序时用 **Rust**(musl 静态最简单，或自定义 target 走 uClibc)。详见 `references/build.md`。
+4. **插件页一律用统一 UI 套件 ikui（Element Plus + 设计令牌），不要自己写样式。**
+   **套件由基础包提供**（`/plugins/app/ikui.js`、`ikui.css`，开机软链自
+   `/etc/mnt/.boot/www/ui/`），**插件不需要带**，页面里就两行：
+   `<link rel="stylesheet" href="./ikui.css">` + `<script src="./ikui.js"></script>`
+   目标是**插件之间统一好看、改一处全局生效**；**不要**去抄爱快前端的样式
+   （它的组件库拿不到、内部类名扒不完，试过，是精力黑洞）。
+   详见 `references/ui.md`，用法权威在 `<skill>/assets/ui/README.md`。
 
 ## 标准流程
 
@@ -107,6 +114,7 @@ IK_PASS=... python ikctl.py reboot --wait # 重启并等 SSH 回来
 | `references/package-format.md` | 包格式全字段、校验规则、打包与取名规则、`data/` 升级保留 |
 | `references/lifecycle.md` | 安装/开机/卸载/升级的执行细节、`ikplugin` 行为、Web 上传安装通道 |
 | `references/web-plugin.md` | 卡片 JSON、页面写法、后端接口 `func_api` 分发约定、JSON/参数限制、上传安装接口 |
+| `references/ui.md` | **插件页 UI 规范**：统一套件 ikui 的接入与三条硬约束；附「确实想蹭爱快样式」的可选做法 |
 | `references/autostart.md` | `boot.sh`、守护进程、pid 文件、cron.d 定时任务、抗挂断 |
 | `references/sqlite3.md` | 设备 sqlite3 **3.8.11.1** 的语法边界与推荐脚本(建库/写入/清理/查询) |
 | `references/lua.md` | LuaJIT 2.1 + cjson + lsqlite3 的调用方式与 Lua 5.1 语法限制 |

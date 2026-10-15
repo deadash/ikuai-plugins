@@ -38,6 +38,11 @@ plugin_web_sync
 # 重新铺开已安装插件(会链接 bin/、www/、function/; 未同意条款时跳过 Web 部分)
 plugin_boot
 
+# 统一 UI 套件(ikui)发布到 /usr/ikuai/www/plugins/app/ —— 插件页用 ./ikui.js 就能引到。
+# 必须在 plugin_web_sync 与 plugin_boot 之后: 前者的 rm -rf 会清掉, 后者可能带同名文件,
+# 放最后让基础包这份说了算。
+plugin_web_ui_link
+
 plugin_function_link
 
 # 去掉「插件管理」页"需要绑定爱快云平台"的前端拦截(本框架插件不依赖云平台)

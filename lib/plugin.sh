@@ -638,6 +638,35 @@ plugin_web_sync() {
     return 0
 }
 
+# 统一 UI 套件(ikui)发布 —— 让所有插件页共用**同一份** Element Plus + 设计令牌,
+# 插件包不用各自带一份(省 1.6MB/插件), 也不会出现各家版本不一致。
+#
+# 页面里就两行, 路径是 ./ikui.js(跟插件页同在 app/ 目录):
+#   <link rel="stylesheet" href="./ikui.css">
+#   <script src="./ikui.js"></script>
+#
+# **必须用软链, 不能用 cp**: 根分区常年 100%(实测 113MB 用满、剩 0),
+# 拷 1.6MB 进去必然 ENOSPC; 软链只占一个目录项, 实测在已存在的 app/ 里能建。
+# 源文件在持久盘 /etc/mnt/.boot/www/ui/ 上, 重启不丢。
+#
+# 调用顺序: 必须在 plugin_web_sync(会清空目录) 和 plugin_boot(插件自带的同名文件)
+# **之后** —— 让基础包这份说了算, 避免插件自带旧版本把新的盖掉。
+plugin_web_ui_link() {
+    local src="$PLUGIN_WWW_SRC/ui" dst="$PLUGIN_WWW_DST/app" f n=0
+    test -d "$src" || return 0
+    mkdir -p "$dst" 2>/dev/null
+    for f in "$src"/*; do
+        [ -f "$f" ] || continue
+        if ln -sf "$f" "$dst/$(basename "$f")" 2>/dev/null; then
+            n=$((n + 1))
+        else
+            plugin_log "!! UI 套件发布失败: $(basename "$f")(根分区满?)"
+        fi
+    done
+    [ "$n" -gt 0 ] && plugin_log "统一 UI 套件已发布($n 个文件, 软链自 $src)"
+    return 0
+}
+
 # Web 前端补丁(每个开机执行一次, 根分区每次重启还原):
 #   1) 去掉「插件管理」页"使用插件功能需要绑定爱快云平台！"的拦截
 #      前端逻辑 yunbindstatus = ("" != code ? 2 : 1), code 来自 func_name=register(云平台

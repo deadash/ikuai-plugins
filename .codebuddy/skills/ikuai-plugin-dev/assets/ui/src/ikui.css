@@ -1,0 +1,161 @@
+/*
+ * ikui —— iKuai 插件统一 UI 套件（样式部分）
+ * ============================================================================
+ * 目标：**所有插件页长得一样、好看、改一处全局生效**。
+ *
+ * 用法：先引 vendor/element-plus.css，再引本文件（顺序不能反，本文件要能覆盖）。
+ *
+ *   <link rel="stylesheet" href="./ui/element-plus.css">
+ *   <link rel="stylesheet" href="./ui/ikui.css">
+ *
+ * 想换主题：**只改下面 :root 里的 --ik-* 令牌**，组件和自研部分会一起变
+ * （Element Plus 的变量也被接到同一套令牌上）。
+ * ============================================================================
+ */
+
+:root {
+  /* ---------------- 设计令牌 ---------------- */
+  --ik-brand:       #2f6fed;   /* 品牌主色 */
+  --ik-brand-hover: #2560d8;
+  --ik-brand-weak:  #eaf1fe;   /* 主色淡底（选中/高亮背景） */
+  --ik-ok:          #12a150;
+  --ik-warn:        #e8a33d;
+  --ik-err:         #e04b4b;
+
+  --ik-fg:          #1f2733;   /* 正文 */
+  --ik-fg-2:        #5a6472;   /* 次级文字 */
+  --ik-mut:         #8a94a6;   /* 弱化文字/占位 */
+  --ik-line:        #e6eaf2;   /* 分割线/边框 */
+  --ik-line-strong: #d4dae6;   /* 输入框边框 */
+  --ik-bg:          #f4f6fb;   /* 页面底色 */
+  --ik-card:        #ffffff;
+
+  --ik-radius:      8px;
+  --ik-radius-sm:   6px;
+  --ik-gap:         12px;
+  --ik-pad:         16px;
+  --ik-shadow:      0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
+  --ik-mono:        ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* ------------- 把 Element Plus 接到同一套令牌上 -------------
+     这是"统一"的关键：改上面的 --ik-*，Element 的组件跟着一起变。 */
+  --el-color-primary:       var(--ik-brand);
+  --el-color-success:       var(--ik-ok);
+  --el-color-warning:       var(--ik-warn);
+  --el-color-danger:        var(--ik-err);
+  --el-color-error:         var(--ik-err);
+  --el-text-color-primary:  var(--ik-fg);
+  --el-text-color-regular:  var(--ik-fg-2);
+  --el-text-color-secondary:var(--ik-mut);
+  --el-border-color:        var(--ik-line-strong);
+  --el-border-color-light:  var(--ik-line);
+  --el-border-color-lighter:var(--ik-line);
+  --el-border-radius-base:  var(--ik-radius-sm);
+  --el-border-radius-small: 4px;
+  --el-font-size-base:      13px;
+  --el-box-shadow-light:    var(--ik-shadow);
+}
+
+/* ---------------- 页面基础 ---------------- */
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--ik-bg);
+  color: var(--ik-fg);
+  font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------- ik-page：页面外壳 ---------------- */
+.ik-page { padding: 16px 18px 28px; }
+.ik-page > * + * { margin-top: var(--ik-gap); }
+
+/* 页头：标题 + 标签 + 右侧操作 */
+.ik-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ik-hd__title { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: .2px; }
+.ik-hd__sub { color: var(--ik-mut); font-size: 12px; }
+.ik-hd__spacer { flex: 1 1 auto; }
+
+/* 小节：一张白卡，标题在卡内顶部 */
+.ik-sec {
+  background: var(--ik-card);
+  border: 1px solid var(--ik-line);
+  border-radius: var(--ik-radius);
+  box-shadow: var(--ik-shadow);
+  overflow: hidden;
+}
+.ik-sec__hd {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px var(--ik-pad);
+  border-bottom: 1px solid var(--ik-line);
+}
+.ik-sec__title { margin: 0; font-size: 14px; font-weight: 600; }
+.ik-sec__desc { color: var(--ik-mut); font-size: 12px; font-weight: 400; }
+.ik-sec__spacer { flex: 1 1 auto; }
+.ik-sec__bd { padding: var(--ik-pad); }
+.ik-sec__bd > * + * { margin-top: var(--ik-gap); }
+
+/* ---------------- 指标卡 ---------------- */
+.ik-tiles {
+  display: grid; gap: var(--ik-gap);
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+.ik-tile {
+  background: var(--ik-card);
+  border: 1px solid var(--ik-line);
+  border-radius: var(--ik-radius);
+  box-shadow: var(--ik-shadow);
+  padding: 12px 14px;
+}
+.ik-tile--wide { grid-column: span 2; }   /* 长串（葵码这种）让它占两格，免得折行 */
+.ik-tile__k { color: var(--ik-mut); font-size: 12px; }
+.ik-tile__v {
+  margin-top: 4px; font-size: 18px; font-weight: 600;
+  letter-spacing: .3px; word-break: break-all;
+}
+.ik-tile__v--big { font-size: 24px; }
+.ik-tile__v--sm  { font-size: 14px; letter-spacing: 0; }
+.ik-tile__v--mono { font-family: var(--ik-mono); }
+
+/* 语义色 */
+.ik-ok   { color: var(--ik-ok); }
+.ik-warn { color: var(--ik-warn); }
+.ik-err  { color: var(--ik-err); }
+.ik-mut  { color: var(--ik-mut); }
+
+/* 状态点 */
+.ik-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ik-mut); margin-right: 6px; vertical-align: middle;
+}
+.ik-dot--on { background: var(--ik-ok); }
+.ik-dot--warn { background: var(--ik-warn); }
+.ik-dot--err { background: var(--ik-err); }
+
+/* ---------------- 工具条 / 提示 ---------------- */
+.ik-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ik-toolbar__spacer { flex: 1 1 auto; }
+
+.ik-tip { color: var(--ik-mut); font-size: 12px; line-height: 1.9; margin: 0; }
+.ik-msg { min-height: 18px; font-size: 12px; color: var(--ik-mut); margin-left: 2px; }
+
+/* 代码 / 输出 */
+.ik-code {
+  font-family: var(--ik-mono); font-size: 12px;
+  background: var(--ik-brand-weak); color: var(--ik-brand);
+  padding: 1px 5px; border-radius: 4px;
+}
+.ik-pre {
+  margin: 0; padding: 12px;
+  background: #0f172a; color: #cbd5e1;
+  border-radius: var(--ik-radius-sm);
+  font: 12px/1.6 var(--ik-mono);
+  max-height: 320px; overflow: auto; white-space: pre-wrap;
+}
+
+/* ---------------- Element Plus 的少量外观统一 ---------------- */
+.el-button { font-weight: 500; }
+.el-card { border-radius: var(--ik-radius); border-color: var(--ik-line); }
+.el-table { font-size: 13px; }
+.el-table th.el-table__cell { background: #f7f9fc; color: var(--ik-fg-2); font-weight: 600; }
+.el-form-item__label { color: var(--ik-fg-2); }

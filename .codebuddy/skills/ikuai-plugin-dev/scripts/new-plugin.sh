@@ -51,7 +51,10 @@ find "$OUT" -type f ! -name '*.png' | while read -r f; do
     sed -i "s/${OLD}/${NAME}/g" "$f"
 done
 
-# 4) 执行位(设备端框架会 test -x install.sh)
+# 4) 统一 UI 套件**不用带**: 由基础包提供(/plugins/app/ikui.js),
+#    页面里写 ./ikui.css + ./ikui.js 就能引到。详见 assets/ui/README.md。
+
+# 5) 执行位(设备端框架会 test -x install.sh)
 chmod +x "$OUT/build.sh" "$OUT/pkg/install.sh" "$OUT/pkg/boot.sh" "$OUT/pkg/uninstall.sh" 2>/dev/null || true
 chmod +x "$OUT/pkg/bin/$NAME" "$OUT/pkg/function/$NAME" 2>/dev/null || true
 

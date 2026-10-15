@@ -34,7 +34,19 @@ function/<func_name>             后端接口(可选)
 
 ## 页面(HTML)
 
-自包含 HTML，直接 `fetch('/Action/call')`。前端**不要**引外部 CDN(设备内网环境)：
+页面是**独立 HTML**（框架用 iframe 打开，目录被改名为 `app`）。
+**界面一律用统一 UI 套件 ikui**，页面里就两行：
+
+```html
+<link rel="stylesheet" href="./ikui.css">
+<script src="./ikui.js"></script>
+```
+
+（`ikui.js` / `ikui.css` 跟页面同目录，由 `scripts/add-ui.sh` 放进 `www/plugins/app/`。）
+组件、用法、以及**模板必须放 `<script type="text/x-template">`** 这个坑：
+**见 `references/ui.md`**，写页面之前先看它。
+
+数据交互直接 `fetch('/Action/call')`。前端**不要**引外部 CDN(设备内网环境)：
 
 ```js
 function api(action, param) {

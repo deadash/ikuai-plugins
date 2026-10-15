@@ -3,258 +3,333 @@
 <head>
 <meta charset="utf-8">
 <title>安全防护控制台 ikguard</title>
+<!-- 统一 UI 套件由基础包提供（/plugins/app/ikui.js，开机软链自 /etc/mnt/.boot/www/ui/） -->
+<link rel="stylesheet" href="./ikui.css">
 <style>
-  :root { --bd:#e4e7ed; --fg:#303133; --mut:#909399; --pri:#409eff; --ok:#67c23a; --warn:#e6a23c; --err:#f56c6c; --bg:#f5f7fa; }
-  * { box-sizing:border-box; }
-  body { margin:0; padding:14px; font:13px/1.6 "Microsoft YaHei",Helvetica,Arial,sans-serif; color:var(--fg); background:#fff; }
-  h3 { margin:0 0 10px; font-size:15px; }
-  h4 { margin:16px 0 6px; font-size:13px; color:#606266; }
-  .row { display:flex; flex-wrap:wrap; gap:10px; }
-  .card { flex:1 1 150px; min-width:140px; border:1px solid var(--bd); border-radius:6px; padding:10px 12px; background:var(--bg); }
-  .card .k { color:var(--mut); font-size:12px; }
-  .card .v { font-size:16px; font-weight:700; margin-top:2px; word-break:break-all; }
-  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); }
-  .tabs { display:flex; gap:6px; margin:16px 0 10px; border-bottom:1px solid var(--bd); }
-  .tabs a { padding:6px 14px; cursor:pointer; border:1px solid transparent; border-bottom:none; border-radius:5px 5px 0 0; color:var(--fg); text-decoration:none; }
-  .tabs a.on { border-color:var(--bd); background:var(--bg); color:var(--pri); font-weight:700; }
-  .pane { display:none; } .pane.on { display:block; }
-  table { width:100%; border-collapse:collapse; }
-  th,td { border-bottom:1px solid var(--bd); padding:6px 8px; text-align:left; font-size:12px; }
-  th { background:var(--bg); color:var(--mut); font-weight:400; }
-  pre { margin:0; padding:10px; background:#1e1e1e; color:#d4d4d4; border-radius:5px; max-height:320px; overflow:auto; font:12px/1.5 Consolas,Monaco,monospace; white-space:pre-wrap; word-break:break-all; }
-  .sw { display:flex; align-items:center; justify-content:space-between; border:1px solid var(--bd); border-radius:5px; padding:8px 12px; margin-bottom:8px; }
-  .sw small { color:var(--mut); display:block; font-weight:400; }
-  button { cursor:pointer; border:1px solid var(--bd); background:#fff; border-radius:4px; padding:5px 12px; font-size:12px; }
-  button:hover { border-color:var(--pri); color:var(--pri); }
-  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
-  button.grey { background:#c8c9cc; border-color:#c8c9cc; color:#fff; font-weight:700; padding:9px 22px; font-size:13px; }
-  button.grey:hover { background:#b1b3b8; border-color:#b1b3b8; }
-  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
-  .msg { min-height:18px; font-size:12px; color:var(--mut); }
-  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; background:var(--bd); color:#fff; }
-  .tip { color:var(--mut); font-size:12px; line-height:1.8; }
-  .tool { border:1px solid var(--bd); border-radius:6px; padding:10px 12px; margin-bottom:10px; }
-  .tool b { font-size:13px; }
-  .tool .tip { margin:4px 0 8px; }
-  /* 插件页的"系统盘/日志盘"信息条 */
-  .diskbx { display:flex; gap:20px; align-items:center; flex-wrap:wrap; border:1px solid var(--bd); border-radius:6px; padding:8px 12px; margin:10px 0; background:var(--bg); }
-  .diskbx .di { font-size:12px; color:var(--mut); }
-  .diskbx .di b { display:block; font-size:14px; margin-top:2px; color:var(--fg); }
-  .diskbx .di b.err, .diskbx .di b.ok { font-weight:700; }
-  /* 工具页里"二选一"的两个方式 */
-  .opt { border:1px solid var(--bd); border-left:3px solid var(--pri); border-radius:6px; padding:8px 12px; margin:8px 0; }
-  .opt-h { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-  .opt-h .mut { margin-left:auto; }
-  .opt .tip { margin:4px 0 0; }
-  .opt .line { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px; }
-  .badge { background:var(--pri); color:#fff; border-radius:9px; padding:1px 8px; font-size:11px; }
-  .mut { color:var(--mut); font-size:12px; }
-  details.tool summary { cursor:pointer; color:var(--mut); font-size:12px; }
-  details.tool summary:hover { color:var(--pri); }
-  .gate { position:fixed; inset:0; background:#f5f7fa; display:flex; align-items:center; justify-content:center; z-index:5; }
-  .gate .in { width:min(520px,92vw); background:#fff; border:1px solid var(--bd); border-radius:10px; padding:26px; text-align:center; }
-  .gate img { width:56px; height:56px; }
-  .gate h2 { font-size:17px; margin:12px 0 6px; }
-  .gate p { color:var(--mut); font-size:12px; line-height:1.9; text-align:left; background:#fafafa; border-radius:6px; padding:12px 14px; }
-  .mask { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:9; }
-  .mask.on { display:flex; }
-  .dlg { width:min(720px,94vw); height:min(620px,88vh); background:#fff; border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
-  .dlg h3 { margin:0; padding:14px 20px; font-size:15px; border-bottom:1px solid var(--bd); background:#fafafa; }
-  .dlg .txt { flex:1; overflow:auto; padding:16px 20px; white-space:pre-wrap; font-size:12.5px; line-height:1.85; color:#4b4f57; }
-  .dlg .ft { padding:12px 20px; border-top:1px solid var(--bd); display:flex; gap:10px; align-items:center; justify-content:flex-end; }
-  .dlg .ft span { margin-right:auto; color:var(--mut); font-size:12px; }
-  input[type=file] { font-size:12px; }
+  /* 这页只有"未同意条款时的拦截层"需要一点额外样式，其余全用 ikui + Element Plus */
+  .gate { position: fixed; inset: 0; background: var(--ik-bg); z-index: 2000;
+          display: flex; align-items: center; justify-content: center; }
+  .gate .in { width: min(520px, 92vw); }
+  .gate .hd { text-align: center; }
+  .gate .hd img { width: 56px; height: 56px; }
+  .gate .hd h2 { margin: 12px 0 0; font-size: 17px; }
+  .sw { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+        border: 1px solid var(--ik-line); border-radius: var(--ik-radius-sm);
+        background: var(--ik-card); }
+  .sw + .sw { margin-top: 8px; }
+  .sw__body { flex: 1 1 auto; min-width: 0; }
+  .sw__body b { font-size: 13px; }
+  .sw__body small { display: block; color: var(--ik-mut); font-weight: 400; line-height: 1.7; }
+  .opt { border: 1px solid var(--ik-line); border-left: 3px solid var(--ik-brand);
+         border-radius: var(--ik-radius-sm); padding: 10px 14px; }
+  .opt + .opt { margin-top: 10px; }
+  .opt-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .opt-h .ik-mut { margin-left: auto; }
+  .kv { display: flex; gap: 22px; flex-wrap: wrap; }
+  .kv > div { font-size: 12px; color: var(--ik-mut); }
+  .kv b { display: block; font-size: 14px; margin-top: 2px; color: var(--ik-fg); }
+  .scroll-y { max-height: 420px; overflow: auto; }
 </style>
 </head>
 <body>
 
-<!-- 未同意使用条款时的拦截层 -->
-<div class="gate" id="gate" style="display:none">
-  <div class="in">
-    <img src="/plugins/app/terms.png" alt="terms">
-    <h2>启用插件功能</h2>
-    <p>本框架与插件由第三方提供，并非爱快官方产品，安装后可能影响设备稳定性与官方支持资格。<br>
-       <b>首次启用前需要阅读并同意《使用条款与免责声明》</b>；同意记录只保存在本设备
-       (<code>/etc/mnt/plugins/.eula</code>)，此后不再重复询问。</p>
-    <button class="grey" id="gate-btn">查看并同意《使用条款》</button>
-    <div class="msg" id="gate-msg"></div>
-  </div>
-</div>
-
-<div id="app">
-<div class="bar">
-  <h3 style="margin:0">安全防护控制台</h3>
-  <span class="tag">ikguard</span>
-  <span style="flex:1"></span>
-  <span class="msg" id="msg"></span>
-  <button onclick="load();loadLogs();loadDisk();loadSsh();">刷新</button>
-</div>
-
-<div class="row" id="cards"></div>
-
-<div class="tabs">
-  <a class="on" data-p="p-status">开关配置</a>
-  <a data-p="p-plugin">插件管理</a>
-  <a data-p="p-log">审计日志</a>
-  <a data-p="p-ssh">SSH 防护</a>
-  <a data-p="p-tool">工具</a>
-</div>
-
-<div class="pane on" id="p-status">
-  <p class="tip">开关保存在 <code>/etc/mnt/boot_args</code>，修改后立即生效并在下次开机继续生效。</p>
-  <div id="switches"></div>
-  <button class="pri" onclick="act('apply')">重新应用(后门阻断 + 审计 + SSH 加固)</button>
-</div>
-
-<div class="pane" id="p-plugin">
-  <div class="tip">插件包(<code>zip</code>)会上传到设备并解压安装到 <code>/etc/mnt/plugins/&lt;名称&gt;</code>；
-    根分区每次重启还原，框架开机会自动重新铺开已安装插件。</div>
-
-  <!-- 插件存在哪 + 两块盘余量: 系统盘(/etc/mnt)小于 1G 时标红 -->
-  <div class="diskbx">
-    <div class="di">系统盘 <code>/etc/mnt</code><b id="d-mnt">-</b></div>
-    <div class="di">日志盘 <code>/etc/log</code><b id="d-log">-</b></div>
-    <span style="flex:1"></span>
-    <button onclick="loadDisk()">刷新</button>
-    <button class="pri" onclick="gotoExpand()">腾空间…</button>
-  </div>
-  <div class="msg" id="d-store"></div>
-  <div class="msg" id="d-note"></div>
-
-  <div style="margin:10px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-    <input type="file" id="zipfile" accept=".zip">
-    <button class="pri" onclick="uploadZip()">上传并安装</button>
-    <button onclick="act('plugin',{op:'scan'})">扫描 /etc/mnt/plugins/*.zip</button>
-    <button onclick="act('plugin',{op:'list'})">列出插件(命令行)</button>
-  </div>
-  <table><thead><tr><th>名称</th><th>版本</th><th>安装时间</th><th>文件数</th><th>操作</th></tr></thead>
-  <tbody id="plugin-rows"><tr><td colspan="5" style="color:#909399">暂无已安装插件</td></tr></tbody></table>
-  <p class="tip">待安装 zip：<span id="pending">无</span>（也可以直接放到设备的 <code>/etc/mnt/plugins/</code> 后重启）</p>
-</div>
-
-<div class="pane" id="p-log">
-  <div style="margin-bottom:8px">
-    <button onclick="loadLogs()">刷新日志</button>
-    <button onclick="act('logclear')">清空审计日志</button>
-  </div>
-  <h4>体检报告 /etc/log/ikguard/report.txt</h4><pre id="log-report">-</pre>
-  <h4>审计事件 audit-*.log</h4><pre id="log-audit">-</pre>
-  <h4>出向连接 conn-*.log</h4><pre id="log-conn">-</pre>
-  <h4>DNS 查询(仅 dport=53 事件) dns-*.log</h4><pre id="log-dns">-</pre>
-  <h4>启动尝试监控 stub.log(空壳记录, 正常应为空)</h4><pre id="log-stub">-</pre>
-  <h4>开机日志 boot.log</h4><pre id="log-boot">-</pre>
-</div>
-
-<div class="pane" id="p-ssh">
-  <div class="tool">
-    <b>公网访问 SSH</b>
-    <div class="tip">SSH 是设备自带的 dropbear(端口见下), <b>官方没有对公网做任何限制</b> ——
-      只要上游把端口映射到公网, 任何人都能连上来爆破。打开开关后只有
-      <code>wan / vwan / adsl</code> 入向的<b>新连接</b>会被丢弃(公网网卡用官方的
-      <code>-m ifaces</code> 判定, 多拨/多 WAN 一起覆盖), LAN 侧与已建立的会话不受影响。</div>
-    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:6px 0">
-      <span>状态：<b id="s-pub">-</b></span>
-      <span class="tip">SSH 端口 <code id="s-port">-</code>，官方开关 open_sshd=<code id="s-open">-</code></span>
-      <button class="pri" id="s-btn" onclick="toggleSshguard()">-</button>
-      <button onclick="loadSsh()">刷新</button>
-    </div>
-    <div class="tip">公网网卡判定参数(运行时读官方定义)：<code id="s-wan">-</code></div>
-  </div>
-
-  <div class="tool">
-    <b>SSH 登录日志(登录成功 / 登录失败 / 注销)</b>
-    <div class="tip">数据取自设备自带 syslog 库 <code id="s-db">/etc/log/syslog.db</code> 的 messages 表
-      (官方 iksyslogd 已经在记, 重启不丢), 与官方 WEB 登录日志同源。右侧「封禁该 IP」只封它访问 SSH。</div>
-    <div style="max-height:420px;overflow:auto">
-    <table>
-      <thead><tr><th>时间</th><th>事件</th><th>账号</th><th>来源 IP</th><th>操作</th></tr></thead>
-      <tbody id="s-rows"><tr><td colspan="5" style="color:#909399">加载中…</td></tr></tbody>
-    </table>
+<script type="text/x-template" id="tpl">
+<div>
+  <!-- 未同意使用条款时的拦截层 -->
+  <div class="gate" v-if="!eulaOk">
+    <div class="in">
+      <el-card shadow="never" body-style="padding:26px 28px">
+        <div class="hd">
+          <img src="/plugins/app/terms.png" alt="terms">
+          <h2>启用插件功能</h2>
+        </div>
+        <el-alert type="warning" :closable="false" show-icon style="margin:16px 0 18px">
+          <template #title>
+            <div style="line-height:1.9;text-align:left">
+              本框架与插件由第三方提供，并非爱快官方产品，安装后可能影响设备稳定性与官方支持资格。<br>
+              <b>首次启用前需要阅读并同意《使用条款与免责声明》</b>；同意记录只保存在本设备
+              (<code class="ik-code">/etc/mnt/plugins/.eula</code>)，此后不再重复询问。
+            </div>
+          </template>
+        </el-alert>
+        <el-button type="primary" style="width:100%" @click="openEula">查看并同意《使用条款》</el-button>
+        <div class="ik-msg" style="text-align:center;margin-top:10px">{{ gateMsg }}</div>
+      </el-card>
     </div>
   </div>
 
-  <div class="tool">
-    <b>已封禁来源(<span id="s-bann">0</span> 条)</b>
-    <div class="tip">封的是<b>该 IP 访问本机 SSH 端口</b>, Web 与其它服务不受影响 —— 所以随时能从本页解封。
-      名单落在持久盘 <code>/etc/mnt/ikguard/ssh-ban.list</code>, 重启后由开机脚本自动重放。</div>
-    <table>
-      <thead><tr><th>IP</th><th>封禁时间</th><th>原因</th><th>操作</th></tr></thead>
-      <tbody id="s-ban-rows"><tr><td colspan="4" style="color:#909399">暂无</td></tr></tbody>
-    </table>
-    <div style="margin-top:8px"><button onclick="clearSshBan()">清空封禁名单</button></div>
-  </div>
+  <ik-page v-else title="安全防护控制台" tag="ikguard" :sub="msg">
+    <template #actions>
+      <el-button size="small" @click="refreshAll">刷新</el-button>
+    </template>
+
+    <ik-tiles :items="tiles"></ik-tiles>
+
+    <el-tabs v-model="tab" @tab-change="onTab">
+      <!-- ---------------------------------------------------- 开关配置 -->
+      <el-tab-pane label="开关配置" name="status">
+        <p class="ik-tip" style="margin-bottom:10px">
+          开关保存在 <code class="ik-code">/etc/mnt/boot_args</code>，修改后立即生效并在下次开机继续生效。
+        </p>
+        <div class="sw" v-for="f in FLAGS" :key="f[0]">
+          <div class="sw__body">
+            <b>{{ f[1] }}</b> <code class="ik-code">{{ f[0] }}</code>
+            <small>{{ f[2] }}</small>
+          </div>
+          <el-button :type="flagOn(f[0]) ? 'primary' : 'default'"
+                     :loading="flagBusy === f[0]"
+                     @click="setFlag(f[0], flagOn(f[0]) ? '0' : '1')">
+            {{ flagOn(f[0]) ? '已开启' : '已关闭' }}
+          </el-button>
+        </div>
+        <div class="ik-toolbar" style="margin-top:14px">
+          <el-button type="primary" :loading="applying" @click="act('apply')">
+            重新应用（后门阻断 + 审计 + SSH 加固）
+          </el-button>
+        </div>
+      </el-tab-pane>
+
+      <!-- ---------------------------------------------------- 插件管理 -->
+      <el-tab-pane label="插件管理" name="plugin">
+        <p class="ik-tip" style="margin-bottom:10px">
+          插件包（<code class="ik-code">zip</code>）会上传到设备并解压安装到
+          <code class="ik-code">/etc/mnt/plugins/&lt;名称&gt;</code>；
+          根分区每次重启还原，框架开机会自动重新铺开已安装插件。
+        </p>
+
+        <el-card shadow="never" body-style="padding:12px 14px" style="margin-bottom:12px">
+          <div class="ik-toolbar">
+            <div class="kv" style="flex:1 1 auto">
+              <div>系统盘 <code class="ik-code">/etc/mnt</code>
+                <b :class="diskTone">{{ fmtG(DISK.mnt_mib) }}（已用 {{ fmtG(DISK.mnt_used) }}）</b>
+              </div>
+              <div>日志盘 <code class="ik-code">/etc/log</code>
+                <b class="ik-ok">{{ fmtG(DISK.log_mib) }}（已用 {{ fmtG(DISK.log_used) }} / 可用 {{ fmtG(DISK.log_avail) }}）</b>
+              </div>
+            </div>
+            <el-button size="small" @click="loadDisk">刷新</el-button>
+            <el-button size="small" type="primary" plain @click="gotoExpand">腾空间…</el-button>
+          </div>
+          <div class="ik-msg" :class="storeTone" style="margin-top:8px;display:block"
+               v-html="storeText"></div>
+          <div class="ik-msg ik-warn" style="display:block" v-if="needSpace">
+            系统盘只有 {{ fmtG(DISK.mnt_mib) }}，装插件可能不够 —— 点右边<b>腾空间…</b>（两种方式，二选一）。
+          </div>
+          <div class="ik-msg ik-mut" style="display:block" v-else-if="Number(DISK.pending) > 0">
+            已提交扩容：重启后 /etc/mnt → <b>{{ fmtG(DISK.pending) }}</b>（待执行）
+          </div>
+        </el-card>
+
+        <div class="ik-toolbar" style="margin-bottom:12px">
+          <el-upload :show-file-list="false" :http-request="doUpload" accept=".zip">
+            <el-button type="primary" :loading="uploading">上传并安装</el-button>
+          </el-upload>
+          <el-button @click="act('plugin', {op:'scan'})">扫描 /etc/mnt/plugins/*.zip</el-button>
+          <el-button @click="act('plugin', {op:'list'})">列出插件（命令行）</el-button>
+        </div>
+
+        <el-table :data="plugins" border size="small" style="width:100%">
+          <el-table-column prop="name" label="名称" min-width="120"></el-table-column>
+          <el-table-column prop="version" label="版本" width="100"></el-table-column>
+          <el-table-column prop="state" label="安装时间" min-width="150"></el-table-column>
+          <el-table-column prop="files" label="文件数" width="90"></el-table-column>
+          <el-table-column label="操作" width="90">
+            <template #default="{ row }">
+              <el-button size="small" type="danger" plain
+                         @click="act('plugin', {op:'remove', name: row.name})">卸载</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <p class="ik-tip">
+          待安装 zip：{{ pendingText }}（也可以直接放到设备的
+          <code class="ik-code">/etc/mnt/plugins/</code> 后重启）
+        </p>
+      </el-tab-pane>
+
+      <!-- ---------------------------------------------------- 审计日志 -->
+      <el-tab-pane label="审计日志" name="log">
+        <div class="ik-toolbar" style="margin-bottom:12px">
+          <el-button @click="loadLogs">刷新日志</el-button>
+          <el-button type="danger" plain @click="act('logclear')">清空审计日志</el-button>
+        </div>
+        <ik-sec v-for="l in LOGS" :key="l[0]" :title="l[1]">
+          <pre class="ik-pre">{{ logs[l[0]] || '(空)' }}</pre>
+        </ik-sec>
+      </el-tab-pane>
+
+      <!-- ---------------------------------------------------- SSH 防护 -->
+      <el-tab-pane label="SSH 防护" name="ssh">
+        <ik-sec title="公网访问 SSH">
+          <p class="ik-tip">
+            SSH 是设备自带的 dropbear（端口见下），<b>官方没有对公网做任何限制</b> ——
+            只要上游把端口映射到公网，任何人都能连上来爆破。打开开关后只有
+            <code class="ik-code">wan / vwan / adsl</code> 入向的<b>新连接</b>会被丢弃
+            （公网网卡用官方的 <code class="ik-code">-m ifaces</code> 判定，多拨/多 WAN 一起覆盖），
+            LAN 侧与已建立的会话不受影响。
+          </p>
+          <div class="ik-toolbar">
+            <span>状态：</span>
+            <span v-if="ssh.pub === 'on'" class="ik-ok">已封禁（公网新连接被丢弃）</span>
+            <span v-else class="ik-err">未封禁（公网可直连 SSH）</span>
+            <span class="ik-tip" style="margin:0">
+              SSH 端口 <code class="ik-code">{{ ssh.port || '22' }}</code>，
+              官方开关 open_sshd=<code class="ik-code">{{ ssh.open || '0' }}</code>
+            </span>
+            <el-button :type="flagOn('sshguard') ? 'default' : 'primary'" @click="toggleSshguard">
+              {{ flagOn('sshguard') ? '关闭公网封禁' : '开启公网封禁' }}
+            </el-button>
+            <el-button @click="loadSsh">刷新</el-button>
+          </div>
+          <p class="ik-tip">
+            公网网卡判定参数（运行时读官方定义）：<code class="ik-code">{{ ssh.wan_arg || '-' }}</code>
+          </p>
+        </ik-sec>
+
+        <ik-sec title="SSH 登录日志（登录成功 / 登录失败 / 注销）">
+          <p class="ik-tip">
+            数据取自设备自带 syslog 库 <code class="ik-code">{{ ssh.syslog_db || '/etc/log/syslog.db' }}</code>
+            的 messages 表（官方 iksyslogd 已经在记，重启不丢），与官方 WEB 登录日志同源。
+            右侧「封禁该 IP」只封它访问 SSH。
+          </p>
+          <div class="scroll-y">
+            <el-table :data="ssh.entries || []" border size="small" style="width:100%">
+              <el-table-column prop="time" label="时间" min-width="150"></el-table-column>
+              <el-table-column label="事件" min-width="110">
+                <template #default="{ row }">
+                  <span :class="row.result === 'fail' ? 'ik-err' : (row.result === 'ok' ? 'ik-ok' : '')">
+                    {{ row.event }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="账号" width="110">
+                <template #default="{ row }">{{ row.user || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="来源 IP" min-width="140">
+                <template #default="{ row }">{{ row.ip || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="110">
+                <template #default="{ row }">
+                  <el-button v-if="row.ip" size="small" plain @click="banIp(row.ip)">封禁该 IP</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </ik-sec>
+
+        <ik-sec :title="'已封禁来源（' + (ssh.ban_count || 0) + ' 条）'">
+          <p class="ik-tip">
+            封的是<b>该 IP 访问本机 SSH 端口</b>，Web 与其它服务不受影响 —— 所以随时能从本页解封。
+            名单落在持久盘 <code class="ik-code">/etc/mnt/ikguard/ssh-ban.list</code>，重启后由开机脚本自动重放。
+          </p>
+          <el-table :data="ssh.list || []" border size="small" style="width:100%">
+            <el-table-column prop="ip" label="IP" min-width="140"></el-table-column>
+            <el-table-column label="封禁时间" min-width="150">
+              <template #default="{ row }">{{ row.time || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="原因" min-width="160">
+              <template #default="{ row }">{{ row.note || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="90">
+              <template #default="{ row }">
+                <el-button size="small" plain @click="unbanIp(row.ip)">解封</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="ik-toolbar" style="margin-top:10px">
+            <el-button @click="clearSshBan">清空封禁名单</el-button>
+          </div>
+        </ik-sec>
+      </el-tab-pane>
+
+      <!-- ---------------------------------------------------- 工具 -->
+      <el-tab-pane label="工具" name="tool">
+        <ik-sec title="插件装在哪 / 怎么腾空间">
+          <p class="ik-tip">
+            下面两种方式<b>二选一</b>即可，不用都做。上面的「当前」会显示此刻实际生效的是哪个。
+          </p>
+
+          <div class="opt">
+            <div class="opt-h">
+              <el-tag size="small" effect="dark">方式一</el-tag><b>拿一块数据盘当插件盘</b>
+              <span class="ik-mut">有闲置盘/分区时推荐</span>
+            </div>
+            <p class="ik-tip">
+              在「系统设置 → 磁盘分区」里把某块盘（或分区）的 <b>绑定业务</b> 改成
+              <b>插件存储</b> 并保存，然后重启。之后上传、安装的插件都落在那块盘上，系统盘一个字节都不占。
+            </p>
+            <div class="ik-toolbar">
+              <span>当前插件存储在：<b :class="storeOnDisk ? 'ik-ok' : 'ik-warn'">{{ storeWhere }}</b></span>
+              <el-button @click="goDisk">去磁盘分区</el-button>
+            </div>
+          </div>
+
+          <div class="opt">
+            <div class="opt-h">
+              <el-tag size="small" effect="dark" type="warning">方式二</el-tag><b>扩容系统盘</b>
+              <span class="ik-mut">没有闲置盘时用</span>
+            </div>
+            <p class="ik-tip">
+              把 <code class="ik-code">/etc/mnt</code> 直接扩到指定大小（单位 <b>G</b>）。提交后设备自动重启完成，
+              期间约 1~2 分钟不可用。上限 <b>{{ fmtG(DISK.max_mib) }}</b> ——
+              要给日志盘留出它已用的空间，也不动绑了业务的盘。
+            </p>
+            <div class="ik-toolbar">
+              <span>当前：<b>{{ fmtG(DISK.mnt_mib) }}</b></span>
+              <el-input v-model="expandSize" style="width:120px" placeholder="G">
+                <template #append>G</template>
+              </el-input>
+              <el-button type="primary" :loading="expanding" @click="doExpand">扩容并重启</el-button>
+              <el-button @click="doExpandCancel">撤销</el-button>
+              <span class="ik-msg ik-warn" v-if="Number(DISK.pending) > 0">
+                待执行 → {{ fmtG(DISK.pending) }}
+              </span>
+            </div>
+          </div>
+
+          <div class="ik-msg" :class="eTone" style="display:block">{{ eMsg }}</div>
+        </ik-sec>
+
+        <el-collapse>
+          <el-collapse-item title="详细状态与日志" name="detail">
+            <p class="ik-tip" v-html="detailText"></p>
+            <p class="ik-tip" style="margin-top:8px">
+              扩容日志 <code class="ik-code">/etc/log/ikguard/expand.log</code>
+            </p>
+            <pre class="ik-pre">{{ DISK.expand_log || '(空)' }}</pre>
+          </el-collapse-item>
+        </el-collapse>
+
+        <ik-sec title="封锁自检">
+          <p class="ik-tip">
+            即时检查五件事：云端客户端是否都是空壳、/etc/hosts 封了多少域名、是否还有后门进程存活、
+            stub.log 有没有新的「启动尝试」（有记录 = 发现了新的启动点，里面会写明时间和拉起者）、
+            SSH 加固规则还在不在（公网封禁 + 封禁名单）。点一下立即出结果。
+          </p>
+          <div class="ik-toolbar" style="margin-bottom:10px">
+            <el-button type="primary" :loading="checking" @click="runCheck">立即自检一次</el-button>
+          </div>
+          <p class="ik-tip">最近一次结果</p>
+          <pre class="ik-pre">{{ checkText || '(还没有执行过自检)' }}</pre>
+        </ik-sec>
+      </el-tab-pane>
+    </el-tabs>
+
+    <!-- 使用条款 -->
+    <el-dialog v-model="eulaDlg" title="使用条款与免责声明" width="720px" top="6vh" align-center>
+      <pre class="ik-pre" style="max-height:60vh">{{ eulaText }}</pre>
+      <template #footer>
+        <span class="ik-mut" style="float:left;line-height:32px;font-size:12px">请完整阅读后点击「同意并启用」</span>
+        <el-button @click="eulaDlg = false">取消</el-button>
+        <el-button type="primary" :disabled="!eulaText" :loading="eulaBusy" @click="acceptEula">同意并启用</el-button>
+      </template>
+    </el-dialog>
+  </ik-page>
 </div>
+</script>
 
-<div class="pane" id="p-tool">
+<div id="app"></div>
 
-  <div class="tool">
-    <b>插件装在哪 / 怎么腾空间</b>
-    <div class="tip">下面两种方式<b>二选一</b>即可，不用都做。上面的「当前」会显示此刻实际生效的是哪个。</div>
-
-    <div class="opt">
-      <div class="opt-h">
-        <span class="badge">方式一</span><b>拿一块数据盘当插件盘</b>
-        <span class="mut">有闲置盘/分区时推荐</span>
-      </div>
-      <div class="tip">在「系统设置 → 磁盘分区」里把某块盘（或分区）的 <b>绑定业务</b> 改成
-        <b>插件存储</b> 并保存，然后重启。之后上传、安装的插件都落在那块盘上，系统盘一个字节都不占。</div>
-      <div class="line">
-        <span>当前插件存储在：<b id="e-store">-</b></span>
-        <button onclick="goDisk()">去磁盘分区</button>
-      </div>
-    </div>
-
-    <div class="opt">
-      <div class="opt-h">
-        <span class="badge">方式二</span><b>扩容系统盘</b>
-        <span class="mut">没有闲置盘时用</span>
-      </div>
-      <div class="tip">把 <code>/etc/mnt</code> 直接扩到指定大小（单位 <b>G</b>）。提交后设备自动重启完成，
-        期间约 1~2 分钟不可用。上限 <b id="e-max">-</b> —— 要给日志盘留出它已用的空间，也不动绑了业务的盘。</div>
-      <div class="line">
-        <span>当前：<b id="e-cur">-</b></span>
-        <input id="e-size" type="number" min="0.5" step="0.5" style="width:90px" placeholder="G">
-        <span class="tip">G</span>
-        <button class="pri" onclick="doExpand()">扩容并重启</button>
-        <button onclick="doExpandCancel()">撤销</button>
-        <span class="tip" id="e-pending"></span>
-      </div>
-    </div>
-
-    <div class="msg" id="e-msg"></div>
-  </div>
-
-  <details class="tool">
-    <summary>详细状态与日志</summary>
-    <div class="tip" id="e-detail" style="margin-top:8px">-</div>
-    <h4>扩容日志 /etc/log/ikguard/expand.log</h4>
-    <pre id="e-logbox">-</pre>
-  </details>
-
-  <div class="tool">
-    <b>封锁自检</b>
-    <div class="tip">即时检查五件事：云端客户端是否都是空壳、/etc/hosts 封了多少域名、
-      是否还有后门进程存活、stub.log 有没有新的"启动尝试"（有记录 = 发现了新的启动点，
-      里面会写明时间和拉起者）、SSH 加固规则还在不在（公网封禁 + 封禁名单）。点一下立即出结果。</div>
-    <button class="pri" onclick="runCheck()">立即自检一次</button>
-    <h4>最近一次结果</h4>
-    <pre id="check-out">-</pre>
-  </div>
-</div>
-</div>
-
-<div class="mask" id="mask">
-  <div class="dlg">
-    <h3>使用条款与免责声明</h3>
-    <div class="txt" id="eula-txt">正在加载条款…</div>
-    <div class="ft">
-      <span>请完整阅读后点击"同意并启用"</span>
-      <button onclick="closeEula()">取消</button>
-      <button class="pri" id="eula-agree" onclick="acceptEula()" disabled>同意并启用</button>
-    </div>
-  </div>
-</div>
-
+<script src="./ikui.js"></script>
 <script>
 var FLAGS = [
   ['backdoor','后门阻断','空壳替换 + 改写启动脚本 + /etc/hosts 封云端域名(不碰防火墙, 不影响路由/DHCP/NAT)'],
@@ -264,381 +339,339 @@ var FLAGS = [
   ['cron','定时任务','铺开 /etc/mnt/cron.d 下的 crontab'],
   ['shell','程序安装','链接 /etc/mnt/shells 下的程序与配置']
 ];
+var LOGS = [
+  ['report','体检报告 /etc/log/ikguard/report.txt'],
+  ['audit','审计事件 audit-*.log'],
+  ['conn','出向连接 conn-*.log'],
+  ['dns','DNS 查询(仅 dport=53 事件) dns-*.log'],
+  ['stub','启动尝试监控 stub.log(空壳记录, 正常应为空)'],
+  ['boot','开机日志 boot.log']
+];
 
-function api(action, param) {
-  return fetch('/Action/call', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ func_name:'ikguard', action:action, param:param||{} })
-  }).then(function(r){ return r.json(); }).then(function(j){
-    if (j.Result !== 30000) { throw new Error(j.ErrMsg || ('错误码 '+j.Result)); }
-    return j.Data || {};
-  });
-}
-function tip(t, cls) {
-  var m = document.getElementById('msg');
-  m.textContent = t || ''; m.className = cls || 'msg';
-  if (t) { setTimeout(function(){ if (m.textContent===t) m.textContent=''; }, 6000); }
-}
-function card(k, v, cls) {
-  return '<div class="card"><div class="k">'+k+'</div><div class="v '+(cls||'')+'">'+v+'</div></div>';
-}
-
-/* ---------------- 系统盘/日志盘 + 扩容 ---------------- */
-var DISK = {};
-function fmtG(mib) {                       // MiB -> "G"(1024 进制, 页面统一用 G)
-  var g = (Number(mib) || 0) / 1024;
-  if (g <= 0) { return '0 G'; }
-  return (g >= 100 ? g.toFixed(0) : g.toFixed(2)).replace(/\.?0+$/, '') + ' G';
-}
-function gToMib(g) { return Math.round((Number(g) || 0) * 1024); }
-function renderDisk(k) {
-  DISK = k || {};
-  var mnt = Number(k.mnt_mib)||0, log = Number(k.log_mib)||0;
-  var max = Number(k.max_mib)||0, pend = Number(k.pending)||0;
-
-  // 插件页的两块盘
-  var e1 = document.getElementById('d-mnt');
-  e1.textContent = fmtG(mnt) + '（已用 ' + fmtG(k.mnt_used) + '）';
-  e1.className = (mnt > 0 && mnt < 1024) ? 'err' : 'ok';
-  var e2 = document.getElementById('d-log');
-  e2.textContent = fmtG(log) + '（已用 ' + fmtG(k.log_used) + ' / 可用 ' + fmtG(k.log_avail) + '）';
-  var note = document.getElementById('d-note');
-  note.className = 'msg';
-  if (mnt > 0 && mnt < 1024) {
-    note.innerHTML = '系统盘只有 ' + fmtG(mnt) + '，装插件可能不够 —— 点右边<b>腾空间…</b>（两种方式，二选一）。';
-  } else if (pend > 0) {
-    note.innerHTML = '已提交扩容：重启后 /etc/mnt → <b>' + fmtG(pend) + '</b>（待执行）';
-  } else {
-    note.textContent = '';
-  }
-
-  // 插件到底存在哪: 数据盘(绑了「插件存储」业务) 还是系统盘
-  var st = document.getElementById('d-store');
-  if (st) {
-    if (Number(k.store_on_disk) === 1) {
-      st.className = 'msg ok';
-      st.innerHTML = '插件存在 <b>数据盘</b>上（可用 ' + fmtG(k.store_avail) + '），不受系统盘容量限制';
-    } else {
-      st.className = 'msg warn';
-      st.innerHTML = '插件存在 <b>系统盘</b>上（可用 ' + fmtG(k.store_avail) + '）—— 想挪到数据盘看「工具」';
+IKUI.mount('#app', {
+  tpl: '#tpl',
+  func: 'ikguard',
+  data: function () {
+    return {
+      eulaOk: false, gateMsg: '', msg: '',
+      tab: 'status',
+      tiles: [], flags: {}, FLAGS: FLAGS, LOGS: LOGS,
+      flagBusy: '', applying: false,
+      plugins: [], pending: [], uploading: false,
+      DISK: {}, expandSize: '', expanding: false, eMsg: '', eTone: 'ik-mut',
+      logs: {}, checkText: '', checking: false,
+      ssh: {},
+      eulaDlg: false, eulaText: '', eulaBusy: false
+    };
+  },
+  computed: {
+    flagOn: function () {
+      var f = this.flags;
+      return function (k) { return String(f[k]) === '1'; };
+    },
+    diskTone: function () {
+      var m = Number(this.DISK.mnt_mib) || 0;
+      return (m > 0 && m < 1024) ? 'ik-err' : 'ik-ok';
+    },
+    needSpace: function () {
+      var m = Number(this.DISK.mnt_mib) || 0;
+      return m > 0 && m < 1024;
+    },
+    storeOnDisk: function () { return Number(this.DISK.store_on_disk) === 1; },
+    storeWhere: function () {
+      return this.storeOnDisk ? ('数据盘（可用 ' + this.fmtG(this.DISK.store_avail) + '）')
+                              : ('系统盘 /etc/mnt（可用 ' + this.fmtG(this.DISK.store_avail) + '）');
+    },
+    storeText: function () {
+      if (this.storeOnDisk) {
+        return '插件存在 <b>数据盘</b>上（可用 ' + this.fmtG(this.DISK.store_avail) + '），不受系统盘容量限制';
+      }
+      return '插件存在 <b>系统盘</b>上（可用 ' + this.fmtG(this.DISK.store_avail) + '）—— 想挪到数据盘看「工具」';
+    },
+    storeTone: function () { return this.storeOnDisk ? 'ik-ok' : 'ik-warn'; },
+    pendingText: function () {
+      var p = this.pending || [];
+      return p.map(function (z) { return z.name; }).join(' , ') || '无';
+    },
+    detailText: function () {
+      var k = this.DISK;
+      return '系统盘 <b>' + this.fmtG(k.mnt_mib) + '</b>（已用 ' + this.fmtG(k.mnt_used) +
+        '） · 日志盘 <b>' + this.fmtG(k.log_mib) + '</b>（已用 ' + this.fmtG(k.log_used) +
+        '） · 扩容上限 <b>' + this.fmtG(k.max_mib) + '</b> · 保留分区 ' +
+        (Number(k.keep_mib) > 0 ? this.fmtG(k.keep_mib) : '无') +
+        ' · 扩容时给日志盘留 ' + this.fmtG(k.reserve || 256);
     }
-  }
+  },
+  methods: {
+    /* ---------------------------------------------------------- 工具 */
+    /* MiB -> "G"（1024 进制，页面统一用 G） */
+    fmtG: function (mib) {
+      var g = (Number(mib) || 0) / 1024;
+      if (g <= 0) { return '0 G'; }
+      return (g >= 100 ? g.toFixed(0) : g.toFixed(2)).replace(/\.?0+$/, '') + ' G';
+    },
+    gToMib: function (g) { return Math.round((Number(g) || 0) * 1024); },
 
-  // 工具页: 此刻插件存储在哪 + 扩容状态
-  var st2 = document.getElementById('e-store');
-  if (st2) {
-    st2.textContent = (Number(k.store_on_disk) === 1)
-        ? ('数据盘（可用 ' + fmtG(k.store_avail) + '）')
-        : ('系统盘 /etc/mnt（可用 ' + fmtG(k.store_avail) + '）');
-    st2.className = Number(k.store_on_disk) === 1 ? 'ok' : 'warn';
-  }
-  document.getElementById('e-cur').textContent = fmtG(mnt);
-  document.getElementById('e-max').textContent = fmtG(max);
-  var inp = document.getElementById('e-size');
-  inp.max = max > 0 ? (max / 1024).toFixed(2) : '';
-  if (!inp.value) { inp.placeholder = mnt < 1024 ? '2' : String(Math.ceil(mnt * 2 / 1024)); }
-  document.getElementById('e-pending').textContent = pend > 0 ? ('待执行 → ' + fmtG(pend)) : '';
-  var det = document.getElementById('e-detail');
-  if (det) {
-    det.innerHTML = '系统盘 <b>' + fmtG(mnt) + '</b>（已用 ' + fmtG(k.mnt_used) +
-        '） · 日志盘 <b>' + fmtG(log) + '</b>（已用 ' + fmtG(k.log_used) + '） · 扩容上限 <b>' +
-        fmtG(max) + '</b> · 保留分区 ' + (Number(k.keep_mib) > 0 ? fmtG(k.keep_mib) : '无') +
-        ' · 扩容时给日志盘留 ' + fmtG(k.reserve || 256);
-  }
-  document.getElementById('e-logbox').textContent = k.expand_log || '(空)';
-}
-function loadDisk() {
-  return api('show', {TYPE:'disk'}).then(function(d){ renderDisk(d.disk); })
-    .catch(function(e){ tip('容量读取失败: ' + e.message, 'msg err'); });
-}
-function goDisk() {
-  // 跳到 iKuai 的「磁盘分区」页(新开标签, 不影响当前控制台)
-  window.open('/#/system-setting/diskpartition', '_blank');
-}
-function gotoExpand() {
-  document.querySelectorAll('.tabs a').forEach(function(x){ x.classList.remove('on'); });
-  var t = document.querySelector('.tabs a[data-p="p-tool"]');
-  if (t) { t.classList.add('on'); }
-  document.querySelectorAll('.pane').forEach(function(x){ x.classList.remove('on'); });
-  var p = document.getElementById('p-tool');
-  if (p) { p.classList.add('on'); }
-  var i = document.getElementById('e-size');
-  if (i) { i.focus(); }
-}
-function doExpand() {
-  var inp = document.getElementById('e-size');
-  var v = gToMib(parseFloat(inp.value));            // 用户填的是 G, 转成 MiB 提交
-  var cur = Number(DISK.mnt_mib)||0, max = Number(DISK.max_mib)||0;
-  var m = document.getElementById('e-msg');
-  m.className = 'msg err';
-  if (!v || v <= 0) { m.textContent = '请填写要扩到的系统盘大小(G)'; return; }
-  if (cur > 0 && v <= cur) { m.textContent = '要大于当前的 ' + fmtG(cur) + '（本功能只扩不缩）'; return; }
-  if (max > 0 && v > max) {
-    m.textContent = '不能超过 ' + fmtG(max) + '（要给日志盘留出它已占用的空间和 ' +
-        fmtG(DISK.reserve || 256) + ' 余量，且不能动保留分区）';
-    return;
-  }
-  if (!confirm('确定把系统盘 /etc/mnt 从 ' + fmtG(cur) + ' 扩到 ' + fmtG(v) + ' 吗？\n\n' +
-      '提交后设备【即将重启】：启动过程中自动改盘，并再自动重启一次完成，期间约 1~2 分钟不可用。\n' +
-      '成功或失败都会写入 /etc/log/ikguard/expand.log 与当天审计日志。')) { return; }
-  m.className = 'msg';
-  m.textContent = '正在提交…';
-  api('expand', {op:'set', size:v}).then(function(){
-    m.className = 'msg err';
-    m.textContent = '扩容请求已提交(' + fmtG(v) + ')，设备即将重启（启动过程中自动执行）。约 1~2 分钟后重新登录，可在"工具"里看扩容日志。';
-    tip('扩容请求已提交，设备即将重启…', 'msg err');
-  }).catch(function(e){
-    m.className = 'msg err';
-    m.textContent = '提交失败：' + e.message + '（已记入审计日志）';
-  });
-}
-function doExpandCancel() {
-  if (!confirm('撤销待执行的扩容请求吗？（已生效的扩容不受影响）')) { return; }
-  api('expand', {op:'cancel'}).then(function(){
-    tip('已撤销扩容请求', 'msg ok');
-    loadDisk();
-  }).catch(function(e){ tip('撤销失败: ' + e.message, 'msg err'); });
-}
+    /* ---------------------------------------------------------- 加载 */
+    /* 概览数据(版本/hosts 条数/启动尝试/日志占用)变化很慢, 60s 拉一次足够。
+       每次 show 要在设备上跑十几个 fork(df / 多次 grep 统计日志), 不宜更频繁。 */
+    load: function () {
+      var self = this;
+      return this.ik('show', { TYPE: 'data,flags,plugins,eula,disk' }).then(function (d) {
+        var e = (d && d.eula) || {};
+        if (String(e.accepted) !== '1') {
+          self.eulaOk = false;
+          return;
+        }
+        self.eulaOk = true;
+        var s = d.status || {};
+        self.flags = d.flags || {};
+        var alive = String(s.backdoor_alive || '').trim();
+        self.tiles = [
+          { k: '框架版本', v: s.version || '-' },
+          { k: '签名校验', v: s.plugins_ok === '1' ? '通过' : '未通过', tone: s.plugins_ok === '1' ? 'ok' : 'err' },
+          { k: '后门进程', v: alive || '无', tone: alive ? 'err' : 'ok' },
+          { k: 'hosts 封锁', v: (s.hosts_entries || 0) + ' 条', tone: Number(s.hosts_entries) > 0 ? 'ok' : 'warn' },
+          { k: '启动尝试', v: (s.stub_hits || 0) + ' 次', tone: Number(s.stub_hits) > 0 ? 'err' : 'ok' },
+          { k: '被动采集', v: Number(s.collect_running) === 1 ? '运行中' : '未运行',
+            tone: Number(s.collect_running) === 1 ? 'ok' : 'warn' },
+          { k: '今日事件', v: '连 ' + (s.n_conn || 0) + ' / DNS ' + (s.n_dns || 0), size: 'sm' },
+          { k: '日志分区', v: s.log_usage || '-', size: 'sm' }
+        ];
+        self.plugins = Array.isArray(d.plugins) ? d.plugins : [];
+        self.pending = Array.isArray(d.pending) ? d.pending : [];
+        self.renderDisk(d.disk || {});
+      }).catch(function (e) {
+        self.eulaOk = false;
+        self.gateMsg = '加载失败：' + e.message;
+      });
+    },
+    renderDisk: function (k) { this.DISK = k || {}; },
+    loadDisk: function () {
+      var self = this;
+      return this.ik('show', { TYPE: 'disk' }).then(function (d) { self.renderDisk(d.disk || {}); })
+        .catch(function (e) { self.msg = '容量读取失败: ' + e.message; });
+    },
+    refreshAll: function () {
+      this.load(); this.loadLogs(); this.loadSsh(); this.loadCheck();
+    },
+    onTab: function (name) {
+      if (name === 'log') { this.loadLogs(); }
+      if (name === 'ssh') { this.loadSsh(); }
+      if (name === 'tool') { this.loadCheck(); }
+    },
+    act: function (action, param) {
+      var self = this;
+      if (action === 'apply') { this.applying = true; }
+      return this.ik(action, param).then(function () {
+        IKUI.toast('操作成功', 'success');
+        self.load(); self.loadLogs();
+      }).catch(function (e) { IKUI.toast('操作失败: ' + e.message, 'error'); })
+        .then(function () { self.applying = false; });
+    },
+    setFlag: function (key, value) {
+      var self = this;
+      this.flagBusy = key;
+      this.ik('seting', { key: key, value: String(value) }).then(function () {
+        IKUI.toast(key + ' = ' + value + ' 已生效', 'success');
+        self.load(); self.loadSsh();
+      }).catch(function (e) { IKUI.toast('设置失败: ' + e.message, 'error'); })
+        .then(function () { self.flagBusy = ''; });
+    },
 
-/* ---------------- 使用条款(首次启用) ---------------- */
-var EULA_OK = false;
-function openEula() {
-  document.getElementById('mask').classList.add('on');
-  api('show', {TYPE:'eula'}).then(function(d){
-    var e = (d && d.eula) || {};
-    document.getElementById('eula-txt').textContent = e.text || '（条款内容缺失）';
-    document.getElementById('eula-agree').disabled = false;
-  }).catch(function(err){
-    document.getElementById('eula-txt').textContent = '条款加载失败：' + err.message;
-  });
-}
-function closeEula() { document.getElementById('mask').classList.remove('on'); }
-function acceptEula() {
-  var b = document.getElementById('eula-agree');
-  b.disabled = true; b.textContent = '正在保存…';
-  api('eula', {op:'accept'}).then(function(){
-    closeEula();
-    document.getElementById('gate').style.display = 'none';
-    EULA_OK = true;
-    tip('已同意《使用条款》，插件功能已启用', 'msg ok');
-    load(); loadLogs();
-  }).catch(function(err){
-    b.disabled = false; b.textContent = '同意并启用';
-    document.getElementById('gate-msg').textContent = '保存失败：' + err.message;
-  });
-}
-document.getElementById('gate-btn').onclick = openEula;
+    /* ---------------------------------------------------------- 日志 / 自检 */
+    loadLogs: function () {
+      var self = this;
+      if (!this.eulaOk) { return Promise.resolve(); }
+      return this.ik('show', { TYPE: 'logs' }).then(function (d) { self.logs = d.logs || {}; })
+        .catch(function (e) { self.msg = '日志加载失败: ' + e.message; });
+    },
+    loadCheck: function () {
+      var self = this;
+      if (!this.eulaOk) { return Promise.resolve(); }
+      return this.ik('show', { TYPE: 'check' }).then(function (d) {
+        var p = (d && d.check) || {};
+        self.checkText = p.text || '';
+      }).catch(function () {});
+    },
+    runCheck: function () {
+      var self = this;
+      this.checking = true;
+      this.ik('check').then(function () {
+        IKUI.toast('封锁自检完成', 'success');
+        self.loadCheck();
+      }).catch(function (e) { IKUI.toast('自检失败: ' + e.message, 'error'); })
+        .then(function () { self.checking = false; });
+    },
 
-/* ---------------- 状态/开关/插件/日志/工具 ---------------- */
-function load() {
-  return api('show', {TYPE:'data,flags,plugins,eula,disk'}).then(function(d){
-    var e = (d && d.eula) || {};
-    if (String(e.accepted) !== '1') {
-      EULA_OK = false;
-      document.getElementById('gate').style.display = 'flex';
-      document.getElementById('app').style.visibility = 'hidden';
-      return;
+    /* ---------------------------------------------------------- SSH 防护 */
+    loadSsh: function () {
+      var self = this;
+      if (!this.eulaOk) { return Promise.resolve(); }
+      return this.ik('show', { TYPE: 'ssh' }).then(function (d) { self.ssh = d.ssh || {}; })
+        .catch(function (e) { self.msg = 'SSH 状态加载失败: ' + e.message; });
+    },
+    toggleSshguard: function () {
+      var on = this.flagOn('sshguard');
+      var self = this;
+      if (!on) {
+        IKUI.confirm('开启后, 从公网(WAN 侧)发起的新 SSH 连接会被丢弃。\n'
+          + 'LAN 侧不受影响; 本页所在的 Web 也不受影响, 随时能关掉。\n\n确定开启？').then(function (yes) {
+          if (yes) { self.setFlag('sshguard', '1'); }
+        });
+        return;
+      }
+      this.setFlag('sshguard', '0');
+    },
+    banIp: function (ip) {
+      var self = this;
+      if (!ip) { IKUI.toast('这条日志没有来源 IP，无法封禁', 'warning'); return; }
+      IKUI.confirm('封禁 ' + ip + ' 访问本机 SSH ?\n(Web 与其它服务不受影响, 之后可随时解封)').then(function (yes) {
+        if (!yes) { return; }
+        self.ik('sshban', { op: 'ban', ip: ip, note: 'SSH 日志一键封禁' }).then(function () {
+          IKUI.toast('已封禁 ' + ip, 'success');
+          self.loadSsh(); self.load();
+        }).catch(function (e) { IKUI.toast('封禁失败: ' + e.message, 'error'); });
+      });
+    },
+    unbanIp: function (ip) {
+      var self = this;
+      this.ik('sshban', { op: 'unban', ip: ip }).then(function () {
+        IKUI.toast('已解封 ' + ip, 'success'); self.loadSsh();
+      }).catch(function (e) { IKUI.toast('解封失败: ' + e.message, 'error'); });
+    },
+    clearSshBan: function () {
+      var self = this;
+      IKUI.confirm('清空全部封禁名单？(已封禁的 IP 会立即恢复访问 SSH)').then(function (yes) {
+        if (!yes) { return; }
+        self.ik('sshban', { op: 'clear' }).then(function () {
+          IKUI.toast('已清空封禁名单', 'success'); self.loadSsh();
+        }).catch(function (e) { IKUI.toast('清空失败: ' + e.message, 'error'); });
+      });
+    },
+
+    /* ---------------------------------------------------------- 插件上传/安装 */
+    /* 先 POST /Action/upload 落盘到 /tmp/iktmp/import/, 再调 ikguard plugin op=install。
+       iKuai 上传接口存盘时取的是 multipart 的"字段名"而不是 filename
+       (getUploadHead(...).name), 所以字段名必须写成原始文件名, 否则会存成 "file"。 */
+    doUpload: function (opt) {
+      var self = this;
+      var f = opt.file;
+      this.uploading = true;
+      var done = opt.onSuccess || function () {};
+      var fail = opt.onError || function () {};
+      if (!/\.zip$/i.test(f.name)) {
+        IKUI.toast('只支持 .zip 插件包', 'warning');
+        this.uploading = false;
+        fail(new Error('非 zip 包'));
+        return;
+      }
+      this.msg = '正在上传 ' + f.name + ' …';
+      var fd = new FormData();
+      fd.append(f.name, f, f.name);
+      fetch('/Action/upload', { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j.Result !== 10000) { throw new Error(j.ErrMsg || ('上传失败 ' + j.Result)); }
+          return self.ik('plugin', { op: 'install', name: f.name });
+        })
+        .then(function () {
+          IKUI.toast('安装完成：' + f.name, 'success');
+          self.msg = '';
+          self.load();
+          done();
+        })
+        .catch(function (e) {
+          IKUI.toast('安装失败: ' + e.message, 'error');
+          self.msg = '';
+          fail(e);
+        })
+        .then(function () { self.uploading = false; });
+    },
+
+    /* ---------------------------------------------------------- 扩容 */
+    goDisk: function () {
+      /* 跳到 iKuai 的「磁盘分区」页（新开标签，不影响当前控制台） */
+      window.open('/#/system-setting/diskpartition', '_blank');
+    },
+    gotoExpand: function () {
+      this.tab = 'tool';
+      this.loadCheck();
+    },
+    doExpand: function () {
+      var self = this;
+      var v = this.gToMib(parseFloat(this.expandSize));   /* 用户填的是 G, 转成 MiB 提交 */
+      var cur = Number(this.DISK.mnt_mib) || 0, max = Number(this.DISK.max_mib) || 0;
+      this.eTone = 'ik-err';
+      if (!v || v <= 0) { this.eMsg = '请填写要扩到的系统盘大小(G)'; return; }
+      if (cur > 0 && v <= cur) { this.eMsg = '要大于当前的 ' + this.fmtG(cur) + '（本功能只扩不缩）'; return; }
+      if (max > 0 && v > max) {
+        this.eMsg = '不能超过 ' + this.fmtG(max) + '（要给日志盘留出它已占用的空间和 ' +
+          this.fmtG(this.DISK.reserve || 256) + ' 余量，且不能动保留分区）';
+        return;
+      }
+      IKUI.confirm('确定把系统盘 /etc/mnt 从 ' + this.fmtG(cur) + ' 扩到 ' + this.fmtG(v) + ' 吗？\n\n'
+        + '提交后设备【即将重启】：启动过程中自动改盘，并再自动重启一次完成，期间约 1~2 分钟不可用。\n'
+        + '成功或失败都会写入 /etc/log/ikguard/expand.log 与当天审计日志。').then(function (yes) {
+        if (!yes) { return; }
+        self.eTone = 'ik-mut';
+        self.eMsg = '正在提交…';
+        self.expanding = true;
+        self.ik('expand', { op: 'set', size: v }).then(function () {
+          self.eTone = 'ik-err';
+          self.eMsg = '扩容请求已提交(' + self.fmtG(v) + ')，设备即将重启（启动过程中自动执行）。'
+            + '约 1~2 分钟后重新登录，可在"工具"里看扩容日志。';
+          IKUI.toast('扩容请求已提交，设备即将重启…', 'warning');
+        }).catch(function (e) {
+          self.eTone = 'ik-err';
+          self.eMsg = '提交失败：' + e.message + '（已记入审计日志）';
+        }).then(function () { self.expanding = false; });
+      });
+    },
+    doExpandCancel: function () {
+      var self = this;
+      IKUI.confirm('撤销待执行的扩容请求吗？（已生效的扩容不受影响）').then(function (yes) {
+        if (!yes) { return; }
+        self.ik('expand', { op: 'cancel' }).then(function () {
+          IKUI.toast('已撤销扩容请求', 'success'); self.loadDisk();
+        }).catch(function (e) { IKUI.toast('撤销失败: ' + e.message, 'error'); });
+      });
+    },
+
+    /* ---------------------------------------------------------- 使用条款 */
+    openEula: function () {
+      var self = this;
+      this.eulaDlg = true;
+      this.eulaText = '';
+      this.ik('show', { TYPE: 'eula' }).then(function (d) {
+        var e = (d && d.eula) || {};
+        self.eulaText = e.text || '（条款内容缺失）';
+      }).catch(function (err) {
+        self.eulaText = '条款加载失败：' + err.message;
+      });
+    },
+    acceptEula: function () {
+      var self = this;
+      this.eulaBusy = true;
+      this.ik('eula', { op: 'accept' }).then(function () {
+        self.eulaDlg = false;
+        self.eulaOk = true;
+        IKUI.toast('已同意《使用条款》，插件功能已启用', 'success');
+        self.load(); self.loadLogs();
+      }).catch(function (err) {
+        self.gateMsg = '保存失败：' + err.message;
+      }).then(function () { self.eulaBusy = false; });
     }
-    EULA_OK = true;
-    document.getElementById('gate').style.display = 'none';
-    document.getElementById('app').style.visibility = 'visible';
-
-    var s = d.status || {}, f = d.flags || {};
-    window.LAST_FLAGS = f;   // SSH 页签要用它显示 sshguard 开关状态
-    var alive = (s.backdoor_alive||'').trim();
-    var html = '';
-    html += card('框架版本', s.version || '-');
-    html += card('签名校验', s.plugins_ok==='1' ? '通过' : '未通过', s.plugins_ok==='1'?'ok':'err');
-    html += card('后门进程', alive ? alive : '无', alive ? 'err':'ok');
-    html += card('hosts 封锁', (s.hosts_entries||0)+' 条', (s.hosts_entries>0)?'ok':'warn');
-    html += card('启动尝试', (s.stub_hits||0)+' 次', (s.stub_hits>0)?'err':'ok');
-    html += card('被动采集', s.collect_running==1?'运行中':'未运行', s.collect_running==1?'ok':'warn');
-    html += card('今日事件', '连 '+(s.n_conn||0)+' / DNS '+(s.n_dns||0));
-    html += card('日志分区', (s.log_usage||'-'));
-    document.getElementById('cards').innerHTML = html;
-    var sw = '';
-    FLAGS.forEach(function(it){
-      var on = (String(f[it[0]]) === '1');
-      sw += '<div class="sw"><div><b>'+it[1]+'</b> <code>'+it[0]+'</code><small>'+it[2]+'</small></div>';
-      sw += '<button class="'+(on?'pri':'')+'" onclick="setFlag(\''+it[0]+'\','+(on?'0':'1')+')">'+(on?'已开启':'已关闭')+'</button></div>';
-    });
-    document.getElementById('switches').innerHTML = sw;
-
-    var list = Array.isArray(d.plugins) ? d.plugins : [];
-    var rows = '';
-    list.forEach(function(p){
-      rows += '<tr><td>'+p.name+'</td><td>'+(p.version||'-')+'</td><td>'+(p.state||'-')+'</td><td>'+p.files+'</td>'
-           +  '<td><button onclick="act(\'plugin\',{op:\'remove\',name:\''+p.name+'\'})">卸载</button></td></tr>';
-    });
-    document.getElementById('plugin-rows').innerHTML = rows || '<tr><td colspan="5" style="color:#909399">暂无已安装插件</td></tr>';
-    var pend = Array.isArray(d.pending) ? d.pending : [];
-    document.getElementById('pending').textContent = pend.map(function(z){return z.name;}).join(' , ') || '无';
-    renderDisk(d.disk);
-    document.title = '安全防护控制台 ikguard';
-  }).catch(function(e){
-    document.getElementById('gate').style.display = 'flex';
-    document.getElementById('app').style.visibility = 'hidden';
-    document.getElementById('gate-msg').textContent = '加载失败：' + e.message;
-  });
-}
-
-function loadLogs() {
-  if (!EULA_OK) return Promise.resolve();
-  return api('show', {TYPE:'logs'}).then(function(d){
-    var l = d.logs || {};
-    ['report','audit','conn','dns','stub','boot'].forEach(function(k){
-      var el = document.getElementById('log-'+k);
-      if (el) { el.textContent = l[k] || '(空)'; }
-    });
-  }).catch(function(e){ tip('日志加载失败: '+e.message, 'msg err'); });
-}
-
-function loadCheck() {
-  if (!EULA_OK) return;
-  api('show', {TYPE:'check'}).then(function(d){
-    var p = (d && d.check) || {};
-    document.getElementById('check-out').textContent = p.text || '(还没有执行过自检)';
-  }).catch(function(){});
-}
-
-function setFlag(key, value) {
-  api('seting', {key:key, value:String(value)}).then(function(){
-    tip(key+' = '+value+' 已生效', 'msg ok'); load(); loadSsh();
-  }).catch(function(e){ tip('设置失败: '+e.message, 'msg err'); });
-}
-
-/* ------------------------------------------------------------------ SSH 防护 */
-
-function esc(v) {
-  return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-  });
-}
-
-function loadSsh() {
-  if (!EULA_OK) return Promise.resolve();
-  return api('show', {TYPE:'ssh'}).then(function(d){
-    var s = d.ssh || {}, f = window.LAST_FLAGS || {};
-    var el;
-    if ((el = document.getElementById('s-pub'))) {
-      el.innerHTML = (s.pub === 'on')
-        ? '<span class="ok">已封禁(公网新连接被丢弃)</span>'
-        : '<span class="err">未封禁(公网可直连 SSH)</span>';
-    }
-    if ((el = document.getElementById('s-port')))  el.textContent = s.port || '22';
-    if ((el = document.getElementById('s-open')))  el.textContent = s.open || '0';
-    if ((el = document.getElementById('s-wan')))   el.textContent = s.wan_arg || '-';
-    if ((el = document.getElementById('s-db')))    el.textContent = s.syslog_db || '-';
-    var on = (String(f['sshguard']) === '1');
-    if ((el = document.getElementById('s-btn'))) {
-      el.textContent = on ? '关闭公网封禁' : '开启公网封禁';
-      el.className = on ? '' : 'pri';
-    }
-    if ((el = document.getElementById('s-bann')))  el.textContent = s.ban_count || 0;
-
-    var es = Array.isArray(s.entries) ? s.entries : [];
-    var rows = es.map(function(e){
-      var cls = (e.result === 'fail') ? 'err' : (e.result === 'ok' ? 'ok' : '');
-      var btn = e.ip ? '<button onclick="banIp(\''+esc(e.ip)+'\')">封禁该 IP</button>' : '';
-      return '<tr><td>'+esc(e.time)+'</td><td class="'+cls+'">'+esc(e.event)+'</td><td>'+esc(e.user||'-')
-           + '</td><td>'+esc(e.ip||'-')+'</td><td>'+btn+'</td></tr>';
-    }).join('');
-    if ((el = document.getElementById('s-rows'))) {
-      el.innerHTML = rows || '<tr><td colspan="5" style="color:#909399">暂无 SSH 登录记录</td></tr>';
-    }
-
-    var ls = Array.isArray(s.list) ? s.list : [];
-    var lrows = ls.map(function(b){
-      return '<tr><td>'+esc(b.ip)+'</td><td>'+esc(b.time||'-')+'</td><td>'+esc(b.note||'-')
-           + '</td><td><button onclick="unbanIp(\''+esc(b.ip)+'\')">解封</button></td></tr>';
-    }).join('');
-    if ((el = document.getElementById('s-ban-rows'))) {
-      el.innerHTML = lrows || '<tr><td colspan="4" style="color:#909399">暂无</td></tr>';
-    }
-  }).catch(function(e){ tip('SSH 状态加载失败: '+e.message, 'msg err'); });
-}
-
-function toggleSshguard() {
-  var on = (String((window.LAST_FLAGS||{})['sshguard']) === '1');
-  if (!on && !confirm('开启后, 从公网(WAN 侧)发起的新 SSH 连接会被丢弃。\n'
-                    + 'LAN 侧不受影响; 本页所在的 Web 也不受影响, 随时能关掉。\n\n确定开启？')) return;
-  setFlag('sshguard', on ? '0' : '1');
-}
-
-function banIp(ip) {
-  if (!ip) { tip('这条日志没有来源 IP，无法封禁', 'msg err'); return; }
-  if (!confirm('封禁 ' + ip + ' 访问本机 SSH ?\n(Web 与其它服务不受影响, 之后可随时解封)')) return;
-  api('sshban', {op:'ban', ip:ip, note:'SSH 日志一键封禁'}).then(function(){
-    tip('已封禁 ' + ip, 'msg ok'); loadSsh(); load();
-  }).catch(function(e){ tip('封禁失败: ' + e.message, 'msg err'); });
-}
-
-function unbanIp(ip) {
-  api('sshban', {op:'unban', ip:ip}).then(function(){
-    tip('已解封 ' + ip, 'msg ok'); loadSsh();
-  }).catch(function(e){ tip('解封失败: ' + e.message, 'msg err'); });
-}
-
-function clearSshBan() {
-  if (!confirm('清空全部封禁名单？(已封禁的 IP 会立即恢复访问 SSH)')) return;
-  api('sshban', {op:'clear'}).then(function(){
-    tip('已清空封禁名单', 'msg ok'); loadSsh();
-  }).catch(function(e){ tip('清空失败: ' + e.message, 'msg err'); });
-}
-
-function runCheck() {
-  api('check').then(function(){
-    tip('封锁自检完成', 'msg ok');
-    loadCheck();
-  }).catch(function(e){ tip('自检失败: '+e.message, 'msg err'); });
-}
-
-/* 上传并安装: 先 POST /Action/upload 落盘到 /tmp/iktmp/import/, 再调 ikguard plugin op=install */
-function doUpload(f) {
-  if (!/\.zip$/i.test(f.name)) { tip('只支持 .zip 插件包', 'msg err'); return Promise.reject(new Error('非 zip 包')); }
-  tip('正在上传 ' + f.name + ' …');
-  var fd = new FormData();
-  // iKuai 上传接口 (/Action/upload) 存盘时取的是 multipart 的"字段名"而不是 filename
-  // (getUploadHead(...).name), 所以字段名必须写成原始文件名, 否则会存成 "file"
-  fd.append(f.name, f, f.name);
-  return fetch('/Action/upload', { method:'POST', body: fd }).then(function(r){ return r.json(); }).then(function(j){
-    if (j.Result !== 10000) { throw new Error(j.ErrMsg || ('上传失败 '+j.Result)); }
-    return api('plugin', {op:'install', name:f.name});
-  }).then(function(){
-    tip('安装完成：' + f.name, 'msg ok');
-    load();
-  }).catch(function(e){ tip('安装失败: ' + e.message, 'msg err'); throw e; });
-}
-
-function uploadZip() {
-  var input = document.getElementById('zipfile');
-  if (!input.files || !input.files.length) { tip('请先选择 zip 插件包', 'msg err'); return; }
-  doUpload(input.files[0]).then(function(){ input.value = ''; }).catch(function(){});
-}
-
-function act(action, param) {
-  api(action, param).then(function(){
-    tip('操作成功', 'msg ok');
-    load(); loadLogs();
-  }).catch(function(e){ tip('操作失败: ' + e.message, 'msg err'); });
-}
-
-document.querySelectorAll('.tabs a').forEach(function(a){
-  a.onclick = function(){
-    document.querySelectorAll('.tabs a').forEach(function(x){ x.classList.remove('on'); });
-    document.querySelectorAll('.pane').forEach(function(x){ x.classList.remove('on'); });
-    a.classList.add('on');
-    document.getElementById(a.dataset.p).classList.add('on');
-    if (a.dataset.p === 'p-log') loadLogs();
-    if (a.dataset.p === 'p-ssh') loadSsh();
-    if (a.dataset.p === 'p-tool') loadCheck();
-  };
+  },
+  mounted: function () {
+    var self = this;
+    this.load();
+    this.timer = setInterval(function () {
+      if (!document.hidden && self.eulaOk) { self.load(); }
+    }, 60000);
+  },
+  unmounted: function () { if (this.timer) { clearInterval(this.timer); } }
 });
-
-load();
-/* 概览数据(版本/hosts 条数/启动尝试/日志占用)变化很慢, 60s 拉一次足够。
-   每次 show 要在设备上跑十几个 fork(df / 多次 grep 统计日志), 不宜更频繁。 */
-setInterval(function(){ if (!document.hidden && EULA_OK) load(); }, 60000);
 </script>
 </body>
 </html>

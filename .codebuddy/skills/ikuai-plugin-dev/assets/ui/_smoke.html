@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ikui 冒烟测试</title>
+<link rel="stylesheet" href="./ikui.css">
+</head>
+<body>
+<script type="text/x-template" id="tpl">
+
+  <ik-page title="ikui 组件预览" tag="smoke" sub="统一 UI 套件">
+    <template #actions>
+      <el-button @click="toast('刷新了一下','success')">刷新</el-button>
+    </template>
+
+    <ik-tiles :items="tiles"></ik-tiles>
+
+    <ik-tiles>
+      <ik-tile label="自定义卡片（显式闭合）" size="sm"></ik-tile>
+    </ik-tiles>
+
+    <ik-sec title="账号登录" desc="登录信息不会保存在设备上">
+      <el-form label-width="110px" @submit.prevent>
+        <el-form-item label="账号">
+          <el-input v-model="user" placeholder="向日葵账号 / 手机号 / 邮箱" style="width:320px"/>
+        </el-form-item>
+        <el-form-item label="密码">
+          <el-input v-model="pass" type="password" show-password placeholder="登录密码" style="width:320px"/>
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-select v-model="type" style="width:200px">
+            <el-option label="命令行 shell" value="shell"/>
+            <el-option label="网页 web" value="web"/>
+            <el-option label="空屏 blank" value="blank"/>
+          </el-select>
+          <el-switch v-model="enabled" style="margin-left:12px"/>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="toast('已保存','success')">保存</el-button>
+          <el-button @click="doConfirm">删除</el-button>
+        </el-form-item>
+      </el-form>
+    </ik-sec>
+
+    <ik-sec title="虚拟屏幕">
+      <template #actions>
+        <el-button size="small" type="primary" plain>+ 加一块屏</el-button>
+      </template>
+      <el-table :data="rows" border style="width:100%">
+        <el-table-column prop="idx" label="屏号" width="70"/>
+        <el-table-column prop="type" label="类型" width="130"/>
+        <el-table-column prop="size" label="分辨率" width="140"/>
+        <el-table-column prop="target" label="内容"/>
+        <el-table-column label="操作" width="90">
+          <template #default><el-button size="small" type="danger" plain>删除</el-button></template>
+        </el-table-column>
+      </el-table>
+    </ik-sec>
+
+    <ik-sec title="输出">
+      <pre class="ik-pre">awesunctl status
+awesunctl screens show</pre>
+      <p class="ik-tip">提示文字：<span class="ik-code">ik-code</span> 是这样用的。</p>
+    </ik-sec>
+  </ik-page>
+</div>
+</script>
+<div id="app"></div>
+
+<script src="./ikui.js"></script>
+<script>
+IKUI.mount('#app', {
+  tpl: '#tpl',
+  func: 'smoke',
+  data: function () {
+    return {
+      ok: true, user: '', pass: '', type: 'shell', enabled: true,
+      tiles: [
+        { k: '上线状态', v: '在线', tone: 'ok' },
+        { k: '本机识别码', v: '509542928', size: 'big', mono: true },
+        { k: '葵码', v: '8391-2392-4823-2165-2130', size: 'sm' },
+        { k: '绑定账号', v: '18202714527' }
+      ],
+      rows: [
+        { idx: 0, type: 'shell（命令行）', size: '1280x720', target: '-' },
+        { idx: 1, type: 'web（网页）', size: '1920x1080', target: 'http://127.0.0.1/' }
+      ]
+    };
+  },
+  methods: {
+    toast: function (t, ty) { IKUI.toast(t, ty); },
+    doConfirm: function () {
+      IKUI.confirm('确定要删除吗？').then(function (yes) { IKUI.toast(yes ? '已删除' : '取消了'); });
+    }
+  }
+});
+</script>
+</body>
+</html>

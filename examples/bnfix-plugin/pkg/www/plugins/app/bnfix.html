@@ -3,123 +3,113 @@
 <head>
 <meta charset="utf-8">
 <title>OpenSSL 修复 bnfix</title>
-<style>
-  :root { --bd:#e4e7ed; --fg:#303133; --mut:#909399; --pri:#409eff; --ok:#67c23a; --warn:#e6a23c; --err:#f56c6c; --bg:#f5f7fa; }
-  * { box-sizing:border-box; }
-  body { margin:0; padding:14px; font:13px/1.6 "Microsoft YaHei",Helvetica,Arial,sans-serif; color:var(--fg); background:#fff; }
-  h3 { margin:0 0 10px; font-size:15px; }
-  h4 { margin:16px 0 6px; font-size:13px; color:#606266; }
-  .row { display:flex; flex-wrap:wrap; gap:10px; }
-  .card { flex:1 1 150px; min-width:140px; border:1px solid var(--bd); border-radius:6px; padding:10px 12px; background:var(--bg); }
-  .card .k { color:var(--mut); font-size:12px; }
-  .card .v { font-size:16px; font-weight:700; margin-top:2px; word-break:break-all; }
-  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); }
-  pre { margin:0; padding:10px; background:#1e1e1e; color:#d4d4d4; border-radius:5px; max-height:260px; overflow:auto; font:12px/1.5 Consolas,Monaco,monospace; white-space:pre-wrap; }
-  button { cursor:pointer; border:1px solid var(--bd); background:#fff; border-radius:4px; padding:5px 12px; font-size:12px; }
-  button:hover { border-color:var(--pri); color:var(--pri); }
-  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
-  button.danger:hover { border-color:var(--err); color:var(--err); }
-  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
-  .msg { min-height:18px; font-size:12px; color:var(--mut); }
-  .tag { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; background:var(--bd); color:#fff; }
-  .tip { color:var(--mut); font-size:12px; line-height:1.8; }
-  code { background:#f2f3f5; padding:0 4px; border-radius:3px; }
-  .btns { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 4px; }
-</style>
+<!-- 界面用插件统一 UI 套件 ikui；资源由基础包提供，插件不带（见 references/ui.md） -->
+<link rel="stylesheet" href="./ikui.css">
 </head>
 <body>
-<div class="bar">
-  <h3 style="margin:0">OpenSSL 修复</h3>
-  <span class="tag">bnfix</span>
-  <span style="flex:1"></span>
-  <span class="msg" id="msg"></span>
-  <button onclick="load()">刷新</button>
-</div>
 
-<div class="row" id="cards"></div>
+<script type="text/x-template" id="tpl">
+<ik-page title="OpenSSL 修复" tag="bnfix" :sub="msg">
+  <template #actions>
+    <el-button size="small" @click="load">刷新</el-button>
+  </template>
 
-<h4>操作</h4>
-<div class="btns">
-  <button class="pri" onclick="toggle(1)">启用修复</button>
-  <button class="danger" onclick="toggle(0)">撤销修复</button>
-  <button onclick="act('restart')">重启受影响服务</button>
-  <button onclick="act('verify')">快速自检</button>
-  <button onclick="act('verifyfull')">完整自检(回滚对比)</button>
-</div>
-<p class="tip">
-  <b>注意</b>：修复作用在系统共享库 <code>/usr/lib/libcrypto.so.1.0.0</code> 上，<b>已经在跑的进程仍持有旧库</b>，
-  所以装完插件要「重启设备」才会对 openresty/ikdnsd 等真正生效；<b>根分区每次重启都会还原</b>，
-  插件在每次开机时自动重新施加，卸载插件后重启即彻底失效。
-</p>
+  <ik-tiles :items="tiles"></ik-tiles>
 
-<h4>自检 / 诊断结果</h4>
-<pre id="out">点上面的按钮查看结果…</pre>
+  <ik-sec title="操作">
+    <div class="ik-toolbar">
+      <el-button type="primary" @click="toggle(1)">启用修复</el-button>
+      <el-button type="danger" plain @click="toggle(0)">撤销修复</el-button>
+      <el-button @click="act('restart')">重启受影响服务</el-button>
+      <el-button @click="act('verify')">快速自检</el-button>
+      <el-button @click="act('verifyfull')">完整自检（回滚对比）</el-button>
+    </div>
+    <p class="ik-tip">
+      <b>注意</b>：修复作用在系统共享库 <code class="ik-code">/usr/lib/libcrypto.so.1.0.0</code> 上，
+      <b>已经在跑的进程仍持有旧库</b>，所以装完插件要「重启设备」才会对 openresty/ikdnsd 等真正生效；
+      <b>根分区每次重启都会还原</b>，插件在每次开机时自动重新施加，卸载插件后重启即彻底失效。
+    </p>
+  </ik-sec>
 
-<h4>状态明细</h4>
-<pre id="dbg">-</pre>
+  <ik-sec title="自检 / 诊断结果">
+    <pre class="ik-pre">{{ out || '点上面的按钮查看结果…' }}</pre>
+  </ik-sec>
 
+  <ik-sec title="状态明细">
+    <pre class="ik-pre">{{ dbg || '-' }}</pre>
+  </ik-sec>
+</ik-page>
+</script>
+
+<div id="app"></div>
+
+<script src="./ikui.js"></script>
 <script>
-function api(action, param) {
-  return fetch('/Action/call', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ func_name:'bnfix', action:action, param:param||{} })
-  }).then(function(r){ return r.json(); }).then(function(j){
-    if (j.Result !== 30000) { throw new Error(j.ErrMsg || ('错误码 '+j.Result)); }
-    return j.Data || {};
-  });
-}
-function tip(t, cls) {
-  var m = document.getElementById('msg');
-  m.textContent = t || ''; m.className = cls || 'msg';
-  if (t) { setTimeout(function(){ if (m.textContent===t) m.textContent=''; }, 8000); }
-}
-function card(k, v, cls) {
-  return '<div class="card"><div class="k">'+k+'</div><div class="v '+(cls||'')+'">'+v+'</div></div>';
-}
-function pick(d, key) { return (d && d[key]) || (d && d.data && d.data[key]) || null; }
-
-function load() {
-  return api('show', {TYPE:'data'}).then(function(d){
-    var s = pick(d,'status') || d;
-    var fixed = s.fixed === true || s.fixed === 'true';
-    var en = String(s.enabled) === '1' || s.enabled === true;
-    var users = Array.isArray(s.users) ? s.users : [];
-    var html = '';
-    html += card('修复状态', fixed ? '已生效于文件' : '未生效', fixed ? 'ok' : 'warn');
-    html += card('开关', en ? '已启用' : '已关闭', en ? 'ok' : 'err');
-    html += card('修复方式', s.mode === 'so' ? '整库覆盖' : '定点补丁');
-    html += card('库状态', s.lib_state || '-');
-    html += card('加载该库的进程', users.length ? users.join(', ') : '无');
-    html += card('记录条数', (s.log_lines||0));
-    document.getElementById('cards').innerHTML = html;
-    document.getElementById('dbg').textContent =
-      '目标库: ' + (s.lib||'-') +
-      '\n当前 md5: ' + (s.md5||'-') +
-      '\n原始 md5: ' + (s.orig_md5||'-') +
-      '\n补丁后 md5: ' + (s.patched_md5||'-') +
-      '\n\n' + JSON.stringify(s, null, 2);
-  }).catch(function(e){ tip('加载失败: '+e.message, 'msg err'); });
-}
-function toggle(v) {
-  api('seting', {key:'enabled', value:String(v)}).then(function(){
-    tip(v ? '已启用修复(重启设备后对所有服务生效)' : '已撤销修复(重启设备后彻底失效)', 'msg ok');
-    load();
-  }).catch(function(e){ tip('操作失败: '+e.message, 'msg err'); });
-}
-function act(action) {
-  var a = api(action, {});
-  document.getElementById('out').textContent = '执行中…';
-  a.then(function(d){
-    var v = pick(d, action === 'verify' || action === 'verifyfull' ? 'verify' : action);
-    if (action === 'restart') { tip('已尝试重启受影响的服务', 'msg ok'); load(); return; }
-    document.getElementById('out').textContent = JSON.stringify(v || d, null, 2);
-    if (v && v.pass === true) { tip('自检通过', 'msg ok'); }
-    else if (v && v.pass === false) { tip('自检未通过', 'msg err'); }
-    load();
-  }).catch(function(e){ document.getElementById('out').textContent = '失败: '+e.message; tip('操作失败: '+e.message, 'msg err'); });
-}
-load();
-setInterval(function(){ if (!document.hidden) load(); }, 30000);
+IKUI.mount('#app', {
+  tpl: '#tpl',
+  func: 'bnfix',
+  data: function () {
+    return { msg: '', tiles: [], out: '', dbg: '' };
+  },
+  methods: {
+    pick: function (d, key) { return (d && d[key]) || (d && d.data && d.data[key]) || null; },
+    load: function () {
+      var self = this;
+      return this.ik('show', { TYPE: 'data' }).then(function (d) {
+        var s = self.pick(d, 'status') || d;
+        var fixed = s.fixed === true || s.fixed === 'true';
+        var en = String(s.enabled) === '1' || s.enabled === true;
+        var users = Array.isArray(s.users) ? s.users : [];
+        self.tiles = [
+          { k: '修复状态', v: fixed ? '已生效于文件' : '未生效', tone: fixed ? 'ok' : 'warn' },
+          { k: '开关', v: en ? '已启用' : '已关闭', tone: en ? 'ok' : 'err' },
+          { k: '修复方式', v: s.mode === 'so' ? '整库覆盖' : '定点补丁' },
+          { k: '库状态', v: s.lib_state || '-' },
+          { k: '加载该库的进程', v: users.length ? users.join(', ') : '无', wide: true },
+          { k: '记录条数', v: s.log_lines || 0, size: 'sm' }
+        ];
+        self.dbg = '目标库: ' + (s.lib || '-') +
+          '\n当前 md5: ' + (s.md5 || '-') +
+          '\n原始 md5: ' + (s.orig_md5 || '-') +
+          '\n补丁后 md5: ' + (s.patched_md5 || '-') +
+          '\n\n' + JSON.stringify(s, null, 2);
+      }).catch(function (e) { self.msg = '加载失败: ' + e.message; });
+    },
+    toggle: function (v) {
+      var self = this;
+      this.ik('seting', { key: 'enabled', value: String(v) }).then(function () {
+        IKUI.toast(v ? '已启用修复（重启设备后对所有服务生效）' : '已撤销修复（重启设备后彻底失效）', 'success');
+        self.load();
+      }).catch(function (e) { IKUI.toast('操作失败: ' + e.message, 'error'); });
+    },
+    act: function (action) {
+      var self = this;
+      this.out = '执行中…';
+      this.ik(action, {}).then(function (d) {
+        var v = self.pick(d, (action === 'verify' || action === 'verifyfull') ? 'verify' : action);
+        if (action === 'restart') {
+          IKUI.toast('已尝试重启受影响的服务', 'success');
+          self.out = '';
+          self.load();
+          return;
+        }
+        self.out = JSON.stringify(v || d, null, 2);
+        if (v && v.pass === true) { IKUI.toast('自检通过', 'success'); }
+        else if (v && v.pass === false) { IKUI.toast('自检未通过', 'error'); }
+        self.load();
+      }).catch(function (e) {
+        self.out = '失败: ' + e.message;
+        IKUI.toast('操作失败: ' + e.message, 'error');
+      });
+    }
+  },
+  mounted: function () {
+    var self = this;
+    this.load();
+    this.timer = setInterval(function () { if (!document.hidden) { self.load(); } }, 30000);
+  },
+  unmounted: function () { if (this.timer) { clearInterval(this.timer); } }
+});
 </script>
 </body>
 </html>
