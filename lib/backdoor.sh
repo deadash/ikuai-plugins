@@ -293,6 +293,13 @@ bd_patch_monitor() {
     bd_sed "$p" "s|^\([[:space:]]*\)cgroup_exec[[:space:]][[:space:]]*cre_client[[:space:]]|\1: # [$BD_MARK] cgroup_exec cre_client |"
     # 云端审计组件下载器(audit.ikuai8.com / routers.ikuai8.com:6444), 常驻 while 循环
     bd_sed "$p" "s|^\([[:space:]]*\)start-stop-daemon[[:space:]][[:space:]]*-S[[:space:]]*-x[[:space:]]*.*ikaudit_update.sh|\1: # [$BD_MARK] start-stop-daemon ikaudit_update.sh |"
+
+    # 紧随"重启后门"之后的日志行也要禁掉: 官方语义是"进程不在就重拉并记一条日志", 而这两个进程
+    # 已被永久换成空壳 -> 这个 30 秒一轮的守护会**每轮都刷**一条
+    # (真机表现: 日志中心→系统日志 里每分钟多出
+    #  "进程监听: remote / route_collect 云平台远控服务重新启动")。进程都不拉了, 日志也不该再报。
+    bd_sed "$p" "s|^\([[:space:]]*\)\(Syslog.*i18n_sys_event_ik_remote_ikuai\)|\1: # [$BD_MARK] \2|"
+    bd_sed "$p" "s|^\([[:space:]]*\)\(Syslog.*i18n_sys_event_ik_route_collect\)|\1: # [$BD_MARK] \2|"
 }
 
 # collection.sh: 远控连通性判断会误关多线IPv6，必须跳过(否则影响功能)

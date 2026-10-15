@@ -117,6 +117,16 @@ for f in "$MOCK/usr/ikuai/script/rc" \
     fi
 done
 
+# 后门进程被永久禁掉之后, 官方守护里紧随其后的"重启成功"日志行也必须一起禁:
+# monitor_process.sh 是 30 秒一轮的守护, 那两条 Syslog 每轮都会打 —— 真机表现就是
+# 日志中心→系统日志 每分钟多出 "进程监听: remote / route_collect 云平台远控服务重新启动"
+MP="$MOCK/usr/ikuai/script/utils/monitor_process.sh"
+assert_grep     "$MP" ": # \[ikblock\] Syslog \$(Iecho i18n_sys_event_ik_remote_ikuai)"  "monitor: remote 重启日志行已禁(不再每 30 秒刷屏)"
+assert_grep     "$MP" ": # \[ikblock\] Syslog \$(Iecho i18n_sys_event_ik_route_collect)" "monitor: route_collect 重启日志行已禁"
+assert_not_grep "$MP" "^[[:space:]]*Syslog \$(Iecho i18n_sys_event_ik_"                    "monitor: 没有残留的未禁用后门日志行"
+# 官方*自身*组件的守护日志一行都不许动(它们是正常功能)
+assert_not_grep "$MP" "ikblock\] Syslog \$(Iecho i18n_sys_event_ik_dhcp"                  "monitor: 官方组件(如 dhcp)的守护日志未被误改"
+
 section "5. 域名封锁(/etc/hosts, 不碰防火墙)"
 assert_not_shim "ipset"                                      "不碰 ipset(旧版网络层已删)"
 assert_not_shim "iptables"                                   "不碰 iptables(旧版网络层已删)"
