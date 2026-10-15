@@ -37,8 +37,10 @@ DTalkInside/monidtalk.sh script/dingtalk.sh script/catcherd.sh ikaudit_update.sh
 # 需要被替换成空壳的程序(本设备实际存在的 5 个云端客户端)
 BD_STUBS="/usr/sbin/ik_rc_client /usr/sbin/cre /usr/sbin/pmd /usr/sbin/dtalkd /usr/sbin/dtalkc"
 
-# 需要封锁的云端域名(写入 /etc/hosts 指向 0.0.0.0)
-BD_DOMAINS="302.ikuai8.com download.ikuai8.com pkgmanager.ikuai8.com dpi.ikuai8.com \
+# 需要封锁的云端域名(写入 /etc/hosts.d 片段 -> /etc/hosts 指向 0.0.0.0)
+# update.ikuai8.com = /usr/ikuai/ctrlclient/conf.json 里配的 domain(端口 443、路径
+# /.services/redirect、带 token = 云端远程控制/重定向通道), v0.0.6 真机核实补入
+BD_DOMAINS="302.ikuai8.com download.ikuai8.com update.ikuai8.com pkgmanager.ikuai8.com dpi.ikuai8.com \
 audit.ikuai8.com routers.ikuai8.com coll.ikuai8.com dis.ikuai8.com datacollect.ikuai8.com \
 ctrl1.ikuai8.com ctrl2.ikuai8.com as1.ikuai8.com as2.ikuai8.com youyu.api.ikuai8.com \
 genuine.ikuai8.com iapi.ikuai8.com yun.ikuai8.com portal.ikuai8.com local.ikuai8.com \

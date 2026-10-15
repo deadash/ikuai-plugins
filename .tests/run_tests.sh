@@ -102,6 +102,7 @@ assert_not_shim "iptables"                                   "不碰 iptables(�
 # 60s 的 cron 周期, 叠加节流竞态 -> 2~6 个守卫并发), 是 30%~65% CPU 尖峰的根因
 assert_not_shim "nslookup"                                   "引导期间不做域名解析(不做 nslookup)"
 assert_grep     "$MOCK/etc/hosts" "0.0.0.0 302.ikuai8.com"   "hosts 屏蔽云端域名"
+assert_grep     "$MOCK/etc/hosts" "0.0.0.0 update.ikuai8.com" "hosts 含 ctrlclient 的 update.ikuai8.com(真机核实补入)"
 assert_exists   "$MOCK/etc/hosts.d/ikblock"                  "封锁写成 /etc/hosts.d 片段(与固件同源)"
 assert_grep     "$MOCK/etc/hosts.d/ikblock" "\[ikblock\]"    "片段带标记(可追溯来源)"
 # 真机 basic.sh:__set_hostname()(开机必经)/ function basic(网页改主机名)/ pppoe_server.sh

@@ -107,7 +107,7 @@
    - `usr/ikuai/script/dingtalk.sh` + `usr/DTalkInside/monidtalk.sh`: 停用 dtalk 云管
    - `usr/ikuai/script/catcherd.sh`: 停用抓包上报
    - `usr/ikuai/script/utils/submit.lua` / `usr/ikuai/script/upgrade.sh`: 禁用云端指令与自动升级
-3. **域名封锁**: 云端域名(24 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写进
+3. **域名封锁**: 云端域名(25 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写进
    `/etc/hosts.d/ikblock` 片段、再按固件自己的方式汇总成 `/etc/hosts` 指向 `0.0.0.0`。
    只影响本机自己的解析，零进程、零防火墙规则；**不做 IP/网段封锁、不碰 ipset/iptables**。
    > 为什么是片段而不是直接追加 `/etc/hosts`: 固件有多处会**重建** /etc/hosts ——

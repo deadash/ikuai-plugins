@@ -455,7 +455,7 @@ ssh sshd@127.0.0.1 -p 10022 "
 
 **封锁 = 域名封锁，不做 IP/网段封锁，不碰 ipset/iptables**（v0.0.6 起）：
 
-* 云端域名(24 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写进 `/etc/hosts.d/ikblock` 片段，
+* 云端域名(25 个 + 可选 `/etc/mnt/ikblock.domains` 扩展)写进 `/etc/hosts.d/ikblock` 片段，
   再按固件自己的方式 `cat /etc/hosts.d/* >/etc/hosts` 汇总成 `/etc/hosts` 指向 `0.0.0.0`；
 * 只影响**本机自己**的域名解析，局域网客户端的 DNS 查询不经过本机 hosts，不受影响；
 * 零进程、零防火墙规则、每开机重写一次(`/etc/hosts.d` 随根分区还原)。
