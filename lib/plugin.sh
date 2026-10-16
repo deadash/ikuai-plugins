@@ -581,6 +581,66 @@ plugin_link_cli() {
     ln -sf "$(P /etc/mnt/.boot/bin/ikexpand)" "$(P /usr/sbin)/ikexpand" 2>/dev/null
 }
 
+# ---------------------------------------------------------------- 根分区腾地方
+#
+# 根分区只有 113MB，长期 100% 占满 —— 实测满到连 `mkdir` 都失败，直接导致
+# plugin_web_link 铺不出插件卡片（表现就是"插件装了、向日葵也上线了，
+# 但插件管理里看不到它"）。而根分区那 110MB 几乎全是 iKuai 自己的固件，
+# 其中这几件**本框架完全不用**、却占掉约 21MB（近两成）：
+#
+#   /usr/bin/qemu-system-x86_64  12.5MB   ← iKuai 内置的虚拟机功能
+#   /usr/share/qemu/*            ~8MB     ← 同一功能的 BIOS/固件镜像
+#   /usr/bin/qemu-img             1.3MB
+#
+# 做法：搬到**插件存储（数据盘）**再软链回原位 —— 跟框架处理 /lib 那批 glibc
+# 是同一个思路：软链几乎不占空间，iKuai 的虚拟机功能照常可用。
+#
+# 两个安全前提：
+#   1) 插件存储没挂上就**整体跳过** —— 宁可少腾空间，也不能让 /usr/bin/qemu*
+#      变成死链把 iKuai 自己的功能搞坏；
+#   2) 只搬"文件/目录本身"，搬完立刻建软链；建不出来就把东西搬回去。
+#
+# 根分区每次开机还原，所以每次开机都要重做（由 scripts/03 调用，且必须在
+# plugin_web_sync 之前 —— 卡片是那一步铺的，得先把空间腾出来）。
+PLUGIN_FWLIB=".fwlib"
+# 相对根的路径，按收益从大到小
+PLUGIN_FWBIG="usr/bin/qemu-system-x86_64 usr/bin/qemu-img usr/share/qemu usr/share/qemu-kvm usr/share/qemu-common"
+
+plugin_space_relief() {
+    local store src dst rel moved=0 avail
+    store="$(P "$PLUGIN_ROOT")/$PLUGIN_FWLIB"
+    if ! mkdir -p "$store" 2>/dev/null; then
+        plugin_log "腾空间: 插件存储不可写, 跳过(不动任何固件)"
+        return 0
+    fi
+
+    for rel in $PLUGIN_FWBIG; do
+        src="$(P "/$rel")"
+        [ -e "$src" ] || continue
+        [ -L "$src" ] && continue                 # 已经是软链了, 不用再动
+        dst="$store/$rel"
+        mkdir -p "$(dirname "$dst")" 2>/dev/null || continue
+        if [ -e "$dst" ]; then
+            # 之前已经搬过一份, 直接换成软链
+            rm -rf "$src" 2>/dev/null && ln -sf "$dst" "$src" 2>/dev/null && moved=$((moved + 1))
+            continue
+        fi
+        if mv "$src" "$dst" 2>/dev/null; then
+            if ln -sf "$dst" "$src" 2>/dev/null; then
+                moved=$((moved + 1))
+            else
+                mv "$dst" "$src" 2>/dev/null       # 软链建不出来就搬回去
+            fi
+        fi
+    done
+
+    if [ "$moved" -gt 0 ]; then
+        avail="$(df -k "$(P /)" 2>/dev/null | awk 'NR==2{print $4}')"
+        plugin_log "腾空间: 已把 $moved 项 iKuai 大件挪到插件存储并软链回原位(根分区可用 ${avail:-?} KB)"
+    fi
+    return 0
+}
+
 # ---------------------------------------------------------------- Web 插件(网页版)
 
 # 框架自带 Web 插件资源目录(随 .boot 一起部署)

@@ -33,6 +33,11 @@ plugin_scan_zips
 # 同步框架自带的 Web 插件资源(清空并重铺 /usr/ikuai/www/plugins,
 # 未同意《使用条款》时只铺"同意入口"占位卡片) —— 必须在 plugin_boot 之前,
 # 因为 plugin_boot 会给插件建卡片/页面软链。
+# 腾根分区空间 —— **必须在 plugin_web_sync 之前**：那一步要建插件卡片目录，
+# 而根分区满时连 mkdir 都会失败（实测就是它导致"插件管理里看不到插件"）。
+# 也要在 plugin_store_setup 之后：东西是搬到插件存储上的。
+plugin_space_relief
+
 plugin_web_sync
 
 # 重新铺开已安装插件(会链接 bin/、www/、function/; 未同意条款时跳过 Web 部分)
