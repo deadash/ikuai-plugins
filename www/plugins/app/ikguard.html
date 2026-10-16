@@ -36,7 +36,17 @@
 <script type="text/x-template" id="tpl">
 <div>
   <!-- 未同意使用条款时的拦截层 -->
-  <div class="gate" v-if="!eulaOk">
+  <!--
+    三态而不是两态：null = 还没问到（首帧）。
+    原来初值是 false，于是**进页面会先闪一下"启用插件功能"再跳到控制台**
+    —— 因为第一帧还没拿到 show 的返回，被当成了"未启用"。
+    null 期间只放一个中性的加载态，问到之后再决定渲染哪一边。
+  -->
+  <div class="gate" v-if="eulaOk === null">
+    <div class="in"><div class="ik-page"><div style="padding:40px 0;text-align:center" class="ik-mut">正在加载…</div></div></div>
+  </div>
+
+  <div class="gate" v-else-if="eulaOk === false">
     <div class="in">
       <el-card shadow="never" body-style="padding:26px 28px">
         <div class="hd">
@@ -353,7 +363,7 @@ IKUI.mount('#app', {
   func: 'ikguard',
   data: function () {
     return {
-      eulaOk: false, gateMsg: '', msg: '',
+      eulaOk: null, gateMsg: '', msg: '',   // null=还不知道；false=确实没启用
       tab: 'status',
       tiles: [], flags: {}, FLAGS: FLAGS, LOGS: LOGS,
       flagBusy: '', applying: false,
