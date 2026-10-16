@@ -98,7 +98,10 @@ body {
 /* ---------------- 指标卡 ---------------- */
 .ik-tiles {
   display: grid; gap: var(--ik-gap);
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  /* 列宽下限 210px 是被内容逼出来的：识别码/葵码那种 20+ 字符串，
+     180px 塞不下就会折行、或者逼得页面用 .ik-tile--wide 单独占两格 ——
+     占两格的卡片会顶歪整行，看着很突兀（踩过）。210px 刚好一行放得下。 */
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
 }
 .ik-tile {
   background: var(--ik-card);
