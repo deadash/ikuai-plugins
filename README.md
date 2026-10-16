@@ -17,7 +17,9 @@
 | **审计取证** | `audit` | 关 | 常驻**被动采集**：conntrack 连接事件 / DNS 查询 / 封锁命中，日志落 `/etc/log/ikguard`。不占 cron |
 | **cron / shell** | `cron` `shell` | 开 | `/etc/mnt/cron.d/*` → `/etc/crontabs/cron.d`；`/etc/mnt/shells` 下的程序与配置链接进系统 |
 | **网页控制台** | 随 `plugins` | — | 状态概览（版本/验签/后门进程/hosts 条数/启动尝试/采集/日志分区）+ 开关配置 + 插件管理 + 审计日志 + **SSH 防护** + 工具（封锁自检、磁盘信息、原生日志与 DNS 开关） |
+| **统一 UI 套件** | 随 `plugins` | — | 插件页共用的 Element Plus + Vue 套件（`www/ui/`，开机软链进 `.../plugins/app/ikui.{js,css}`），**插件包零依赖**：页面写 `./ikui.css` + `./ikui.js` 即可；控制台与示例插件页同一套视觉 |
 | **/etc/mnt 扩容** | — | — | `bin/ikexpand`：官方升级包只给 50M，可按 G 扩容且保住数据盘、跨重启有效、可回滚 |
+| **根分区腾空间** | — | — | 开机把固件里用不到的 qemu 大件（约 22MB）挪到插件存储再软链，否则根分区满到插件卡片连目录都建不出来；插件存储没挂就整体跳过 |
 | **打包 / 自测** | — | — | `.tools/build.sh` 签名打包；`.tests/run_tests.sh` 离线测试（模拟真机布局）；`ikctl.py` 真机部署 + 一键体检 |
 
 ![插件管理](docs/images/plugin-management.png)
@@ -26,7 +28,7 @@
 
 ## 安装与升级
 
-1. Web「**系统设置 → 系统升级**」上传 `ikuai-plugins-v0.0.6-base.bin`（已签名，`firmwareid=90001`）
+1. Web「**系统设置 → 系统升级**」上传 `ikuai-plugins-v0.0.7-base.bin`（已签名，`firmwareid=90001`）
 2. 升级完成后**重启设备**（框架在开机时挂载：验签 → 清单比对 → 执行 `install.sh`）
 3. 不想点网页时也可以用 `ikctl.py`：`deploy <bin>` → `reboot --wait` → `verify`
 
@@ -68,6 +70,9 @@
 
 > 推荐先装 `ikupd`：把本仓库的 Release 地址加进它的「仓库列表」，之后新插件/升级都能在页面里
 > 检查并安装，不用手工传 zip。
+
+> **v0.0.7 起**：插件页面的 UI 套件改由基础包提供（`www/ui/` → 开机软链到 `.../plugins/app/ikui.*`），
+> 所以上面四个示例插件的 `1.0.0` 包已随本版重打。**先升基础包再换插件**，否则新插件页会加载不到 `ikui.js`。
 
 ## 开发
 
