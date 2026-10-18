@@ -6,6 +6,40 @@
 
 ![安全防护控制台](docs/images/ikguard-console.png)
 
+## 使用前必读（重要）
+
+* **插件全部由 AI 生成，无法保证质量。** 本仓库的基础包与示例插件都是 AI 辅助写出来的，
+  只做到"真机跑得通"这一级验证，**没有系统的代码评审与长期稳定性测试**。
+  装之前建议**先让 AI 把要装的插件代码读一遍**，确认里面没有你不想要的行为
+  （改系统文件、联网上报、常驻进程、改 DNS/防火墙等），再决定要不要装。
+* **如无必要，不要装自己用不到的插件。** 插件以 root 运行，权限等同你自己在设备上敲命令；
+  装得越多，出问题的面越大。不用了就在插件页删掉（`uninstall.sh` 会清理它加的东西）。
+* **⚠️ 广告拦截插件 `ikadblock`（ADGUARD 类 DNS 拦截）可能存在问题和稳定性隐患，不建议使用。**
+  它会接管 LAN 全网 DNS、并在设备上跑一个常驻 `ikdnsx` 实例；小内存设备上实例会被内核
+  OOM kill。v0.0.9 虽然补了"拉起熔断 + fail-open"（撤规则而不是把 DNS 指到死端口），
+  但拦截效果、规则库与长期稳定性都**没有验证充分**，请不要在生产网络启用。
+* **向日葵插件 `awesun` 是目前验证最完整、推荐日常使用的插件**（见下节）。
+* 遇到任何问题都欢迎提 [Issue](https://github.com/deadash/ikuai-plugins/issues)，
+  尤其向日葵插件的问题会优先处理。
+
+## 重点推荐：向日葵远程桌面插件（`awesun`）
+
+把 iKuai 变成一台**手机就能远程操作**的机器：跑向日葵官方 Linux 端（`awesuncli`），
+但画面与键鼠全部改走 X 服务器（`Xvfb` + `awescreen`）—— 不碰 `/dev/fb0`、
+也不用内核 `uinput`（iKuai 内核没编）。原生编码与协议原样复用，用起来和普通向日葵被控端一样流畅。
+
+* **不需要绑定爱快云**：插件完全独立，不依赖 iKuai 的云平台、不用开通任何服务；
+  想把设备绑到向日葵账号下统一管理也可以，**绑不绑都能用**。
+* 手机 App 或 `i.oray.com` 用识别码连接 → 选「桌面」，看到的就是 iKuai 后台网页
+  （自动写入登录 cookie，密码不经过网络）；也可以开一块 shell 屏直接敲命令。
+* 设备身份（识别码 / license / 访问密码）持久化在 `/etc/log/awesun/identity/`，
+  重装插件、换固件都不变；登录一次向日葵账号后**免登录**（命令行版没有扫码登录）。
+* 包体约 **212MB**（自带 `awesuncli` 与 X 组件），**必须用 v0.0.9 及以上的分片上传**才能在网页上装。
+* 装法：Web「插件管理」上传 `awesun-v1.0.0-plugin.zip`；源码与详细说明见
+  [ikuai-pro/plugins/awesun](https://github.com/deadash/ikuai-pro/tree/main/plugins/awesun)。
+* **任何问题都可以提 [Issue](https://github.com/deadash/ikuai-plugins/issues)**，
+  附上 `/etc/log/awesun/` 下的日志（`boot.log` / `web.log` / `desktop.log`）即可。
+
 ## 当前支持的功能
 
 | 功能 | 开关 | 默认 | 说明 |
@@ -28,9 +62,12 @@
 
 ## 安装与升级
 
-1. Web「**系统设置 → 系统升级**」上传 `ikuai-plugins-v0.0.7-base.bin`（已签名，`firmwareid=90001`）
+1. Web「**系统设置 → 系统升级**」上传 `ikuai-plugins-v0.0.9-base.bin`（已签名，`firmwareid=90001`）
 2. 升级完成后**重启设备**（框架在开机时挂载：验签 → 清单比对 → 执行 `install.sh`）
 3. 不想点网页时也可以用 `ikctl.py`：`deploy <bin>` → `reboot --wait` → `verify`
+
+> **请用 v0.0.9 或更新**：0.0.9 起基础包自带插件框架与统一界面，插件页支持**大文件分片上传**
+> （突破设备上传接口 50MB 的限制）与后台安装进度，插件管理也一起重做了。
 
 ## 开关（`/etc/mnt/boot_args`）
 
@@ -63,16 +100,32 @@
 
 | 插件 | 版本 | 作用 |
 | --- | --- | --- |
+| [awesun](https://github.com/deadash/ikuai-pro/tree/main/plugins/awesun) | 1.0.0 | **向日葵远程桌面（重点推荐）**：官方 `awesuncli` + X11 虚拟桌面，手机 App 直接操作 iKuai 后台；约 212MB，需 v0.0.9 的分片上传 |
 | [ikupd](examples/ikupd-plugin/) | 1.0.0 | **插件在线升级**：从仓库 Release 检查新版（按包名前缀 + sha256 判断），支持代理拉取，确认后下载安装 |
-| [ikadblock](examples/adblock-plugin/) | 1.0.0 | **广告/跟踪域名拦截**：LAN 全网 DNS 纳管到本机 sinkhole，命中黑名单返回 `0.0.0.0` |
+| [ikadblock](examples/adblock-plugin/) | 1.0.0 | ⚠️ **广告/跟踪域名拦截（ADGUARD 类）**：LAN 全网 DNS 纳管到本机 sinkhole，命中黑名单返回 `0.0.0.0`。**可能有问题，不建议使用**（见"使用前必读"） |
 | [bnfix](examples/bnfix-plugin/) | 1.0.0 | **系统 OpenSSL 组件修复**：给自带 `libcrypto` 打 1 字节定点补丁，修"显式曲线参数 + 压缩点"证书解析死循环 |
 | [rustdemo](examples/rust-plugin/) | 1.0.0 | **Rust 示例插件**：编译型插件的完整示例（嵌入式数据库 + Web 配置页） |
 
-> 推荐先装 `ikupd`：把本仓库的 Release 地址加进它的「仓库列表」，之后新插件/升级都能在页面里
-> 检查并安装，不用手工传 zip。
-
+> 推荐顺序：**先装基础包，再按需装 `ikupd`（在线升级）与 `awesun`（远程桌面）**；
+> 另外三个示例插件属于"可以看、可以学"，不是非装不可 —— 装了就用 AI 先把代码过一遍。
+>
 > **v0.0.7 起**：插件页面的 UI 套件改由基础包提供（`www/ui/` → 开机软链到 `.../plugins/app/ikui.*`），
 > 所以上面四个示例插件的 `1.0.0` 包已随本版重打。**先升基础包再换插件**，否则新插件页会加载不到 `ikui.js`。
+
+### v0.0.9 起：自带插件框架 / 大文件上传 / 插件管理
+
+* **基础包自带整套插件框架**：插件包只要 `Release` + `install.sh`/`boot.sh`/`uninstall.sh`
+  + `bin/` + `function/` + `www/`，**不用自带 UI 库**（以前每个插件白背约 1.6MB）。
+* **界面统一**：套件 `www/ui/ikui.{js,css}`（Element Plus 2.14 + Vue 3 + 设计令牌）由基础包提供，
+  插件页写 `./ikui.css` + `./ikui.js` 就能用 `<ik-tile>` 指标卡、`ik-toolbar` 工具栏、
+  `ik-pre` 日志块与 `IKUI.mount` / `IKUI.toast`。**后续让 AI 生成插件，请直接沿用这套界面与交互**
+  —— 页面模板要放 `<script type="text/x-template">`，否则自闭合组件标签会被 HTML 解析器吞掉。
+* **大文件上传（原来只支持 50MB）**：设备原生 `/Action/upload` 单文件只收 **50MB**，而且每次
+  上传成功都会清空导入目录。0.0.9 起页面按 **32MB 分片**上传（每片落盘后立刻 `stage` 到暂存区，
+  最后按序号合并并核对字节数），安装转后台执行、`show TYPE=iplog` 实时回传进度与日志 ——
+  **200MB+ 的包（如向日葵）也能在网页上直接传**，不会再 60 秒超时。
+* **插件管理重做**：上传与安装合成一条进度条（分片数 / 速率 / 耗时）+ 实时安装日志，
+  装完自动刷新列表，失败能看到 `rc` 与后台日志尾部。
 
 ## 开发
 
@@ -88,7 +141,10 @@
 
 * 阻断**只封域名**（`/etc/hosts` 片段），不封 IP/网段/端口、不碰官方防火墙链；
   唯一会写 iptables 的是你显式开启的 `sshguard`，规则落在自建链上、默认关闭时一条都不写。
-* **不写 cron、无常驻进程**（除 `audit=1` 的被动采集器）。
+* **不写 cron、无常驻进程**（除 `audit=1` 的被动采集器）；常驻进程都是插件自己起的
+  （如 `awesun` 的 Xvfb/awescreen、`ikadblock` 的 `ikdnsx`），不用就删插件。
+* **本框架与爱快官方无关**，插件由 AI 生成、质量与安全性需自行评估 —— 有疑虑就让 AI
+  先读代码，见 [使用前必读](#使用前必读重要)。
 * 根分区每次重启还原，所以规则/软链/补丁都在**开机重放**；持久状态只在 `/etc/mnt` 与 `/etc/log`。
 * 完整操作手册（分区与扩容、打包签名约束、SSH 升级、重启验证、审计、Web 插件、
   真实 WAN/LAN 客户端模拟、排障）见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
