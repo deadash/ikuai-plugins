@@ -29,11 +29,18 @@ if [ ! -f "$ROOT/data/state" ]; then
         echo "block_ipv6=1"
         echo "last_update=0"
         echo "last_result=seed"
+        # 拉起健康计数(熔断用): 新装的插件是干净的
+        echo "fail_count=0"
+        echo "last_try=0"
+        echo "started_at=0"
+        echo "tripped=0"
     } > "$ROOT/data/state"
 fi
 [ -f "$ROOT/data/sources.conf" ] || cp -f "$ROOT/share/sources.conf" "$ROOT/data/sources.conf" 2>/dev/null
 
 # 定时守卫(兜住"守护进程被杀/规则被清"的情况; 失败不影响拦截本身)
+# 它调用的 sync 是**有上限**的: 实例反复起不来会按退避重试, 连续 3 次失败即熔断停用
+# (撤规则 fail-open), 之后每分钟只是清场、绝不再拉起 —— 不会形成重启死循环。
 # 框架开机会把 /etc/mnt/cron.d/* 软链进 /etc/crontabs/cron.d/, 这里先自己链一次,
 # 让"装完不重启也能生效"(框架那步是幂等的)。
 mkdir -p /etc/mnt/cron.d /etc/crontabs/cron.d 2>/dev/null

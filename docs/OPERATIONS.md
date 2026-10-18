@@ -719,12 +719,16 @@ curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
 #### 6.5.1 用 HTTP 上传安装插件包(zip)
 
 上传与安装是两步(和官方"上传固件"一样的套路): 先 POST 文件到 `/Action/upload`
-(落盘到 `/tmp/iktmp/import/<文件名>`，注意上传前会清空该目录、单文件上限 50MB)，
-再调用 `ikguard plugin op=install name=<文件名>` 解压安装。
+(落盘到 `/tmp/iktmp/import/<文件名>`)，再调用 `ikguard plugin op=install` 解压安装。
 
-> **坑**: iKuai 的 `ActionUpload` 存盘用的是 multipart 的**字段名**(`getUploadHead(...).name`)，
-> 不是 `filename=`。所以表单字段名必须写成原始文件名，否则文件会存成 `file`
-> 导致下一步 `install name=xxx.zip` 找不到文件。
+> **坑 1**: iKuai 的 `ActionUpload` 存盘用的是 multipart 的**字段名**(`getUploadHead(...).name`)，
+> 不是 `filename=`。字段名必须写成文件名，否则文件会存成 `file`。
+>
+> **坑 2**: 它单文件**只收 50MB**(`webman.lua: UploadMaxLen`)，且**每次上传成功都会
+> `rm -f /tmp/iktmp/import/*`**。所以超过 50MB 的包必须切片：每片落盘后立刻
+> `plugin op=stage` 搬到 `/tmp/iktmp/plugin-upload/<upid>/<序号>`，最后
+> `plugin op=install upid=<id> size=<字节>` 由后端按序号拼回去再装。页面就是这么做的
+> (32MB 一片)，所以网页上直接传大包没有任何限制。
 
 ```bash
 # 1) 上传(字段名 = 文件名!)
@@ -735,6 +739,16 @@ curl -s -b /tmp/ck -F "mytool.zip=@mytool.zip" http://127.0.0.1:18080/Action/upl
 curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
      -H 'Content-Type: application/json' \
      -d '{"func_name":"ikguard","action":"plugin","param":{"op":"install","name":"mytool.zip"}}'
+
+# 2b) 大包 / 想在页面上看到过程: 加 async=1 立即返回, 后台跑 ikplugin,
+#     进度用 show TYPE=iplog 轮(只能走 show —— 其它 action 的 stdout 会被丢弃)
+curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
+     -H 'Content-Type: application/json' \
+     -d '{"func_name":"ikguard","action":"plugin","param":{"op":"install","name":"mytool.zip","async":1}}'
+curl -s -b /tmp/ck -X POST http://127.0.0.1:18080/Action/call \
+     -H 'Content-Type: application/json' \
+     -d '{"func_name":"ikguard","action":"show","param":{"TYPE":"iplog"}}'
+#    -> {"Result":30000,...,"Data":{"iplog":{"state":"running|done|failed","elapsed":3,"log":"..."}}}
 ```
 
 插件包格式(完整版, 见 `examples/rust-plugin/` 的可运行示例):

@@ -12,8 +12,12 @@
 #      前面, 所以客户端即使自己指定 8.8.8.8/114.114.114.114 也会被拦下。
 #   3) 这个实例同时是转发器: 不在黑名单里的域名照常向上游(默认取设备
 #      /etc/resolv.conf 里的 nameserver)解析, 广告以外的上网行为不变。
-#   4) 守护/守卫保证"实例被 iKuai 冲掉、规则被清掉"时自动补回; 一旦实例拉不起来,
-#      主动撤掉劫持规则(fail-open), 绝不把用户的 DNS 弄挂。
+#   4) 守护/守卫保证"实例被 iKuai 冲掉、规则被清掉"时自动补回; 但**拉起有上限**:
+#      实例被反复杀死(内存紧张时会被内核 OOM kill)时按 30s/60s 退避, 连续 3 次失败即
+#      熔断停用并撤掉劫持规则(fail-open), 之后只有用户手动开启才会重新拉起。
+#      —— 真机踩过: 无上限重试 + 实例每次要吃几十 MB 内存, 会把整机内存/IO 打满,
+#         所以这里绝不允许出现"被杀 -> 立刻再拉起"的死循环。
+#   5) 只要实例不在运行, 劫持规则就一定被撤掉: 绝不把 LAN 的 DNS 指到一个死端口上。
 #
 # 子命令:
 #   status            状态 JSON
@@ -61,6 +65,10 @@ CHAIN=IKADB
 CANARY="ikadblock-canary.test"
 MAX_DOMAINS=120000
 AUTO_UPDATE_SECS=604800
+# 拉起熔断: 连续失败 FAIL_LIMIT 次就彻底停用(不再重试); 实例存活不足 MIN_UPTIME 秒
+# 也算一次失败(杀死/自杀), 用来兜住"起来就被 OOM 杀 -> 再拉起"的死循环。
+FAIL_LIMIT=3
+MIN_UPTIME=60
 
 mkdir -p "$DATA" "$(dirname "$LOG")" 2>/dev/null
 
@@ -84,6 +92,34 @@ stats_get() { kv_get "$STATS" "$1"; }
 stats_set() { kv_set "$STATS" "$1" "$2"; }
 state_int() { local v; v="$(state_get "$1")"; [ -n "$v" ] && echo "$v" || echo 0; }
 stats_int() { local v; v="$(stats_get "$1")"; [ -n "$v" ] && echo "$v" || echo 0; }
+
+# ------------------------------------------------------------------ 拉起熔断
+# state 里的健康字段: fail_count(连续失败) / last_try(上次尝试时刻) /
+#                     started_at(实例本轮的启动时刻) / tripped(是否已熔断) / fail_reason
+fail_n()       { state_int fail_count; }
+tripped()      { [ "$(state_get tripped)" = "1" ]; }
+health_reset() { state_set fail_count 0; state_set last_try 0; state_set tripped 0; }
+backoff_gap() {   # 已连续失败 n 次 -> 下次尝试前先等多少秒
+    case "$(fail_n)" in
+        0) echo 0 ;;
+        1) echo 30 ;;
+        *) echo 60 ;;
+    esac
+}
+# 记一次失败; 到上限就熔断(只写状态, 撤规则由调用方做, 这里不碰 iptables)
+fail_bump() {   # $1=原因
+    local n; n=$(( $(fail_n) + 1 ))
+    [ "$n" -gt "$FAIL_LIMIT" ] && n="$FAIL_LIMIT"
+    state_set fail_count "$n"
+    state_set last_try "$(date +%s)"
+    logf "sinkhole 失败第 $n/$FAIL_LIMIT 次: $1"
+    if [ "$n" -ge "$FAIL_LIMIT" ]; then
+        state_set tripped 1
+        state_set fail_reason "$1"
+        logf "熔断: 连续 $n 次失败, 不再尝试拉起 —— 需要时请手动重新开启(apply/config enabled 1)"
+    fi
+    return 0
+}
 
 count_lines() { [ -f "$1" ] && wc -l < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
 file_size() { [ -f "$1" ] && wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
@@ -152,7 +188,7 @@ ik_stop() {
     rm -f "$IKPID"
 }
 ik_start() {
-    local tries i
+    local i
     ik_running && return 0
     command -v ikdnsx >/dev/null 2>&1 || { logf "找不到 ikdnsx, 无法启动 sinkhole"; return 1; }
     [ -f "$HOSTS" ] || build_domains || return 1
@@ -160,19 +196,22 @@ ik_start() {
     # 新实例的报表计数器从 0 开始: 丢掉旧快照并把增量基准归零, 统计才不会错
     rm -f "$REPORT" 2>/dev/null
     stats_set prev_query 0; stats_set prev_cache 0; stats_set prev_miss 0
-    for tries in 1 2 3; do
-        ( trap '' HUP; exec ikdnsx -C "$IKCONF" -S "$HOSTS" -P "$IKPID" >> "$LOG" 2>&1 ) &
-        i=0
-        while [ "$i" -lt 8 ]; do
-            sleep 1
-            if ik_running; then
-                logf "sinkhole 已启动 pid=$(ik_pid) 端口=$PORT 规则=$(count_lines "$HOSTS")"
-                return 0
-            fi
-            i=$((i + 1))
-        done
-        logf "sinkhole 第 $tries 次启动失败"
+    # 只起一次: 重试的节奏由 cmd_sync 按退避控制 —— 一次调用里反复 fork 会把内存/IO 打满
+    state_set started_at "$(date +%s)"
+    ( trap '' HUP; exec ikdnsx -C "$IKCONF" -S "$HOSTS" -P "$IKPID" >> "$LOG" 2>&1 ) &
+    i=0
+    while [ "$i" -lt 10 ]; do
+        sleep 1
+        if ik_running; then
+            logf "sinkhole 已启动 pid=$(ik_pid) 端口=$PORT 规则=$(count_lines "$HOSTS")"
+            return 0
+        fi
+        i=$((i + 1))
     done
+    # 起不来(或起来就死): 收掉半死进程与 pid 文件, 别把残留留给下一轮
+    ik_stop
+    state_set started_at 0        # 失败已在 cmd_sync 里计过一次, 别再被当成"起来就死"重复计
+    logf "sinkhole 启动失败(10 秒内没起来)"
     return 1
 }
 
@@ -384,9 +423,12 @@ cmd_status() {
     printf '"last_update":%s,"since":%s,"total_query":%s,"total_local":%s,"total_cache":%s,"total_miss":%s,"hit":"%s",' \
         "$last" "$( [ "$last" -gt 0 ] && echo $((now - last)) || echo -1 )" "$tq" "$tb" \
         "$(stats_int total_cache)" "$(stats_int total_miss)" "$hit"
-    printf '"auto_update":"%s","upstream":"%s","report":%s,"max_domains":%s}\n' \
+    printf '"auto_update":"%s","upstream":"%s","report":%s,"max_domains":%s,' \
         "$(state_get auto_update)" "$(upstream_ns | tr '\n' ',' | sed 's/,$//')" \
         "$( [ -f "$REPORT" ] && echo true || echo false )" "$MAX_DOMAINS"
+    printf '"fail_count":%s,"tripped":%s,"fail_reason":"%s","min_uptime":%s,"fail_limit":%s}\n' \
+        "$(fail_n)" "$( tripped && echo true || echo false )" \
+        "$(state_get fail_reason | tr -d '"')" "$MIN_UPTIME" "$FAIL_LIMIT"
 }
 
 daemon_running() {
@@ -394,9 +436,13 @@ daemon_running() {
 }
 
 cmd_apply() {
+    # 手动开启 = 唯一的"解除熔断"入口: 清掉失败计数与熔断标记
+    local was_tripped=false; tripped && was_tripped=true
+    health_reset; state_set fail_reason ""
     state_set enabled 1
     [ -f "$DOMAINS" ] || build_domains
     [ -f "$HOSTS" ] || build_domains || { log "域名表生成失败"; return 1; }
+    [ "$was_tripped" = "true" ] && log "已解除上次的熔断, 重新启用广告拦截"
     if ! ik_start; then
         log "sinkhole 启动失败: 不接管 DNS(fail-open), 请检查设备是否自带 ikdnsx"
         hijack_remove
@@ -412,6 +458,8 @@ cmd_apply() {
 
 cmd_disable() {
     state_set enabled 0
+    state_set started_at 0
+    health_reset
     hijack_remove
     ik_stop
     daemon_stop
@@ -590,14 +638,48 @@ cmd_sync() {
         ik_running && ik_stop
         return 0
     fi
+
     if ! ik_running; then
-        logf "发现 sinkhole 不在运行, 重新拉起"
-        if ! ik_start; then
-            logf "拉起失败 -> 撤掉劫持规则(fail-open), 保证 DNS 不断"
+        # 实例不在运行: 先把劫持规则撤掉(fail-open)。绝不能把 LAN 的 DNS 指到死端口上,
+        # 否则客户端会一直解析失败 —— 这是本插件唯一必须无条件做到的事。
+        if [ "$(hijack_count)" != "0" ]; then
+            logf "sinkhole 未运行, 撤掉劫持规则(fail-open)"
             hijack_remove
+        fi
+        # 已熔断: 只清场, 绝不拉起(等用户手动开启)
+        tripped && return 1
+        local now up
+        now="$(date +%s)"; up=$((now - $(state_int started_at)))
+        # 起来不到 MIN_UPTIME 就又没了(被内核 OOM kill / 自杀): 记一次失败。
+        # 记完把 started_at 清零 —— 同一个实例只能记一次, 否则退避期间每轮 sync 都会
+        # 重复计数, 不到三轮就"假熔断"。
+        if [ "$(state_int started_at)" -gt 0 ] && [ "$up" -lt "$MIN_UPTIME" ]; then
+            fail_bump "实例起来 ${up}s 就退出"
+            state_set started_at 0
+            tripped && return 1
+        fi
+        # 退避还没到点: 先不动它(不再 5 秒一轮地猛拉起)
+        if [ "$(state_int last_try)" -gt 0 ]; then
+            [ $((now - $(state_int last_try))) -lt "$(backoff_gap)" ] && return 1
+        fi
+        logf "sinkhole 不在运行, 尝试拉起(已连续失败 $(fail_n)/$FAIL_LIMIT 次, 退避 $(backoff_gap)s)"
+        state_set last_try "$now"
+        if ! ik_start; then
+            fail_bump "ik_start 失败"
+            tripped && logf "熔断停止: $(state_get fail_reason); 已撤掉劫持规则, DNS 恢复原样"
             return 1
         fi
     fi
+
+    # 到这里实例在跑: 连续活过 MIN_UPTIME 才算真稳, 失败计数归零
+    if [ "$(fail_n)" != "0" ]; then
+        up=$(( $(date +%s) - $(state_int started_at) ))
+        if [ "$up" -ge "$MIN_UPTIME" ]; then
+            logf "sinkhole 已稳定运行 ${up}s, 失败计数归零"
+            health_reset
+        fi
+    fi
+
     # 规则数 != LAN 接口数 时重装(接口增减、被 iKuai 冲掉链的情况)
     if [ "$(hijack_count)" != "$(lan_ifaces | grep -c . )" ] || [ "$(hijack_count)" = "0" ]; then
         hijack_apply >/dev/null 2>&1
@@ -620,17 +702,21 @@ auto_update_check() {
 }
 
 cmd_daemon() {
-    local n=0 gap=5
+    local n=0 gap=30
     echo $$ > "$DPID"
     trap 'rm -f "$DPID"; exit 0' TERM INT HUP
     logf "守护进程启动 pid=$$"
     while :; do
         cmd_sync >> "$LOG" 2>&1
+        # 固定 30 秒一轮(不再开机"每 5 秒猛拉"): 拉起节奏由 cmd_sync 的退避与熔断控制
         n=$((n + 1))
-        # 开机那一刻 LAN 接口常常还没建好(then iptables 加不上劫持规则),
-        # 所以前 2 分钟用 5 秒的节奏快速补齐, 之后回到 30 秒。
-        [ "$n" -ge 24 ] && gap=30
         [ $((n % 60)) -eq 0 ] && auto_update_check >> "$LOG" 2>&1
+        # 被停用或已熔断 -> 守护自己退出, 不留一个在后台空转/反复拉起的循环
+        if [ "$(state_get enabled)" != "1" ] || tripped; then
+            logf "守护进程退出: $([ "$(state_get enabled)" != "1" ] && echo 已停用 || echo 已熔断停用)"
+            rm -f "$DPID"
+            exit 0
+        fi
         sleep "$gap"
     done
 }

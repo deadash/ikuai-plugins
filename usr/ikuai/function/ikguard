@@ -25,6 +25,11 @@ BOOT_ARGS="/etc/mnt/boot_args"
 IK_LOG_DIR="/etc/log/ikguard"
 IK_PLUGIN_DIR="/etc/mnt/plugins"
 IK_IMPORT_DIR="/tmp/iktmp/import"
+# 大插件包的分片暂存区: /Action/upload 单文件上限 50M, 且每次成功都会 rm -f import/*,
+# 所以页面把包切片上传, 每片落盘后立刻搬到这里, 最后按序号拼回去。
+IK_UP_DIR="/tmp/iktmp/plugin-upload"
+IK_INST_LOG="$IK_LOG_DIR/plugin-install.log"
+IK_INST_STATE="$IK_LOG_DIR/plugin-install.state"
 IK_EULA_FILE="$IK_PLUGIN_DIR/.eula"
 IK_EULA_TEXT="$BOOT_DIR/www/eula.txt"
 IK_EULA_VER="v1.0"
@@ -552,6 +557,12 @@ plugin()
         list)
             "$IK_IKPLUGIN" list
             ;;
+        stage)
+            # 分片上传: 每片先由 /Action/upload 落到 import 目录, 页面立刻调这里搬走。
+            # 不搬的话下一片上传时会被它自己的 `rm -f import/*` 删掉。
+            ikg_upload_stage || return 1
+            echo "分片已暂存"
+            ;;
         install)
             [ -n "$name" ] || { echo "缺少 name"; return 1; }
             base="$(basename "$name")"
@@ -560,8 +571,19 @@ plugin()
                 *) echo "只支持 .zip 插件包"; return 1 ;;
             esac
             src="$IK_IMPORT_DIR/$base"
+            # 分片合并: 只有传了 upid 才走(小包直接单次上传, 不带 upid)
+            if [ -n "${upid:-}" ]; then
+                ikg_upload_assemble "$base" "$upid" "${size:-}" || return 1
+            fi
             [ -f "$src" ] || { echo "未找到上传的插件包: $base(请先通过上传接口上传)"; return 1; }
             mkdir -p "$arch" 2>/dev/null
+            # 大包解压+布置要几十秒到几分钟, 同步等会把页面请求挂死, 走后台 + 轮询 iplog
+            if [ "${async:-0}" = "1" ]; then
+                ikg_install_bg "$src" "$base" "$arch"
+                ikg_audit INFO "plugin.install" "开始安装插件包(后台): $base"
+                echo "已开始安装: $base"
+                return 0
+            fi
             cp -f "$src" "$arch/$base" 2>/dev/null
             if ! "$IK_IKPLUGIN" install "$src"; then
                 echo "插件安装失败: $base"
@@ -587,6 +609,120 @@ plugin()
     # 插件变更后同步 Web 资源与卡片
     ikg_run_script 03_enable_plugins.sh
     return 0
+}
+
+# 分片暂存: /tmp/iktmp/import/<文件名> -> /tmp/iktmp/plugin-upload/<upid>/<序号>
+ikg_upload_stage()
+{
+    local base src
+    base="$(basename "${name:-}")"
+    idx="${idx:-0}"
+    [ -n "$base" ] || { echo "缺少 name"; return 1; }
+    [ -n "${upid:-}" ] || { echo "缺少 upid"; return 1; }
+    case "$upid" in
+        *[!0-9A-Za-z_.-]*) echo "upid 不合法"; return 1 ;;
+    esac
+    case "$idx" in
+        ''|*[!0-9]*) echo "idx 不合法"; return 1 ;;
+    esac
+    src="$IK_IMPORT_DIR/$base"
+    [ -f "$src" ] || { echo "分片没有落盘: $base"; return 1; }
+    mkdir -p "$IK_UP_DIR/$upid" 2>/dev/null || { echo "建暂存目录失败"; return 1; }
+    mv -f "$src" "$IK_UP_DIR/$upid/$idx" || { echo "暂存失败: $base"; return 1; }
+    # 中途放弃的上传会留在 /tmp, 顺手清掉半小时前的
+    find "$IK_UP_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +30 -exec rm -rf {} \; 2>/dev/null
+    return 0
+}
+
+# 把暂存的分片按序号拼回一个 zip; 传了 size 还要核对字节数
+ikg_upload_assemble()
+{
+    local base="$1" upid="$2" want="${3:-}" d f dst n=0 got
+    case "$upid" in
+        ''|*[!0-9A-Za-z_.-]*) echo "upid 不合法"; return 1 ;;
+    esac
+    d="$IK_UP_DIR/$upid"
+    [ -d "$d" ] || { echo "找不到分片暂存: $upid"; return 1; }
+    dst="$IK_IMPORT_DIR/$base"
+    : > "$dst" || { echo "无法写入 $dst"; return 1; }
+    for f in $(ls "$d" 2>/dev/null | sort -n); do
+        cat "$d/$f" >> "$dst" || { echo "合并分片失败: $f"; rm -f "$dst"; return 1; }
+        n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || { echo "分片为空: $upid"; rm -f "$dst"; return 1; }
+    got="$(wc -c < "$dst" 2>/dev/null | tr -d ' ')"
+    if [ -n "$want" ] && [ "$got" != "$want" ]; then
+        echo "合并后大小不符(期望 $want, 实际 ${got:-0})"
+        rm -f "$dst"
+        return 1
+    fi
+    rm -rf "$d"
+    echo "已合并 $n 个分片 -> $base ($got 字节)"
+    return 0
+}
+
+# 后台安装: 立刻返回, 过程写 $IK_INST_LOG, 结果写 $IK_INST_STATE, 页面轮询 iplog
+ikg_install_bg()
+{
+    local src="$1" base="$2" arch="$3" started
+    started="$(date +%s)"
+    : > "$IK_INST_LOG" 2>/dev/null
+    {
+        echo "state=running"
+        echo "name=$base"
+        echo "started=$started"
+        echo "finished="
+        echo "rc="
+    } > "$IK_INST_STATE" 2>/dev/null
+    (
+        trap '' HUP
+        local rc=0
+        echo "[$(date '+%H:%M:%S')] 归档插件包: $base"
+        cp -f "$src" "$arch/$base" 2>/dev/null || echo "[$(date '+%H:%M:%S')] 归档失败(继续安装)"
+        echo "[$(date '+%H:%M:%S')] 解压并布置运行环境(大包需要一会儿)"
+        "$IK_IKPLUGIN" install "$src" 2>&1
+        rc=$?
+        rm -f "$src" 2>/dev/null
+        if [ "$rc" = "0" ]; then
+            echo "[$(date '+%H:%M:%S')] 安装完成"
+        else
+            echo "[$(date '+%H:%M:%S')] 安装失败 (rc=$rc)"
+        fi
+        {
+            echo "state=$([ "$rc" = "0" ] && echo done || echo failed)"
+            echo "name=$base"
+            echo "started=$started"
+            echo "finished=$(date +%s)"
+            echo "rc=$rc"
+        } > "$IK_INST_STATE" 2>/dev/null
+    ) >> "$IK_INST_LOG" 2>&1 &
+}
+
+# 安装进度: 页面在安装期间轮询 show TYPE=iplog 拿后台任务的日志与结果。
+# 只能挂成 show 的 TYPE —— func_api.sh 只在 action=show 时把输出塞进 Data,
+# 其它 action 走 Exec_Return, stdout 会被整段丢掉(页面拿不到)。
+__show_iplog()
+{
+    local iplog st name started finished rc now el log
+    st="$(sed -n 's/^state=//p' "$IK_INST_STATE" 2>/dev/null | head -n1)"
+    name="$(sed -n 's/^name=//p' "$IK_INST_STATE" 2>/dev/null | head -n1)"
+    started="$(sed -n 's/^started=//p' "$IK_INST_STATE" 2>/dev/null | head -n1)"
+    finished="$(sed -n 's/^finished=//p' "$IK_INST_STATE" 2>/dev/null | head -n1)"
+    rc="$(sed -n 's/^rc=//p' "$IK_INST_STATE" 2>/dev/null | head -n1)"
+    now="$(date +%s)"
+    case "$started" in ''|*[!0-9]*) started=0 ;; esac
+    case "$finished" in ''|*[!0-9]*) finished=0 ;; esac
+    case "$rc" in ''|*[!0-9]*) rc=-1 ;; esac
+    if [ "$started" -gt 0 ]; then
+        el=$(( (finished > 0 ? finished : now) - started ))
+        [ "$el" -ge 0 ] || el=0
+    else
+        el=0
+    fi
+    log="$(tail -n 40 "$IK_INST_LOG" 2>/dev/null)"
+    iplog="$(printf '{"state":%s,"name":%s,"elapsed":%s,"rc":%s,"log":%s}' \
+        "$(ikg_text "${st:-idle}")" "$(ikg_text "$name")" "$el" "$rc" "$(ikg_text "$log")")"
+    json_append __json_result__ iplog:json
 }
 
 # 系统盘(/etc/mnt)扩容: 这里只写"目标大小"请求, 真正的改盘由开机脚本

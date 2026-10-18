@@ -102,9 +102,11 @@
       <!-- ---------------------------------------------------- 插件管理 -->
       <el-tab-pane label="插件管理" name="plugin">
         <p class="ik-tip" style="margin-bottom:10px">
-          插件包（<code class="ik-code">zip</code>）会上传到设备并解压安装到
+          插件包（<code class="ik-code">zip</code>）先传到设备的 <code class="ik-code">/tmp</code>，
+          再由 <code class="ik-code">ikplugin</code> 解压安装到
           <code class="ik-code">/etc/mnt/plugins/&lt;名称&gt;</code>；
           根分区每次重启还原，框架开机会自动重新铺开已安装插件。
+          大包按 32M 分片上传（设备的上传接口单文件只收 50M），页面上会显示进度与安装过程日志。
         </p>
 
         <el-card shadow="never" body-style="padding:12px 14px" style="margin-bottom:12px">
@@ -137,6 +139,21 @@
           <el-button @click="act('plugin', {op:'scan'})">扫描 /etc/mnt/plugins/*.zip</el-button>
           <el-button @click="act('plugin', {op:'list'})">列出插件（命令行）</el-button>
         </div>
+
+        <el-card v-if="upPhase !== 'idle'" shadow="never" body-style="padding:12px 14px" style="margin-bottom:12px">
+          <div class="ik-toolbar" style="margin-bottom:8px">
+            <b>{{ upTitle }}</b>
+            <span class="ik-mut" style="margin-left:8px">{{ upText }}</span>
+            <span style="flex:1 1 auto"></span>
+            <span class="ik-mut">{{ upElapsed }}</span>
+            <el-button size="small" plain v-if="upPhase === 'fail' || upPhase === 'done'"
+                       @click="upPhase = 'idle'">收起</el-button>
+          </div>
+          <el-progress :percentage="upPct" :stroke-width="14"
+                       :status="upStatus" :indeterminate="upPhase === 'install'"></el-progress>
+          <pre class="ik-pre" v-if="upLog"
+               style="margin-top:10px;max-height:240px;overflow:auto">{{ upLog }}</pre>
+        </el-card>
 
         <el-table :data="plugins" border size="small" style="width:100%">
           <el-table-column prop="name" label="名称" min-width="120"></el-table-column>
@@ -368,6 +385,8 @@ IKUI.mount('#app', {
       tiles: [], flags: {}, FLAGS: FLAGS, LOGS: LOGS,
       flagBusy: '', applying: false,
       plugins: [], pending: [], uploading: false,
+      upPhase: 'idle', upPct: 0, upStatus: '', upTitle: '', upText: '',
+      upLog: '', upElapsed: '', upTimer: null, upPoll: null,
       DISK: {}, expandSize: '', expanding: false, eMsg: '', eTone: 'ik-mut',
       logs: {}, checkText: '', checking: false,
       ssh: {},
@@ -561,42 +580,142 @@ IKUI.mount('#app', {
     },
 
     /* ---------------------------------------------------------- 插件上传/安装 */
-    /* 先 POST /Action/upload 落盘到 /tmp/iktmp/import/, 再调 ikguard plugin op=install。
-       iKuai 上传接口存盘时取的是 multipart 的"字段名"而不是 filename
-       (getUploadHead(...).name), 所以字段名必须写成原始文件名, 否则会存成 "file"。 */
+    /* 上传走设备原生 /Action/upload(落 /tmp/iktmp/import/<字段名>)。它单文件只收 50M,
+       而且**每次成功都会 rm -f import/*** —— 所以按 32M 切片, 每片落盘后立刻让后端搬到
+       /tmp/iktmp/plugin-upload/<upid>/<序号>, 最后合并成一个 zip 交给 ikplugin 安装。
+       安装本身在后台跑(op=install async=1), 页面轮询 iplog 拿日志和结果。
+       字段名必须是文件名: 设备按 multipart 的字段名存盘, 不是 filename=。 */
+    fmtB: function (n) {
+      n = Number(n) || 0;
+      if (n >= 1048576) { return (n / 1048576).toFixed(1) + ' MB'; }
+      if (n >= 1024) { return (n / 1024).toFixed(0) + ' KB'; }
+      return n + ' B';
+    },
+    upReset: function () {
+      clearInterval(this.upTimer); this.upTimer = null;
+      clearInterval(this.upPoll); this.upPoll = null;
+      this.upPhase = 'idle'; this.upPct = 0; this.upStatus = '';
+      this.upTitle = ''; this.upText = ''; this.upLog = ''; this.upElapsed = '';
+    },
+    upClock: function (t0) {
+      var self = this;
+      clearInterval(this.upTimer);
+      this.upTimer = setInterval(function () {
+        var s = Math.round((Date.now() - t0) / 1000);
+        self.upElapsed = '已用 ' + (s >= 60 ? (Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒') : (s + ' 秒'));
+      }, 500);
+    },
     doUpload: function (opt) {
       var self = this;
       var f = opt.file;
-      this.uploading = true;
       var done = opt.onSuccess || function () {};
       var fail = opt.onError || function () {};
       if (!/\.zip$/i.test(f.name)) {
         IKUI.toast('只支持 .zip 插件包', 'warning');
-        this.uploading = false;
         fail(new Error('非 zip 包'));
         return;
       }
-      this.msg = '正在上传 ' + f.name + ' …';
-      var fd = new FormData();
-      fd.append(f.name, f, f.name);
-      fetch('/Action/upload', { method: 'POST', body: fd })
-        .then(function (r) { return r.json(); })
-        .then(function (j) {
-          if (j.Result !== 10000) { throw new Error(j.ErrMsg || ('上传失败 ' + j.Result)); }
-          return self.ik('plugin', { op: 'install', name: f.name });
-        })
-        .then(function () {
-          IKUI.toast('安装完成：' + f.name, 'success');
-          self.msg = '';
-          self.load();
-          done();
-        })
-        .catch(function (e) {
-          IKUI.toast('安装失败: ' + e.message, 'error');
-          self.msg = '';
-          fail(e);
-        })
-        .then(function () { self.uploading = false; });
+      this.upReset();
+      this.uploading = true;
+      this.upPhase = 'upload';
+      this.upTitle = '上传 ' + f.name;
+      this.upPct = 0;
+      var t0 = Date.now();
+      this.upClock(t0);
+
+      var CHUNK = 32 * 1024 * 1024;
+      var total = f.size;
+      var parts = Math.max(1, Math.ceil(total / CHUNK));
+      var upid = 'u' + t0.toString(36) + Math.random().toString(36).slice(2, 8);
+      var sent = 0, tMark = Date.now(), nMark = 0;
+
+      var sendOne = function (i) {
+        return new Promise(function (resolve, reject) {
+          var blob = f.slice(i * CHUNK, Math.min(total, (i + 1) * CHUNK));
+          var part = f.name + '.part' + i;
+          var fd = new FormData();
+          fd.append(part, blob, part);
+          var xhr = new XMLHttpRequest();
+          xhr.open('POST', '/Action/upload', true);
+          xhr.upload.onprogress = function (e) {
+            if (!e.lengthComputable) { return; }
+            var now = Date.now(), got = sent + e.loaded;
+            var sp = (got - nMark) / Math.max(0.2, (now - tMark) / 1000);
+            if (now - tMark > 1200) { nMark = got; tMark = now; }
+            self.upPct = Math.min(99, Math.floor(got * 100 / total));
+            self.upText = (i + 1) + '/' + parts + ' 片 · ' + self.fmtB(got) + ' / ' + self.fmtB(total) +
+                          ' · ' + self.fmtB(sp) + '/s';
+          };
+          xhr.onload = function () {
+            var j = null;
+            try { j = JSON.parse(xhr.responseText); } catch (e) {}
+            if (!j || j.Result !== 10000) {
+              reject(new Error('上传失败(HTTP ' + xhr.status + ')' + (j && j.ErrMsg ? ': ' + j.ErrMsg : '')));
+              return;
+            }
+            /* 必须立刻搬走: 下一次上传会清空 import 目录 */
+            self.ik('plugin', { op: 'stage', name: part, upid: upid, idx: i })
+              .then(function () { sent += blob.size; resolve(); })
+              .catch(function (e) { reject(new Error('暂存第 ' + i + ' 片失败: ' + e.message)); });
+          };
+          xhr.onerror = function () { reject(new Error('上传中断(网络错误)')); };
+          xhr.send(fd);
+        });
+      };
+
+      var chain = Promise.resolve();
+      for (var i = 0; i < parts; i++) { chain = chain.then(sendOne.bind(null, i)); }
+
+      chain.then(function () {
+        self.upPct = 100;
+        self.upPhase = 'install';
+        self.upTitle = '安装 ' + f.name;
+        self.upText = '合并 ' + parts + ' 个分片并安装…';
+        self.upLog = '';
+        return self.ik('plugin', { op: 'install', name: f.name, upid: upid, size: total, async: 1 });
+      }).then(function () {
+        self.pollInstall(f, done, fail);
+      }).catch(function (e) {
+        self.upPhase = 'fail';
+        self.upStatus = 'exception';
+        self.upText = e.message;
+        self.uploading = false;
+        IKUI.toast('上传失败: ' + e.message, 'error');
+        fail(e);
+      });
+    },
+    pollInstall: function (f, done, fail) {
+      var self = this;
+      clearInterval(this.upPoll);
+      this.upPoll = setInterval(function () {
+        self.ik('show', { TYPE: 'iplog' }).then(function (r) {
+          var d = (r && r.iplog) || null;
+          if (!d || !d.state) { return; }
+          self.upLog = d.log || '';
+          if (d.state === 'done') {
+            clearInterval(self.upPoll); self.upPoll = null;
+            clearInterval(self.upTimer); self.upTimer = null;
+            self.upPhase = 'done'; self.upStatus = 'success'; self.upPct = 100;
+            self.upTitle = '安装完成';
+            self.upText = f.name + ' · 用时 ' + d.elapsed + ' 秒';
+            self.uploading = false;
+            IKUI.toast('安装完成：' + f.name, 'success');
+            self.load();
+            done();
+          } else if (d.state === 'failed') {
+            clearInterval(self.upPoll); self.upPoll = null;
+            clearInterval(self.upTimer); self.upTimer = null;
+            self.upPhase = 'fail'; self.upStatus = 'exception';
+            self.upTitle = '安装失败';
+            self.upText = f.name + ' · rc=' + d.rc + ' · 用时 ' + d.elapsed + ' 秒';
+            self.uploading = false;
+            IKUI.toast('安装失败：' + f.name, 'error');
+            fail(new Error('安装失败'));
+          } else {
+            self.upText = '安装中（后台 ikplugin，日志实时刷新）';
+          }
+        }).catch(function () { /* 单次轮询失败不处理, 下一轮再试 */ });
+      }, 1000);
     },
 
     /* ---------------------------------------------------------- 扩容 */

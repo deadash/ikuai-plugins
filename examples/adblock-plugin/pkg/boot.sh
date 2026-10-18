@@ -7,7 +7,7 @@
 #   1) 起 ikdnsx sinkhole 实例   2) 装 LAN DNS 劫持规则   3) 拉起守护进程
 #
 # 注意: 开机这一刻 LAN 接口可能还没建好, 那时 iptables 会加不上规则;
-#       守护进程(每 20s 一次幂等校准)会在接口就绪后补上, 所以这里失败不影响开机。
+#       守护进程(每 30 秒一轮幂等校准)会在接口就绪后补上, 所以这里失败不影响开机。
 
 ROOT="${PLUGIN_DIR:-/etc/mnt/plugins/ikadblock}"
 B="$ROOT/bin/ikadblock"
@@ -24,9 +24,16 @@ if [ "${enabled:-0}" != "1" ]; then
     exit 0
 fi
 
+# 上次已经因为反复启动失败(实例被 OOM 杀等)被熔断停用: 开机不再自动拉起,
+# 否则又会进入"起不来 -> 再拉起"的死循环。要恢复请在插件页手动重新开启。
+if [ "$(sed -n 's/^tripped=//p' "$ROOT/data/state" 2>/dev/null | head -n1)" = "1" ]; then
+    echo "$(date '+%F %T') [boot] 上次已熔断停用($(sed -n 's/^fail_reason=//p' "$ROOT/data/state" 2>/dev/null | head -n1)), 本次开机不自动启动; 需要时请在插件页重新开启" >> "$LOG"
+    exit 0
+fi
+
 "$B" apply >> "$LOG" 2>&1
 if [ "$(iptables -t nat -S PREROUTING 2>/dev/null | grep -c -- '-j IKADB')" = "0" ]; then
-    echo "$(date '+%F %T') [boot] LAN 接口尚未就绪, 劫持规则由守护进程(前 2 分钟每 5 秒)补齐" >> "$LOG"
+    echo "$(date '+%F %T') [boot] LAN 接口尚未就绪, 劫持规则由守护进程(每 30 秒一轮)补齐" >> "$LOG"
 fi
 echo "$(date '+%F %T') [boot] 状态: $("$B" status 2>/dev/null)" >> "$LOG"
 exit 0
